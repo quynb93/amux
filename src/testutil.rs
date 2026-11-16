@@ -56,6 +56,7 @@ pub fn spec(id: &str, shared_home: &Path) -> ProviderSpec {
         token_env: None,
         token_hint: None,
         conflicting_env: vec![],
+        waiting_patterns: vec![],
         base_url_env: None,
         privacy_env: None,
         sessions: None,

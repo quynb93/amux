@@ -7,7 +7,9 @@
 //!   sock         the host's Unix socket, present while the run is alive
 
 pub mod attach;
+pub mod detect;
 pub mod host;
+pub mod notify;
 
 use crate::store::{read_json, write_json};
 use crate::{fsx, paths, time};
@@ -44,6 +46,20 @@ pub struct Run {
     /// Why the CLI could not be started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Prompt text that means the CLI is waiting for you (from the provider spec).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_patterns: Vec<String>,
+    /// Set by the host while the CLI is waiting for you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Waiting {
+    /// The prompt text or notification message that showed it.
+    pub reason: String,
+    pub since: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

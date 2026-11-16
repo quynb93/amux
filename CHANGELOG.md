@@ -4,6 +4,15 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- `amux ps` shows `waiting` when a run's CLI is asking you something, such as a permission prompt. Each provider's prompt text is set with `waitingPatterns`. Bells and terminal notification sequences count as well.
+- Desktop notifications when a run starts waiting or exits while no terminal is attached. Turn them off with `"notify": false` in `config.json`, or run your own command with `"notifyCommand"`.
+
+### Fixed
+
+- A Claude Code launched by amux from inside another Claude Code session no longer inherits that session's markers (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, the messaging socket and token, and others). It runs as its own session, with its transcript saved.
+
 ## [0.3.0] - 2026-11-16
 
 Run several agents at once, across accounts and CLIs, each in its own terminal and optionally its own git worktree. macOS and Linux.

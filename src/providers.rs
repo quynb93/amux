@@ -46,9 +46,13 @@ pub struct ProviderSpec {
     #[serde(default)]
     pub token_hint: Option<String>,
     /// Inherited env vars dropped at launch, besides homeEnv and tokenEnv, because they
-    /// would point the CLI at another account.
+    /// would point the CLI at another account or tie it to another session.
     #[serde(default)]
     pub conflicting_env: Vec<String>,
+    /// Text the CLI shows when it waits for you, e.g. a permission prompt. Background
+    /// runs match it (case-insensitively) to show "waiting" and send a notification.
+    #[serde(default)]
+    pub waiting_patterns: Vec<String>,
     /// Env var that points the CLI at another API endpoint (a gateway or relay). It only
     /// redirects where requests go; it never changes organization-managed policy.
     pub base_url_env: Option<String>,
@@ -101,7 +105,16 @@ pub fn builtin() -> Vec<Value> {
             "promptArgs": ["{prompt}"],
             "tokenEnv": "CLAUDE_CODE_OAUTH_TOKEN",
             "tokenHint": "create one with `claude setup-token`",
-            "conflictingEnv": ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"],
+            "conflictingEnv": [
+                "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN",
+                // Set by a running Claude Code session for its own child processes. A CLI
+                // amux starts is a separate session, not a child of the one it ran from.
+                "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID",
+                "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED",
+                "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"
+            ],
+            // Permission and confirmation dialogs.
+            "waitingPatterns": ["Do you want to", "Enter to confirm"],
             "baseUrlEnv": "ANTHROPIC_BASE_URL",
             // Documented user opt-outs. CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC also turns
             // off auto-update and /bug. Managed (enterprise) settings still take precedence.
@@ -127,6 +140,7 @@ pub fn builtin() -> Vec<Value> {
             "promptArgs": ["{prompt}"],
             "tokenEnv": "OPENAI_API_KEY",
             "conflictingEnv": ["CODEX_HOME"],
+            "waitingPatterns": ["Would you like to run", "Would you like to make the following edits", "Yes, proceed"],
             "baseUrlEnv": "OPENAI_BASE_URL",
             "sessions": "codex"
         }),
@@ -144,6 +158,7 @@ pub fn builtin() -> Vec<Value> {
             "promptArgs": ["-i", "{prompt}"],
             "tokenEnv": "GEMINI_API_KEY",
             "conflictingEnv": ["GEMINI_CLI_HOME"],
+            "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"],
             "sessions": "gemini"
         }),
     ]
