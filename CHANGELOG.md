@@ -40,6 +40,9 @@ Many agents on one machine without overloading it, steered from a phone, another
 
 ### Fixed
 
+- A client that connected while the CLI's output was cut mid escape sequence, for example between `ESC[1` and `A`, could draw the screen a line off. This affected `amux attach`, `peek`, `explain` and the UI's preview. The host now sends the cut-off start along with the screen snapshot.
+- A run's own report (OSC 7501) is saved before the "waiting" state it causes, so `ps` never shows waiting without its reason.
+
 - The run host saves a run's final screen before recording that it ended, so a preview or `amux peek` never catches it in between and replays the log instead.
 - A new client's snapshot of a run now includes the window title the CLI set, so the task title on `amux ui`'s preview border no longer goes missing.
 - `amux peek` and `amux explain` wait up to 2 seconds for a busy host's first output, instead of 150 ms, before giving up with an empty screen.
