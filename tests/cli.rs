@@ -1618,7 +1618,14 @@ fn finds_overlapping_runs_and_lands_them_one_at_a_time() {
     );
 
     // a and c land, c rebased onto a; b is skipped until it commits, then conflicts.
-    let l = s.amux(&["land", "a", "c", "--no-test"]);
+    // Landing rebases, which writes commits as someone (CI machines have no git identity).
+    let who = [
+        ("GIT_AUTHOR_NAME", "t"),
+        ("GIT_AUTHOR_EMAIL", "t@example.com"),
+        ("GIT_COMMITTER_NAME", "t"),
+        ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ];
+    let l = s.amux_with(&["land", "a", "c", "--no-test"], &who, None);
     assert_eq!(l.code, 0, "{}{}", l.out, l.err);
     assert!(l.out.contains("landed"), "{}", l.out);
     assert_eq!(
@@ -1629,11 +1636,11 @@ fn finds_overlapping_runs_and_lands_them_one_at_a_time() {
         fs::read_to_string(repo.join("g.txt")).unwrap(),
         "g from c\n"
     );
-    let b = s.amux(&["land", "b", "--no-test"]);
+    let b = s.amux_with(&["land", "b", "--no-test"], &who, None);
     assert_eq!(b.code, 1);
     assert!(b.out.contains("uncommitted"), "{}", b.out);
     git(&wt("b"), &["commit", "-qam", "b"]);
-    let b = s.amux(&["land", "b", "--no-test", "--json"]);
+    let b = s.amux_with(&["land", "b", "--no-test", "--json"], &who, None);
     let v: serde_json::Value = serde_json::from_str(&b.out).unwrap();
     assert_eq!(v[0]["outcome"], "conflict");
     assert!(v[0]["detail"].as_str().unwrap().contains("f.txt"));

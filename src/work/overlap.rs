@@ -324,7 +324,21 @@ fn land_one(run: &Run, o: &LandOpts, progress: &mut impl FnMut(&str)) -> Result<
     progress(&format!("{}: rebasing onto {target}…", run.id));
     if let Err(e) = git(&dir, &["rebase", "--no-autostash", &target]) {
         let _ = git(&dir, &["rebase", "--abort"]);
-        return Ok(res("conflict", format!("rebase failed: {e}"), false));
+        let why = e.to_string();
+        // Rebasing writes commits, which needs to know who you are.
+        if why.contains("identity unknown") || why.contains("user.email") {
+            return Ok(res(
+                "failed",
+                "git doesn't know who you are; set user.name and user.email (git config --global)"
+                    .into(),
+                false,
+            ));
+        }
+        let last = why
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .unwrap_or("rebase failed");
+        return Ok(res("conflict", format!("rebase failed: {last}"), false));
     }
     if o.test {
         progress(&format!("{}: testing (waits for a test slot)…", run.id));
