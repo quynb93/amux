@@ -7,6 +7,8 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 ### Added
 
 - `amux ui`: one screen for all your runs. A list with live state (working, waiting, idle, done), a live preview of the selected run's screen, Enter to attach in place (Ctrl-] comes back to the list), Tab to jump to the next run that needs you, and keys to start (`n`), stop (`s`) and remove (`d`) runs. Quitting the UI leaves every run going.
+- A command palette in `amux ui` (`/`): `/new`, `/attach`, `/stop`, `/kill`, `/rm`, `/clean`, `/logs`, `/filter`, `/switch-account`, `/add-account`, `/accounts`, `/theme`, `/doctor`, `/help` and `/quit`. Arguments complete from your runs, accounts and themes, and each command shows its shortcut key. `/add-account` signs you in without leaving the UI.
+- Themes for `amux ui`: `default` (your terminal's colors), `dark`, `light` and `mono`. Pick one with `/theme` or in `config.json` (`ui.theme`), change single colors with `ui.colors`, or add your own in `~/.amux/themes/<name>.json`. `NO_COLOR` picks `mono`, and a light terminal background picks `light`.
 
 - Runs read the state a CLI reports about itself with OSC 7501 (the Program Status Protocol). Codex sends it, and Claude Code 2.1.295 and later sends it once asked, which the run host now does. `amux ps` and `amux ui` then show the CLI's own state: `waiting` with its message (such as "approve Write: a.rs"), `running`, `idle` when the turn is done, or `error`. This replaces guessing from prompt text and output timing for those CLIs. The state is saved in `run.json` as `status`.
 

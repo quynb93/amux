@@ -24,7 +24,7 @@ target/debug/amux ui
 **Left to do**, in order of value. Each is covered in [Next steps](#next-steps):
 
 1. ~~OSC 7501 program status in the host~~ **Done.** See Next steps.
-2. `/` search and state filters (`b`/`w`/`i`/`d`, after herdr's goto picker).
+2. ~~`/` search~~ **Done**, as the command palette plus `/filter`. Still to do: one-key state filters (`w`/`i`/`d`, after herdr's goto picker).
 3. A switch key while attached, so you can move to the next waiting run without going back to the list.
 4. Host-pushed state events, instead of polling `run.json` every 500 ms.
 5. Resume for `lost` runs after a reboot, and `amux gc` for stale worktrees and merged branches.
@@ -147,8 +147,25 @@ The spawn dialog (`ui/spawn.rs`) builds the same argument list you would type: `
 | s / S | Stop (SIGTERM) / kill (SIGKILL), with confirm |
 | d / D | Remove a finished run / kill and remove, with confirm |
 | PgUp PgDn, Esc | Scroll the preview back, and back to live |
+| / or : | Command palette (see below) |
+| Esc | Clear the filter, or return the preview to live |
 | ? | Help |
 | q, Ctrl-C | Quit (runs keep going) |
+
+### Command palette and themes
+
+The palette is how herdr's goto picker and Rex's command palette fit a single-list UI. `/` opens it at the top, where the eye already is.
+- Typing ranks commands fuzzily. Prefix beats substring, which beats letters in order, and a command's own name beats its aliases.
+- Each line shows what the command does and the single key that does the same, so the palette teaches the shortcuts.
+- After a space, the argument completes from runs (`/stop`, `/logs`), accounts (`/switch-account`, `/new`) or themes (`/theme`). Tab completes, and Enter runs. A command that needs an argument waits for one.
+- Commands that need the whole terminal, such as `/add-account` (it signs you in) and `/logs` (your pager), get it the same way attach does, and come back after.
+- `/accounts` and `/doctor` show their output over the list.
+
+Parsing and completion live in `ui/palette.rs` as plain functions and are unit tested.
+
+Themes (`ui/theme.rs`) work by role, not by color: text, muted, border, title, accent, key, selection, header, input, one role per run state, and success and error. A role is a git-style spec (`"#e8b65a bold"`, `"bold on blue"`). No drawing code names a color.
+
+The default theme uses only the terminal's 16 colors, plus bold and dim. That way it follows the user's own palette on light and dark terminals, and color only marks meaning: the accent and the states. `dark` and `light` are truecolor themes checked for contrast. `mono` is for `NO_COLOR`. `/theme name` switches live and saves the choice in `config.json` under `ui`, a key older amux versions keep untouched. `amux ui --dump --ansi --keys "/"` renders any screen in color without a terminal, which is how the themes were reviewed.
 
 There is no prefix key: the list has the keyboard, and the CLI has it only while attached. Ctrl-] is the same detach key as `amux attach`, so there is one thing to learn. herdr found that `ctrl+alt` chords are free in most terminals. We would use that family if we add keys that work while attached.
 

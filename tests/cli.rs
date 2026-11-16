@@ -506,13 +506,26 @@ fn ui_dump_shows_runs_their_state_and_a_live_preview() {
     // The preview is the run's screen, through a terminal emulator.
     assert!(out.contains("ARG hi"), "{out}");
     assert!(out.contains("Approve this? [y/n]"), "{out}");
-    assert!(out.contains("waiting: approve THIS?"), "{out}");
+    assert!(out.contains("◆ approve THIS?"), "{out}");
     // A finished run's preview comes from its log.
     let done = s
         .amux(&["ui", "--dump", "--size", "24x120", "--select", "qu"])
         .out;
     assert!(done.contains("ENV AMUX_RUN=quick"), "{done}");
 
+    // The command palette, completing a run name.
+    let pal = s
+        .amux(&["ui", "--dump", "--size", "24x120", "--keys", "/stop q"])
+        .out;
+    assert!(
+        pal.contains("Commands") && pal.contains("› /stop q"),
+        "{pal}"
+    );
+    assert!(pal.contains("quick"), "{pal}");
+    let pal = s
+        .amux(&["ui", "--dump", "--size", "24x120", "--keys", "/swi"])
+        .out;
+    assert!(pal.contains("/switch-account"), "{pal}");
     assert!(s.amux(&["ui", "--bogus"]).err.contains("Unknown option"));
     let tty = s.amux(&["ui"]);
     assert_eq!(tty.code, 1);
@@ -621,7 +634,7 @@ fn reads_the_state_a_cli_reports_with_osc_7501() {
     let ui = s
         .amux(&["ui", "--dump", "--size", "20x120", "--select", "st"])
         .out;
-    assert!(ui.contains("working: writing a.rs"), "{ui}");
+    assert!(ui.contains(" writing a.rs "), "{ui}");
     // The turn is done: idle, however recently it printed.
     stdin.write_all(b"n\n").unwrap();
     wait_ps(&s, "st", "idle");

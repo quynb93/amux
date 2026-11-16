@@ -203,6 +203,38 @@ amux rm --done           # remove finished runs
 
 Or see them all at once with **`amux ui`**: a list of runs with their state, and a live view of the selected run's screen. Press Enter to work in a run right there and Ctrl-] to come back to the list. Tab jumps to the next run that is waiting for you. `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it. `?` lists every key. Quitting the UI leaves the runs going.
 
+Press **`/`** for the command palette. Type part of a command and its argument completes from your runs, accounts or themes:
+
+| Command | What it does |
+|---|---|
+| `/new [account] [prompt]` | Start a run (`n`) |
+| `/attach`, `/stop`, `/kill`, `/rm` `[run]` | The same as Enter, `s`, `S`, `d`, on the selected run or the one you name |
+| `/clean` | Remove every finished run |
+| `/logs [run]` | Read a run's output in your pager |
+| `/filter [text]` | Show only runs whose name, account, branch or folder matches. Esc shows all again |
+| `/switch-account <provider@name>` | Make an account the default for its CLI and for new runs |
+| `/add-account <provider> <name> [--token]` | Add an account and sign in, right from the UI |
+| `/accounts`, `/doctor` | Show `amux account list` or `amux doctor` |
+| `/theme [name]` | List themes, or switch and save one |
+| `/help`, `/quit` | |
+
+**Themes.** There are four built in:
+- `default` uses your terminal's own colors, so it suits light and dark terminals.
+- `dark` and `light` are tuned for contrast on truecolor terminals.
+- `mono` uses no color, and is picked automatically when `NO_COLOR` is set.
+
+A light terminal background that reports itself (`COLORFGBG`, with truecolor) gets `light` automatically. Pick one with `/theme`, or in `~/.amux/config.json`. Change single colors there, or make your own theme in `~/.amux/themes/<name>.json`:
+
+```json
+{ "ui": { "theme": "dark", "colors": { "accent": "#ff9e64", "waiting": "#e0af68 bold" } } }
+```
+
+```json
+{ "extends": "dark", "colors": { "selection": "on #2d3149", "done": "green" } }
+```
+
+A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `default`…), plus `bold`, `dim`, `italic`, `underline` or `reverse`, and `on <color>` for the background. The roles are `text`, `muted`, `border`, `title`, `accent`, `key`, `selection`, `header`, `input`, `starting`, `working`, `waiting`, `idle`, `done`, `failed`, `lost`, `success` and `error`. `/theme` lists them too.
+
 - **STATE** is `waiting <time>` when the CLI is asking you something: a permission or confirmation prompt, a terminal bell, or a notification it sent to the terminal. Otherwise it is `running` while the CLI prints and `idle <time>` once it has been quiet for a few seconds. Typing into the run clears `waiting`.
 - **Self-reported state.** CLIs that report their own state with OSC 7501 (Codex, and Claude Code 2.1.295 and later) get exact states: `waiting` with the CLI's own message ("approve Write: a.rs"), `running`, `idle` once the turn is done, and `error`. amux answers Claude Code's request to report. For other CLIs, amux falls back to the prompt text in `waitingPatterns` and to output timing.
 - **Notifications.** When a run starts waiting, or exits, and no terminal is attached to it, amux shows a desktop notification (Notification Center on macOS, `notify-send` on Linux). Set `"notify": false` in `~/.amux/config.json` to turn them off, or `"notifyCommand": ["my-notifier"]` to run your own command. It gets `AMUX_RUN`, `AMUX_EVENT` (`waiting` or `exited`), `AMUX_TITLE` and `AMUX_MESSAGE` in its environment.
