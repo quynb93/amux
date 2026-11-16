@@ -73,12 +73,16 @@ pub struct ProgramStatus {
     pub since: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Waiting {
     /// The prompt text or notification message that showed it.
     pub reason: String,
     pub since: i64,
+    /// What showed it: report (OSC 7501), pattern, bell or notification. Absent from
+    /// runs started by amux 0.4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

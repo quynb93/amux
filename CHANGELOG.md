@@ -6,6 +6,8 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ### Added
 
+- `amux explain <run> [--json]`: why a run shows its state. It names the signal that decided: the CLI's own OSC 7501 report, a prompt from `waitingPatterns`, a bell, a notification, or output timing. It also says what amux watches for in that run and shows the bottom of its screen. In `amux ui`, `e` shows the same. Hosts now record what showed a wait, as `waiting.source` in `run.json`.
+- State filters in `amux ui`: `f` steps through waiting, working, idle and ended runs, `/show <state>` picks one, and Esc shows all again.
 - `amux ui`: one screen for all your runs. A list with live state (working, waiting, idle, done), a live preview of the selected run's screen, Enter to attach in place (Ctrl-] comes back to the list), Tab to jump to the next run that needs you, and keys to start (`n`), stop (`s`) and remove (`d`) runs. Quitting the UI leaves every run going.
 - A command palette in `amux ui` (`/`): `/new`, `/attach`, `/stop`, `/kill`, `/rm`, `/clean`, `/logs`, `/filter`, `/switch-account`, `/add-account`, `/accounts`, `/theme`, `/doctor`, `/help` and `/quit`. Arguments complete from your runs, accounts and themes, and each command shows its shortcut key. `/add-account` signs you in without leaving the UI.
 - Themes for `amux ui`: `default` (your terminal's colors), `dark`, `light` and `mono`. Pick one with `/theme` or in `config.json` (`ui.theme`), change single colors with `ui.colors`, or add your own in `~/.amux/themes/<name>.json`. `NO_COLOR` picks `mono`, and a light terminal background picks `light`.

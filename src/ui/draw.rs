@@ -5,7 +5,7 @@
 use super::palette::{self, Item};
 use super::preview::screen_lines;
 use super::spawn::{Field, SpawnForm};
-use super::status::Kind;
+use super::status::{Kind, Show};
 use super::theme::Theme;
 use super::{App, Mode, OutputView, PaletteState};
 use crate::paths::tildify;
@@ -101,10 +101,10 @@ impl App {
         let mut spans = vec![span(" amux ", t.header), span("  ", t.muted)];
         if self.rows.is_empty() {
             spans.push(span(
-                if self.filter.is_empty() {
-                    "no runs"
-                } else {
+                if self.filtered() {
                     "no matches"
+                } else {
+                    "no runs"
                 },
                 t.muted,
             ));
@@ -132,9 +132,14 @@ impl App {
                 spans.push(span(format!("{n} {name}"), kind_style(t, k)));
             }
         }
+        if self.show != Show::All {
+            spans.push(span(format!("   showing {}", self.show.name()), t.accent));
+        }
         if !self.filter.is_empty() {
             spans.push(span(format!("   filter “{}”", self.filter), t.accent));
-            spans.push(span("  Esc clears", t.muted));
+        }
+        if self.filtered() {
+            spans.push(span("  Esc shows all", t.muted));
         }
         if self.busy > 0 {
             spans.push(span(format!("   {}", self.spinner()), t.accent));
@@ -155,14 +160,19 @@ impl App {
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme.clone();
-        let count = if self.filter.is_empty() {
+        let count = if !self.filtered() {
             format!(" Runs {} ", self.rows.len())
         } else {
             format!(" Runs {} of {} ", self.rows.len(), self.total)
         };
         let block = panel(&t, t.border).title(span(count, t.title));
         if self.rows.is_empty() {
-            let lines = if self.filter.is_empty() {
+            let nothing = match (self.show, self.filter.is_empty()) {
+                (Show::All, _) => format!(" Nothing matches “{}”.", self.filter),
+                (s, true) => format!(" No {} runs.", s.name()),
+                (s, false) => format!(" No {} runs match “{}”.", s.name(), self.filter),
+            };
+            let lines = if !self.filtered() {
                 vec![
                     Line::from(""),
                     Line::from(span(" No runs yet.", t.title)),
@@ -174,7 +184,7 @@ impl App {
             } else {
                 vec![
                     Line::from(""),
-                    Line::from(span(format!(" Nothing matches “{}”.", self.filter), t.text)),
+                    Line::from(span(nothing, t.text)),
                     Line::from(hints(&t, &[(" Esc", "show all runs")])),
                 ]
             };
@@ -377,6 +387,8 @@ impl App {
                     ("n", "new"),
                     ("/", "commands"),
                     ("⇥", "next waiting"),
+                    ("f", "filter"),
+                    ("e", "why"),
                     ("s", "stop"),
                     ("d", "remove"),
                     ("PgUp", "scroll"),
@@ -667,6 +679,8 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("n", "start a new run"),
     ("s  S", "stop, or kill"),
     ("d  D", "remove a finished run, or kill and remove"),
+    ("f", "show waiting, working, idle or ended runs"),
+    ("e", "why a run shows its state"),
     ("PgUp PgDn", "scroll the preview; Esc back to live"),
     ("/", "command palette"),
     ("q", "quit; runs keep going"),
@@ -685,10 +699,10 @@ fn draw_help(f: &mut Frame, area: Rect, t: &Theme) {
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         span(format!("  {:<15}", "Commands"), t.key),
-        span("/new /logs /filter /switch-account", t.text),
+        span("/new /logs /filter /show /explain", t.text),
     ]));
     lines.push(Line::from(span(
-        format!("  {:<15}/add-account /accounts /theme /doctor", ""),
+        format!("  {:<15}/switch-account /add-account /accounts /theme", ""),
         t.text,
     )));
     lines.push(Line::from(""));

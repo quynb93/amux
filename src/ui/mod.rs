@@ -28,7 +28,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 use spawn::{Field, SpawnForm};
-use status::{classify, last_output, next_attention, Kind};
+use status::{classify, last_output, next_attention, Kind, Show};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -91,6 +91,13 @@ pub fn ui_cmd(argv: &[String]) -> Result<i32> {
             };
             app.key(KeyEvent::new(code, KeyModifiers::NONE));
         }
+        // Let commands those keys started (/accounts, e…) finish, to show their result.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.busy > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            app.poll_done();
+        }
+        app.show_deferred();
         // One frame as text (with --ansi, in color), for scripts, tests and screenshots.
         for line in app.dump(size.0, size.1, ansi) {
             println!("{line}");
@@ -219,6 +226,8 @@ struct App {
     total: usize,
     /// Shows only runs whose name, account, branch or folder contains this.
     filter: String,
+    /// Shows only runs in this state (`f`, /show).
+    show: Show,
     /// The account new runs start with, from /switch-account.
     account: Option<String>,
     selected: Option<String>,
@@ -250,6 +259,7 @@ impl App {
             rows: vec![],
             total: 0,
             filter: String::new(),
+            show: Show::All,
             account: None,
             selected: None,
             list: ListState::default(),
@@ -275,6 +285,7 @@ impl App {
         let all = runs::list();
         self.total = all.len();
         let filter = self.filter.to_lowercase();
+        let show = self.show;
         self.rows = all
             .into_iter()
             .filter(|run| filter.is_empty() || matches_filter(run, &filter))
@@ -288,6 +299,7 @@ impl App {
                 );
                 Row { run, kind, label }
             })
+            .filter(|r| show.matches(r.kind))
             .collect();
         let first = self.last_reload.is_none();
         for r in &self.rows {
@@ -376,9 +388,13 @@ impl App {
         self.busy += 1;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let mut d = run_amux(&argv);
-            d.output = Some((title, std::mem::take(&mut d.message)));
-            let _ = tx.send(d);
+            let (ok, text) = capture_amux(&argv);
+            let _ = tx.send(Done {
+                ok,
+                message: String::new(),
+                started: None,
+                output: Some((title, text)),
+            });
         });
     }
 
@@ -636,8 +652,18 @@ impl App {
                 }
             }
             KeyCode::Char('/' | ':') => self.open_palette(),
-            KeyCode::Esc if self.scroll == 0 && !self.filter.is_empty() => {
+            KeyCode::Char('f') => {
+                self.show = self.show.next();
+                self.reload();
+            }
+            KeyCode::Char('e') => {
+                if let Some((id, _)) = cur {
+                    self.explain(id)
+                }
+            }
+            KeyCode::Esc if self.scroll == 0 && self.filtered() => {
                 self.filter.clear();
+                self.show = Show::All;
                 self.reload();
             }
             KeyCode::PageUp | KeyCode::PageDown | KeyCode::Esc => {
@@ -656,6 +682,24 @@ impl App {
             KeyCode::Char('?') => self.mode = Mode::Help,
             _ => {}
         }
+    }
+
+    /// Whether the list hides runs (a text or state filter).
+    fn filtered(&self) -> bool {
+        !self.filter.is_empty() || self.show != Show::All
+    }
+
+    fn explain(&mut self, id: String) {
+        let label = self
+            .rows
+            .iter()
+            .find(|r| r.run.id == id)
+            .map(|r| r.label.clone())
+            .unwrap_or_default();
+        self.background_output(
+            vec!["explain".into(), id.clone()],
+            format!("Why {id} is {label}"),
+        );
     }
 
     fn attach_run(&mut self, id: String, kind: Kind) {
@@ -922,6 +966,27 @@ impl App {
                 },
                 Err(e) => self.say(e, true),
             },
+            Action::Explain(r) => {
+                if let Some((id, _)) = self.resolve_run(r) {
+                    self.explain(id)
+                }
+            }
+            Action::Show(state) => {
+                let next = match state {
+                    None => Some(self.show.next()),
+                    Some(s) => Show::parse(&s),
+                };
+                match next {
+                    Some(s) => {
+                        self.show = s;
+                        self.reload();
+                    }
+                    None => self.say(
+                        "Show which? waiting, working, idle, ended or all.".to_string(),
+                        true,
+                    ),
+                }
+            }
             Action::Help => self.mode = Mode::Help,
             Action::Quit => self.quit = true,
         }
@@ -1115,6 +1180,26 @@ fn run_amux(argv: &[String]) -> Done {
             started: None,
             output: None,
         },
+    }
+}
+
+/// Runs this amux binary with `argv` and returns everything it printed (stdout, then
+/// stderr), for showing whole.
+fn capture_amux(argv: &[String]) -> (bool, String) {
+    let out = std::env::current_exe().and_then(|exe| {
+        Command::new(exe)
+            .args(argv)
+            .env("AMUX_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .output()
+    });
+    match out {
+        Ok(o) => {
+            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&o.stderr));
+            (o.status.success(), text.trim_end().to_string())
+        }
+        Err(e) => (false, format!("Could not run amux: {e}")),
     }
 }
 
