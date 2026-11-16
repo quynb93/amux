@@ -5,7 +5,10 @@
 
 use super::detect::{Change, Detector};
 use super::notify::Notifier;
-use super::{load, parse_size, read_frame, run_dir, save, Run, Waiting, INPUT, RESIZE, WATCH};
+use super::program::{Report, PROBE_REPLY};
+use super::{
+    load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, WATCH,
+};
 use crate::{fsx, time};
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
@@ -121,6 +124,25 @@ impl Hub {
             .any(|c| !c.watching.load(Ordering::Relaxed))
     }
 
+    /// Records the CLI's own report of its state (OSC 7501).
+    fn set_status(&mut self, record: Option<Option<Report>>) {
+        let Some(record) = record else {
+            return;
+        };
+        let now = time::now_ms();
+        let old = self.run.status.take();
+        self.run.status = record.map(|r| ProgramStatus {
+            since: match &old {
+                Some(o) if o.state == r.state => o.since,
+                _ => now,
+            },
+            state: r.state,
+            kind: r.kind,
+            message: r.message,
+        });
+        let _ = save(&self.run);
+    }
+
     fn title(&self) -> String {
         format!("amux: {} ({})", self.run.id, self.run.account)
     }
@@ -226,6 +248,8 @@ fn host(id: &str) -> Result<i32> {
     h.run.exit_code = Some(code);
     h.run.ended_at = Some(time::now_ms());
     h.run.waiting = None;
+    let record = h.detector.exited();
+    h.set_status(record);
     save(&h.run)?;
     let _ = fs::remove_file("sock");
     if !h.attached() {
@@ -293,6 +317,15 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
         let change = h.detector.feed(chunk);
         h.apply(change);
+        let record = h.detector.take_record();
+        h.set_status(record);
+        // Tell the CLI that this terminal understands OSC 7501, so it reports its state.
+        // Only live output gets here, never a replay, so each probe is answered once.
+        let probed = h.detector.take_probe();
+        drop(h);
+        if probed {
+            let _ = (&*master).write_all(PROBE_REPLY);
+        }
     }
 }
 

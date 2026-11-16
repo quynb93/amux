@@ -49,7 +49,7 @@ An entry whose `id` matches a built-in is merged into it, so you only list the f
 | `tokenEnv` | no | Variable that holds a token, used by accounts added with `--token`. |
 | `baseUrlEnv` | no | Variable that sets the API endpoint, used by `amux account baseurl`. |
 | `tokenHint` | no | Shown when amux asks for a token, e.g. how to create one. |
-| `waitingPatterns` | no | Text the CLI shows when it waits for you, such as a permission prompt. Matched case-insensitively against a background run's output to show `waiting` in `amux ps` and send a notification. |
+| `waitingPatterns` | no | Text the CLI shows when it waits for you, such as a permission prompt. Matched case-insensitively against a background run's output to show `waiting` in `amux ps` and send a notification. Ignored once the CLI reports its own state with OSC 7501, as Codex and Claude Code 2.1.295+ do. |
 | `conflictingEnv` | no | Variables removed from the environment at launch, so one inherited from your shell can't override the account. The home variable and `tokenEnv` are always removed. |
 | `privacyEnv` | no | Variables to set when an account has privacy mode on. Use only opt-outs that the CLI documents. |
 | `sessions` | no | Session file format: `"claude"`, `"codex"` or `"gemini"`. Leave this out if amux can't read this CLI's sessions; `amux sessions` then skips it. |

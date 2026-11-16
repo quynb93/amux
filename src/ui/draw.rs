@@ -194,7 +194,19 @@ impl App {
                     .unwrap_or_else(|| format!(" {label} · d removes it "));
                 Line::from(clip(&why, area.width.saturating_sub(4) as usize).dark_gray())
             }
-            _ => Line::from(" Enter attaches · Ctrl-] comes back ".dark_gray()),
+            _ => match run
+                .status
+                .as_ref()
+                .and_then(|s| Some((s, s.message.as_ref()?)))
+            {
+                // What the CLI says it is doing (OSC 7501), such as Claude's task summary.
+                Some((s, msg)) => Line::from(vec![
+                    format!(" {}: ", s.state).cyan(),
+                    clip(msg, area.width.saturating_sub(16) as usize).into(),
+                    " ".into(),
+                ]),
+                None => Line::from(" Enter attaches · Ctrl-] comes back ".dark_gray()),
+            },
         };
         let border = if kind == Kind::Attention {
             Style::new().yellow()

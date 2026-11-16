@@ -2,7 +2,7 @@
 //! and a short label. Built on the same signals as `amux ps`: `Run::state()`, the host's
 //! `Run.waiting`, and the age of `output.log`.
 
-use crate::runs::{Run, State, Waiting};
+use crate::runs::{ProgramStatus, Run, State, Waiting};
 use crate::time;
 
 /// Output newer than this means the CLI is working; quiet usually means it waits for you.
@@ -48,15 +48,28 @@ pub fn short_age(ms: i64) -> String {
 }
 
 /// Classifies a run from its state, whether its host saw the CLI ask you something
-/// (`Run.waiting`), and when it last printed something.
+/// (`Run.waiting`), what the CLI reports about itself (`Run.status`, OSC 7501), and when
+/// it last printed something.
 pub fn classify(
     state: &State,
     waiting: Option<&Waiting>,
+    status: Option<&ProgramStatus>,
     last_output: Option<i64>,
     now: i64,
 ) -> (Kind, String) {
     match state {
         State::Starting => (Kind::Starting, "starting".into()),
+        State::Running if waiting.is_none() && status.is_some() => {
+            let s = status.expect("checked above");
+            let age = short_age(now - s.since);
+            match s.state.as_str() {
+                "working" => (Kind::Working, "working".into()),
+                // An error stops the CLI until you step in, but it is still running.
+                "error" => (Kind::Attention, format!("error {age}")),
+                "blocked" => (Kind::Attention, format!("waiting {age}")),
+                _ => (Kind::Idle, format!("idle {age}")),
+            }
+        }
         State::Running => match (waiting, last_output) {
             (Some(w), _) => (
                 Kind::Attention,
@@ -93,7 +106,7 @@ mod tests {
     #[test]
     fn classifies_states() {
         let now = 100_000;
-        let c = |st: State, w: Option<&Waiting>, t: Option<i64>| classify(&st, w, t, now);
+        let c = |st: State, w: Option<&Waiting>, t: Option<i64>| classify(&st, w, None, t, now);
         assert_eq!(c(State::Starting, None, None).0, Kind::Starting);
         assert_eq!(
             c(State::Running, None, Some(now - 1_000)),
@@ -120,6 +133,42 @@ mod tests {
         assert_eq!(c(State::Failed, None, None).0, Kind::Failed);
         assert_eq!(c(State::Lost, None, None).0, Kind::Lost);
         assert!(Kind::Idle.is_live() && !Kind::Done.is_live());
+    }
+
+    #[test]
+    fn believes_what_the_cli_reports() {
+        let now = 100_000;
+        let st = |state: &str| ProgramStatus {
+            state: state.into(),
+            kind: None,
+            message: None,
+            since: now - 3_000,
+        };
+        let c = |s: &ProgramStatus, out: Option<i64>| {
+            classify(&State::Running, None, Some(s), out, now)
+        };
+        // Reported working wins over quiet output, and idle over fresh output.
+        assert_eq!(
+            c(&st("working"), Some(now - 60_000)),
+            (Kind::Working, "working".into())
+        );
+        assert_eq!(c(&st("idle"), Some(now)), (Kind::Idle, "idle 3s".into()));
+        assert_eq!(c(&st("done"), Some(now)), (Kind::Idle, "idle 3s".into()));
+        assert_eq!(c(&st("error"), None), (Kind::Attention, "error 3s".into()));
+        // Run.waiting, which the host sets from the same report, comes first.
+        let w = Waiting {
+            reason: "approve Bash".into(),
+            since: now - 5_000,
+        };
+        assert_eq!(
+            classify(&State::Running, Some(&w), Some(&st("blocked")), None, now),
+            (Kind::Attention, "waiting 5s".into())
+        );
+        // A finished run is finished, whatever it last reported.
+        assert_eq!(
+            classify(&State::Exited(0), None, Some(&st("working")), None, now).0,
+            Kind::Done
+        );
     }
 
     #[test]

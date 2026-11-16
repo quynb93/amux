@@ -76,6 +76,14 @@ The host (`runs/host.rs`) is a small terminal multiplexer, in the spirit of dtac
 
 The pump also feeds each chunk to a detector (`runs/detect.rs`). It strips escape sequences as they arrive, even when one is split across chunks, and keeps the last 4 KB of text. It reports "waiting" when the text contains one of the provider's `waitingPatterns`, or when the CLI rings the bell or sends a notification OSC (9, 777 or 99). It reports "cleared" when a client sends input, or after 4 KB more output with no new signal. The host records the reason and time in `run.json`. When no client is attached, it sends a notification through `runs/notify.rs`. The CLI's own bell already reaches an attached terminal.
 
+A CLI can also report its own state with OSC 7501, the Program Status Protocol (`runs/program.rs`): `ESC ] 7501 ; state=blocked:kind=permission:msg=<base64> ST`. Codex sends it on any terminal. Claude Code (2.1.295 and later) sends it once the terminal answers the probe `ESC ] 7501 ; ? ST`, so the pump answers that probe by writing the reply to the CLI's input. It only answers live output, never a replay, so each probe gets one answer.
+
+From the first report on, the reports decide instead of the text, bell and OSC 9 signals:
+- `blocked` sets "waiting", with the CLI's message as the reason.
+- Any other state clears it. Typing doesn't clear it, because the CLI says when it moves on.
+- The root record (state, kind, message, since) is saved in `run.json` as `status`. Child records, such as subagents, are ignored.
+- When the CLI exits, `working` and `blocked` records are dropped and `done` and `error` are kept, as the spec says. A new shell prompt (OSC 133 A) also drops `working` and `blocked`.
+
 `amux ui` (`src/ui/`) is one more client of the same hosts. It keeps a vt100 terminal emulator per previewed run, fed from the host socket, and holds at most four previews open whatever the number of runs. Its actions run `amux spawn`, `stop` and `rm` in the background. See [tui-design.md](tui-design.md).
 
 `amux ps` derives each run's state from `run.json` and whether the host pid is alive. It reads "working or idle" from the modification time of `output.log`.
