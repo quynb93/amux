@@ -4,6 +4,44 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- **Sharing the machine between agents.** `amux slot -- <command>` runs a test suite, build or dev server only when a slot of its class is free (by default a quarter of the CPUs for `test` and `build`, and 2 for `dev`), and holds new work back while the load average or free memory is past a limit. Waiters are served first come, first served, and a slot frees itself when its process ends, however it ends. With `--timeout` or `--no-wait` it exits 75 when no slot came free, so an agent can push the branch for CI instead of piling onto the machine.
+- `amux slots` shows each class, who holds its slots and who waits, and the machine's load and free memory. `amux slots --hook` prints a Claude Code `PreToolUse` hook (`amux __slot-hook`) that turns away unwrapped `npm test`, `cargo build`, `npm run dev` and the like, with the wrapped command to run instead, plus instructions for `AGENTS.md`.
+- `amux verify <run>` checks a run's work: `--test` runs the project's tests in its folder, waiting for a test slot, and `--push` pushes its branch so CI runs them. With neither, it says which is better right now. In `amux ui`, `v` (or `/verify`) offers both and picks the push with ⏎ when the machine is busy. The run list shows how the last check went.
+- `amux send <run> <text>` types a prompt into a run and presses Enter, without attaching. `--wait` also waits for the turn to end. Multi-line text goes in as a bracketed paste, and control characters are removed.
+- `amux wait <run>... --until waiting|idle|exited [--timeout <secs>]` blocks until runs need you, finish their turn, or exit, and exits 124 on timeout. With `spawn`, `send` and `peek`, one agent can run and steer helpers.
+- `amux diff <run> [--stat]` shows everything a run changed since its worktree started, committed or not, and lists untracked files. Worktree runs now record the commit they started from. In `amux ui`, `/diff` opens it in your pager.
+- `amux ps --json` prints every run's state, branch, worktree and last verify, for scripts.
+- `amux verify <run> --send-failures` hands a failed test run's output to the agent to fix. In `amux ui`'s verify choice, ⏎ (or `f`) does it after a failure. `/send <text>` types into the selected run.
+- **Typing and mouse in `amux ui`.** Enter, a click on the screen, or just typing a word types into the selected run in its pane, as in a terminal, with paste. Ctrl-] goes back to the list, Ctrl-B then a key runs a command, and Alt-↑/↓ switches runs. Clicks select runs, and the wheel moves the list or scrolls the screen. CLIs that ask for mouse reports get them. `a` still gives a run the whole terminal.
+- `amux pr <run> [--draft] [--base <branch>]` pushes the run's branch and opens its pull request through the GitHub CLI, or finds the open one. `amux checks <run>` shows its CI checks, and `--send-failures` hands the failed steps' logs to the agent. `amux ui` shows the PR and checks on each run and refreshes them while checks run, and `ps --json` includes them.
+- **Review comments.** In `amux ui`, `c` opens a run's diff (`/review`). ⏎ comments on the line under the cursor, `x` deletes a comment, and `S` sends all pending comments to the agent as one message, with file:line and the code for each. From the CLI: `amux comment <run> <file>:<line> <note>`, and `amux comments <run> [--send | --rm <n> | --clear]`. `/diff` still opens the plain diff in your pager.
+- **Other machines over SSH.** `amux machine add <name> <user@host>`, `amux spawn --on <machine>[:<dir>]`, and `<machine>:<run>` wherever a run goes. `ps` lists every machine's runs. `amux ui` shows them with live screens and typing, over one reused SSH connection per machine.
+- **`amux serve`**: a full remote control in a web app for a phone or another laptop (add it to the home screen).
+  - Runs by space (repo) or on a board, with live updates (Server-Sent Events).
+  - Each run's screen with keys and replies, its diff with line comments, and tests, push, PR, CI and stop or remove.
+  - Starting runs with account, machine, folder, worktree and prompt.
+  - A monitor of load, memory, slots and machines.
+  - Security: it needs a token, sets an HttpOnly SameSite cookie, requires a custom header on actions, sends a strict CSP, and listens on localhost by default.
+- `amux spawn --dir <folder> --prompt <text>`; `--json` for `account list`, `slots` and `comments`.
+- **Plugins and hooks.** `amux <name>` runs `~/.amux/plugins/<name>` or `amux-<name>` on PATH. `/plugin` runs one in `amux ui`, and `amux plugin new` starts one. `~/.amux/hooks/on-waiting|on-exited|on-verify|on-checks` run on those events. Only files you own and no one else can write to are run.
+- **Layouts.** `/layout` sets the list width and side, and up to six tiles. `/layout save` keeps them in `ui.layout`.
+- **`amux skill [--install]`**: an agent skill that teaches Claude Code, Codex and Gemini how to run, steer and check other agents with amux.
+- `amux send <run> --key <key>` presses enter, esc, the arrows, ctrl-c, or a letter or digit.
+- **Board and tiles in `amux ui`.** `b` shows runs as cards in a column per state (needs you, working, idle, done). `t` tiles up to four live runs side by side; click one to type into it. `/view list|board|tiles` switches.
+- `amux events [<run>...] [--text]` streams changes as they happen: runs added or removed, state changes with the reason a run waits, verify results and PR checks. JSON lines by default.
+- Internals: the code is now in layers. `runs/` covers a run's life (including its state and the client that types into it), and `work/` covers slots, verify, GitHub and review. Both sit below `commands/` (the CLI) and `ui/`. There is one git helper instead of four, and `ui/mod.rs` is split into keys, typing, actions and views. See docs/architecture.md.
+- Runs can be limited too: with `"limits": { "runs": 4 }`, an extra `amux spawn` returns right away as `queued` and starts by itself when a run ends. `amux ps`, `amux ui` and `amux explain` show it as queued; `amux stop` cancels it. All limits live under `"limits"` in `~/.amux/config.json`.
+
+### Fixed
+
+- The run host saves a run's final screen before recording that it ended, so a preview or `amux peek` never catches it in between and replays the log instead.
+- A new client's snapshot of a run now includes the window title the CLI set, so the task title on `amux ui`'s preview border no longer goes missing.
+- `amux peek` and `amux explain` wait up to 2 seconds for a busy host's first output, instead of 150 ms, before giving up with an empty screen.
+- `amux peek`, `amux explain` and the preview now agree on the size of a run's screen, and an ended run's still picture is no longer cropped to the host's last size.
+- In `amux ui`, `0` is no longer treated as a shortcut, and a very narrow new-run dialog no longer draws past its border.
+
 ## [0.5.1] - 2026-11-16
 
 Fixes `amux ui` showing garbled screens, and letters typed into its list triggering shortcuts.

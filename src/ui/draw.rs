@@ -7,7 +7,7 @@ use super::preview::screen_lines;
 use super::spawn::{Field, SpawnForm};
 use super::status::{Kind, Show};
 use super::theme::Theme;
-use super::{App, Mode, OutputView, PaletteState};
+use super::{App, Confirm, Mode, OutputView, PaletteState, View};
 use crate::paths::tildify;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -21,7 +21,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// Marks the selected row, and the selected line in lists.
 const MARKER: &str = "▌";
 
-fn panel<'a>(t: &Theme, border: Style) -> Block<'a> {
+pub(super) fn panel<'a>(t: &Theme, border: Style) -> Block<'a> {
     // Titles get the text color, so they don't take on a colored border's.
     let text = t.text.fg(t.text.fg.unwrap_or_default());
     Block::bordered()
@@ -31,12 +31,12 @@ fn panel<'a>(t: &Theme, border: Style) -> Block<'a> {
         .style(t.text)
 }
 
-fn span(s: impl Into<String>, style: Style) -> Span<'static> {
+pub(super) fn span(s: impl Into<String>, style: Style) -> Span<'static> {
     Span::styled(s.into(), style)
 }
 
 /// `key label` pairs as spans: keys stand out, labels recede.
-fn hints(t: &Theme, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
+pub(super) fn hints(t: &Theme, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
     let mut v = vec![];
     for (i, (k, label)) in pairs.iter().enumerate() {
         if i > 0 {
@@ -49,7 +49,7 @@ fn hints(t: &Theme, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
 }
 
 /// Hints framed for a border title: ` a  b `.
-fn border_hints(t: &Theme, pairs: &[(&str, &str)]) -> Line<'static> {
+pub(super) fn border_hints(t: &Theme, pairs: &[(&str, &str)]) -> Line<'static> {
     let mut h = vec![span(" ", t.muted)];
     h.extend(hints(t, pairs));
     h.push(span(" ", t.muted));
@@ -72,10 +72,19 @@ impl App {
         self.draw_header(f, header);
         let wide = body.width >= 100;
         let (list_area, preview_area) = if wide {
-            let w = (body.width * 3 / 10).clamp(32, 48);
-            let [l, p] =
-                Layout::horizontal([Constraint::Length(w), Constraint::Min(10)]).areas(body);
-            (l, p)
+            let w = match self.layout.list_width {
+                Some(w) => w.min(body.width.saturating_sub(30)).max(20),
+                None => (body.width * 3 / 10).clamp(32, 48),
+            };
+            if self.layout.list_right {
+                let [p, l] =
+                    Layout::horizontal([Constraint::Min(10), Constraint::Length(w)]).areas(body);
+                (l, p)
+            } else {
+                let [l, p] =
+                    Layout::horizontal([Constraint::Length(w), Constraint::Min(10)]).areas(body);
+                (l, p)
+            }
         } else {
             // Not clamp(): on a short terminal the upper bound is below the lower one.
             let max = (body.height / 2).max(1);
@@ -83,8 +92,18 @@ impl App {
             let [l, p] = Layout::vertical([Constraint::Length(h), Constraint::Min(3)]).areas(body);
             (l, p)
         };
-        self.draw_list(f, list_area);
-        self.draw_preview(f, preview_area);
+        self.panes.clear();
+        self.list_area = Rect::default();
+        self.preview_area = Rect::default();
+        match self.view {
+            View::List => {
+                self.list_area = list_area;
+                self.draw_list(f, list_area);
+                self.draw_preview(f, preview_area);
+            }
+            View::Board => self.draw_board(f, body),
+            View::Tiles => self.draw_tiles(f, body),
+        }
         self.draw_footer(f, footer);
         let t = &self.theme;
         match &self.mode {
@@ -92,7 +111,11 @@ impl App {
             Mode::Help => draw_help(f, area, t),
             Mode::Palette(p) => draw_palette(f, area, t, p),
             Mode::Output(o) => draw_output(f, area, t, o),
-            Mode::Normal | Mode::Confirm(_) => {}
+            Mode::Normal | Mode::Confirm(_) | Mode::Review(_) => {}
+        }
+        if let Mode::Review(r) = &mut self.mode {
+            let t = self.theme.clone();
+            r.draw(f, body, &t);
         }
     }
 
@@ -165,7 +188,9 @@ impl App {
         } else {
             format!(" Runs {} of {} ", self.rows.len(), self.total)
         };
-        let block = panel(&t, t.border).title(span(count, t.title));
+        // The panel the keys go to has the accent border.
+        let border = if self.focus_run { t.border } else { t.accent };
+        let block = panel(&t, border).title(span(count, t.title));
         if self.rows.is_empty() {
             let nothing = match (self.show, self.filter.is_empty()) {
                 (Show::All, _) => format!(" Nothing matches “{}”.", self.filter),
@@ -229,10 +254,14 @@ impl App {
                     Some(w) => w.branch.clone(),
                     None => tildify(Path::new(&r.run.cwd)),
                 };
-                let detail = clip(
-                    &format!("{} · {place}", r.run.account),
-                    width.saturating_sub(5),
-                );
+                let mut detail = format!("{} · {place}", r.run.account);
+                if let Some(pr) = &r.pr {
+                    detail.push_str(&format!(" · {}", pr.label()));
+                }
+                if let Some(v) = &r.verify {
+                    detail.push_str(&format!(" · {v}"));
+                }
+                let detail = clip(&detail, width.saturating_sub(5));
                 let line2 = Line::from(span(format!("    {detail}"), t.muted));
                 ListItem::new(vec![line1, line2])
             })
@@ -246,8 +275,22 @@ impl App {
     }
 
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
+        let idx = self.list.selected();
+        self.draw_pane(f, area, idx, true);
+    }
+
+    /// One run's live screen in a pane. `selected`: the run the keys go to, which is
+    /// fitted to the pane while you type into it. Other panes (tiles) only show.
+    pub(super) fn draw_pane(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        idx: Option<usize>,
+        selected: bool,
+    ) {
         let t = self.theme.clone();
-        let Some(row) = self.current() else {
+        let focused = selected && self.focus_run;
+        let Some(row) = idx.and_then(|i| self.rows.get(i)) else {
             let intro = vec![
                 Line::from(""),
                 Line::from(span(
@@ -305,10 +348,14 @@ impl App {
                         span(" ", t.muted),
                     ])
                 }
-                None => border_hints(&t, &[("⏎", "type in run"), ("Ctrl-]", "back")]),
+                None if focused => border_hints(&t, &[("Ctrl-]", "list"), ("Ctrl-B", "commands")]),
+                None if selected => border_hints(&t, &[("⏎", "type here"), ("a", "full screen")]),
+                None => Line::from(""),
             },
         };
-        let border = if kind == Kind::Attention {
+        let border = if focused {
+            t.accent
+        } else if kind == Kind::Attention {
             Style::new().fg(t.waiting.fg.unwrap_or_default())
         } else {
             t.border
@@ -316,6 +363,14 @@ impl App {
         let mut block = panel(&t, border)
             .title(Line::from(title))
             .title_bottom(bottom);
+        let inner = block.inner(area);
+        if let Some(i) = idx {
+            self.panes.push((inner, i));
+        }
+        if selected {
+            self.preview_area = inner;
+            self.fit_focused(inner.height, inner.width);
+        }
         let p = self.previews.get(&run, kind.is_live());
         let Some(p) = p else {
             f.render_widget(block, area);
@@ -362,6 +417,47 @@ impl App {
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let t = &self.theme;
         let line = match (&self.mode, &self.status) {
+            (Mode::Review(r), Some((msg, err, at)))
+                if r.input.is_none() && at.elapsed() < Duration::from_secs(4) =>
+            {
+                let (mark, style) = if *err {
+                    ("✗", t.error)
+                } else {
+                    ("✓", t.success)
+                };
+                Line::from(vec![
+                    span(format!(" {mark} "), style),
+                    span(msg.clone(), style),
+                ])
+            }
+            (Mode::Review(r), _) => r.footer(t),
+            (Mode::Confirm(c @ Confirm::Verify(p)), _) => {
+                let (test, push, prefer_push) = Confirm::verify_choices(p);
+                let mut v = vec![span(format!(" {} ", c.question()), t.title)];
+                if p.failed {
+                    v.push(span("  f", t.key));
+                    v.push(span(" send failures to agent (⏎)", t.muted));
+                }
+                if p.ci_failed {
+                    v.push(span("  k", t.key));
+                    v.push(span(" send failing CI to agent", t.muted));
+                }
+                for (key, what, preferred) in [("t", test, !prefer_push), ("p", push, prefer_push)]
+                {
+                    if let Some(what) = what {
+                        v.push(span(format!("  {key}"), t.key));
+                        let mark = if preferred && !p.failed { " (⏎)" } else { "" };
+                        v.push(span(format!(" {what}{mark}"), t.muted));
+                    }
+                }
+                if p.branch.is_some() && p.remote.is_some() {
+                    v.push(span("  r", t.key));
+                    v.push(span(" open PR", t.muted));
+                }
+                v.push(span("   Esc", t.key));
+                v.push(span(" cancels", t.muted));
+                Line::from(v)
+            }
             (Mode::Confirm(c), _) => Line::from(vec![
                 span(format!(" {} ", c.question()), t.title),
                 span("  y", t.key),
@@ -380,15 +476,49 @@ impl App {
                     span(msg.clone(), style),
                 ])
             }
+            _ if self.prefix => Line::from(hints(
+                t,
+                &[
+                    (" Ctrl-B +", ""),
+                    ("n", "new"),
+                    ("s", "stop"),
+                    ("v", "verify"),
+                    ("c", "review"),
+                    ("↑↓", "run"),
+                    ("⏎", "full screen"),
+                    ("/", "commands"),
+                    ("?", "keys"),
+                    ("Esc", "cancel"),
+                ],
+            )),
+            _ if self.focus_run => {
+                let id = self.selected.clone().unwrap_or_default();
+                let mut v = vec![span(format!(" Typing into {id}  "), t.accent)];
+                v.extend(hints(
+                    t,
+                    &[
+                        ("Ctrl-]", "list"),
+                        ("Ctrl-B", "commands"),
+                        ("Alt-↑↓", "other run"),
+                        ("wheel", "scroll"),
+                    ],
+                ));
+                Line::from(v)
+            }
             _ => {
                 // As many hints as fit, most useful first.
                 let all = [
                     ("⏎", "type in run"),
+                    ("a", "full screen"),
                     ("n", "new"),
                     ("/", "commands"),
                     ("⇥", "next waiting"),
                     ("f", "filter"),
                     ("e", "why"),
+                    ("v", "verify"),
+                    ("c", "review"),
+                    ("b", "board"),
+                    ("t", "tiles"),
                     ("s", "stop"),
                     ("d", "remove"),
                     ("PgUp", "scroll"),
@@ -677,12 +807,26 @@ fn draw_spawn(f: &mut Frame, area: Rect, t: &Theme, form: &SpawnForm) {
 const HELP_KEYS: &[(&str, &str)] = &[
     ("↑ ↓  j k  1–9", "select a run"),
     ("⇥", "next run that needs you"),
-    ("⏎", "type into the run, full screen; Ctrl-] comes back"),
+    (
+        "⏎  click",
+        "type into the run in its pane (or just start typing)",
+    ),
+    ("Ctrl-]", "back to the list from typing"),
+    (
+        "Ctrl-B key",
+        "while typing: run a command key, such as Ctrl-B s",
+    ),
+    ("Alt-↑ Alt-↓", "while typing: the run above or below"),
+    ("a", "the run full screen; Ctrl-] comes back"),
+    ("wheel", "scroll the list or the screen; click selects"),
     ("n", "start a new run"),
     ("s  S", "stop, or kill"),
     ("d  D", "remove a finished run, or kill and remove"),
     ("f", "show waiting, working, idle or ended runs"),
     ("e", "why a run shows its state"),
+    ("b  t", "a board by state, or live tiles side by side"),
+    ("v", "verify: run its tests here, or push its branch for CI"),
+    ("c", "review: the run's diff; ⏎ comments on a line, S sends"),
     ("PgUp PgDn", "scroll the preview; Esc back to live"),
     ("/", "command palette"),
     ("q", "quit; runs keep going"),
@@ -701,7 +845,10 @@ fn draw_help(f: &mut Frame, area: Rect, t: &Theme) {
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         span(format!("  {:<15}", "Commands"), t.key),
-        span("/new /logs /filter /show /explain", t.text),
+        span(
+            "/new /send /logs /diff /filter /show /explain /verify",
+            t.text,
+        ),
     ]));
     lines.push(Line::from(span(
         format!("  {:<15}/switch-account /add-account /accounts /theme", ""),
@@ -733,6 +880,9 @@ fn tail_fit(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
         return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
     }
     let keep = max.saturating_sub(1);
     let tail: String = s.chars().skip(n - keep).collect();

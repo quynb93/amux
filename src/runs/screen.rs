@@ -10,14 +10,35 @@ use std::io::Read;
 use std::num::NonZeroU16;
 use std::time::{Duration, Instant};
 
-pub type Parser = vt100::Parser;
+/// The window title the CLI last set. The screen itself doesn't hold it, so a snapshot
+/// would otherwise lose it (the UI shows it on the preview's border).
+#[derive(Default)]
+pub struct Title(pub String);
 
-/// Escape sequences that recreate the screen on a terminal of the same size: clear it,
-/// draw every cell with its attributes, put the cursor back, and restore the input modes
-/// the CLI turned on (bracketed paste, mouse reporting, application keys).
+impl vt100::Callbacks for Title {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.0 = String::from_utf8_lossy(title).into_owned();
+    }
+}
+
+pub type Parser = vt100::Parser<Title>;
+
+/// Escape sequences that recreate the screen on a terminal of the same size: set the
+/// window title, clear the screen, draw every cell with its attributes, put the cursor
+/// back, and restore the input modes the CLI turned on (bracketed paste, mouse
+/// reporting, application keys).
 pub fn snapshot(p: &Parser) -> Vec<u8> {
     let screen = p.screen();
     let mut out = Vec::new();
+    let title: String = p
+        .callbacks()
+        .0
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if !title.is_empty() {
+        out.extend_from_slice(format!("\x1b]0;{title}\x07").as_bytes());
+    }
     if screen.alternate_screen() {
         out.extend_from_slice(b"\x1b[?1049h");
     }
@@ -25,27 +46,18 @@ pub fn snapshot(p: &Parser) -> Vec<u8> {
     out
 }
 
+/// A terminal dimension, at least 1.
+pub fn nz(n: u16) -> NonZeroU16 {
+    NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
+}
+
 pub fn new_parser(rows: u16, cols: u16, scrollback: usize) -> Parser {
-    let nz = |n: u16| NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN);
-    vt100::Parser::new(nz(rows), nz(cols), scrollback)
+    vt100::Parser::new_with_callbacks(nz(rows), nz(cols), scrollback, Title::default())
 }
 
 /// The size the screen was last drawn at: the host's `size` file, else the start size.
 pub fn last_size(run: &Run) -> (u16, u16) {
-    std::fs::read_to_string(run.dir().join("size"))
-        .ok()
-        .and_then(|s| {
-            let mut it = s.split_whitespace().map(|n| n.parse::<u16>().ok());
-            match (it.next()??, it.next()??) {
-                (r, c) if r > 0 && c > 0 => Some((r, c)),
-                _ => None,
-            }
-        })
-        .unwrap_or(if run.rows > 0 && run.cols > 0 {
-            (run.rows, run.cols)
-        } else {
-            (24, 80)
-        })
+    super::client::run_size(run).0
 }
 
 /// What draws the final screen of a run that has ended, and the size to draw it at.
@@ -85,16 +97,15 @@ pub fn capture(run: &Run) -> Parser {
 
 /// Connects as a watcher and draws what the host sends first: its current screen.
 fn live(run: &Run) -> Option<Parser> {
-    let stream = crate::ui::preview::connect(&run.id).ok()?;
+    let stream = super::client::connect(&run.id).ok()?;
     let mut w = &stream;
     super::write_frame(&mut w, super::WATCH, &[1]).ok()?;
     let (rows, cols) = last_size(run);
     let mut p = new_parser(rows, cols, 0);
-    // The snapshot comes at once; stop when the connection goes quiet.
-    stream
-        .set_read_timeout(Some(Duration::from_millis(150)))
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(1);
+    // The host sends the snapshot first, though it may be held up for a moment (it writes
+    // to every client under the same lock); then stop when the connection goes quiet.
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
     let mut buf = [0u8; 64 * 1024];
     let mut r = &stream;
     while Instant::now() < deadline {
@@ -102,6 +113,9 @@ fn live(run: &Run) -> Option<Parser> {
             Ok(0) | Err(_) => break,
             Ok(n) => p.process(&buf[..n]),
         }
+        stream
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .ok()?;
     }
     Some(p)
 }
@@ -149,5 +163,15 @@ mod tests {
         assert!(copy.screen().alternate_screen());
         assert!(copy.screen().bracketed_paste());
         assert_eq!(text(&copy), ["full screen"]);
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_window_title() {
+        let mut live = new_parser(3, 20, 0);
+        live.process(b"\x1b]0;my task\x07hi");
+        let mut copy = new_parser(3, 20, 0);
+        copy.process(&snapshot(&live));
+        assert_eq!(copy.callbacks().0, "my task");
+        assert_eq!(text(&copy), ["hi"]);
     }
 }

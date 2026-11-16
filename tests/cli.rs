@@ -54,7 +54,7 @@ impl Sandbox {
             "privateEntries": ["auth.json"], "sharedDirs": ["sessions"], "baseUrlEnv": "FAKE_BASE_URL",
             "tokenEnv": "FAKE_TOKEN", "privacyEnv": { "FAKE_TELEMETRY": "0" },
             "waitingPatterns": ["approve THIS?"]
-        }], "notifyCommand": ["sh", "-c", "echo \"$AMUX_EVENT $AMUX_RUN $AMUX_MESSAGE\" >> \"$HOME/notes\""]});
+        }], "limits": { "maxLoad": 1000 }, "notifyCommand": ["sh", "-c", "echo \"$AMUX_EVENT $AMUX_RUN $AMUX_MESSAGE\" >> \"$HOME/notes\""]});
         write(&amux_home.join("config.json"), &config.to_string());
         Sandbox {
             home,
@@ -785,4 +785,777 @@ fn shows_the_real_screen_of_a_cli_that_redraws_in_place() {
         .amux(&["peek", "tui"])
         .out
         .starts_with("TITLE fake\nall steps done\n  tokens 4000\n> ready\n"));
+}
+
+#[test]
+fn queues_runs_past_the_limit_and_starts_them_when_one_ends() {
+    let s = Sandbox::new("queue");
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["limits"]["runs"] = 1.into();
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let chat = [("FAKE_CHAT", "1")];
+    let a = s.amux_with(&["spawn", "--name", "a", "fake"], &chat, None);
+    assert_eq!(a.code, 0, "{}", a.err);
+    let b = s.amux_with(&["spawn", "--name", "b", "fake"], &chat, None);
+    assert_eq!(b.code, 0, "{}", b.err);
+    assert!(b.err.contains("queued b"), "{}", b.err);
+    assert!(b.err.contains("all 1 runs slot"), "{}", b.err);
+    wait_ps(&s, "b", "queued");
+    assert!(s.amux(&["attach", "b"]).err.contains("queued"));
+    let slots = s.amux(&["slots"]).out;
+    assert!(slots.contains("waiting: b"), "{slots}");
+
+    assert_eq!(s.amux(&["stop", "a"]).code, 0);
+    wait_ps(&s, "b", "running");
+    assert_eq!(s.amux(&["stop", "b"]).code, 0);
+}
+
+#[test]
+fn a_queued_run_can_be_stopped_before_it_starts() {
+    let s = Sandbox::new("queue-stop");
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["limits"]["runs"] = 1.into();
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let chat = [("FAKE_CHAT", "1")];
+    s.amux_with(&["spawn", "--name", "a", "fake"], &chat, None);
+    s.amux_with(&["spawn", "--name", "b", "fake"], &chat, None);
+    wait_ps(&s, "b", "queued");
+    assert_eq!(s.amux(&["stop", "b"]).code, 0);
+    wait_ps(&s, "b", "exited 143");
+    s.amux(&["stop", "a"]);
+    assert_eq!(s.amux(&["rm", "--done"]).code, 0);
+}
+
+#[test]
+fn slot_runs_the_command_and_gives_up_with_75_when_full() {
+    let s = Sandbox::new("slot");
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["limits"]["test"] = 1.into();
+    write(&cfg, &c.to_string());
+    let r = s.amux(&["slot", "--", "sh", "-c", "exit 4"]);
+    assert_eq!(r.code, 4, "the command's own exit code: {}", r.err);
+    // Hold the only test slot from a background command, then ask for another.
+    let mut holder = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["slot", "--class", "test", "--", "sleep", "2"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .spawn()
+        .unwrap();
+    for _ in 0..100 {
+        if s.amux(&["slots"]).out.contains("sleep 2") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let r = s.amux(&["slot", "--class", "test", "--no-wait", "--", "true"]);
+    assert_eq!(r.code, 75, "{}", r.err);
+    assert!(r.err.contains("sleep 2"), "{}", r.err);
+    assert!(r.err.contains("push"), "{}", r.err);
+    // A waiter gets the slot once the holder is done.
+    let r = s.amux(&["slot", "--class", "test", "--timeout", "10", "--", "true"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("waiting for a test slot"), "{}", r.err);
+    holder.wait().unwrap();
+    assert_eq!(
+        s.amux(&["slot", "--class", "test", "--no-wait", "--", "true"])
+            .code,
+        0
+    );
+}
+
+#[test]
+fn verifies_a_run_by_testing_here_or_pushing_for_ci() {
+    let s = Sandbox::new("verify");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    let remote = s.home.join("remote.git");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("Makefile"), "test:\n\techo tests-ran-here\n");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    git(&s.home, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+
+    let r = s.amux_with(
+        &["spawn", "--name", "v", "--worktree", "fake"],
+        &[],
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "v", "exited 0");
+
+    let plan = s.amux(&["verify", "v"]);
+    assert_eq!(plan.code, 0, "{}", plan.err);
+    assert!(plan.out.contains("Tests: make test"), "{}", plan.out);
+    assert!(
+        plan.out.contains("Push: amux/v to origin (new branch)"),
+        "{}",
+        plan.out
+    );
+    assert!(plan.out.contains("amux verify v --test"), "{}", plan.out);
+
+    let t = s.amux(&["verify", "v", "--test"]);
+    assert_eq!(t.code, 0, "{}{}", t.out, t.err);
+    assert!(t.out.contains("Tests passed for v"), "{}", t.out);
+    let log = fs::read_to_string(s.amux_home.join("runs/v/verify.log")).unwrap();
+    assert!(log.contains("tests-ran-here"), "{log}");
+    let failing = s.amux(&["verify", "v", "--test", "--command", "exit 3"]);
+    assert_eq!(failing.code, 3);
+    let state = fs::read_to_string(s.amux_home.join("runs/v/verify.json")).unwrap();
+    assert!(state.contains("\"failed\""), "{state}");
+
+    let p = s.amux(&["verify", "v", "--push"]);
+    assert_eq!(p.code, 0, "{}", p.err);
+    assert!(p.out.contains("Pushed amux/v to origin"), "{}", p.out);
+    assert!(git(&remote, &["branch"]).contains("amux/v"));
+    assert!(s
+        .amux(&["verify", "v"])
+        .out
+        .contains("(already up to date)"));
+    let ui = s.amux(&["ui", "--dump", "--size", "30x120", "--keys", "v"]);
+    assert!(ui.out.contains("pushed"), "{}", ui.out);
+    assert!(ui.out.contains("Verify v:"), "{}", ui.out);
+    assert!(ui.out.contains("t test (make test)"), "{}", ui.out);
+}
+
+#[test]
+fn drives_a_run_with_send_wait_diff_and_failure_feedback() {
+    let s = Sandbox::new("drive");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "one\n");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let chat = [("FAKE_CHAT", "1")];
+    let r = s.amux_with(
+        &["spawn", "--name", "d", "--worktree", "fake"],
+        &chat,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "d", "running");
+
+    // send types a line and presses Enter; the fake CLI echoes it.
+    assert_eq!(s.amux(&["send", "d", "hello", "there"]).code, 0);
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = s.amux(&["peek", "d"]).out;
+        if seen.contains("got hello there") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(seen.contains("got hello there"), "{seen}");
+
+    // wait: "ask" makes the CLI ask something, so the run turns to waiting.
+    assert_eq!(s.amux(&["send", "d", "ask"]).code, 0);
+    let w = s.amux(&["wait", "d", "--until", "waiting", "--timeout", "10"]);
+    assert_eq!(w.code, 0, "{}{}", w.out, w.err);
+    assert!(w.out.starts_with("d\twaiting"), "{}", w.out);
+    let w = s.amux(&["wait", "d", "--until", "exited", "--timeout", "0.3"]);
+    assert_eq!(w.code, 124, "a live run times out");
+
+    let ps = s.amux(&["ps", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&ps.out).unwrap();
+    assert_eq!(v[0]["id"], "d");
+    assert_eq!(v[0]["state"], "attention");
+    assert_eq!(v[0]["branch"], "amux/d");
+
+    // diff shows committed and uncommitted changes since the worktree started.
+    let wt = s.amux_home.join("worktrees/repo-d");
+    write(&wt.join("a.txt"), "one\ntwo\n");
+    write(&wt.join("new.txt"), "x");
+    let d = s.amux(&["diff", "d"]);
+    assert_eq!(d.code, 0, "{}", d.err);
+    assert!(d.out.contains("+two"), "{}", d.out);
+    assert!(
+        d.out
+            .contains("New files not yet added to git (1): new.txt"),
+        "{}",
+        d.out
+    );
+
+    // A failed test run goes back to the agent as one message.
+    let f = s.amux(&[
+        "verify",
+        "d",
+        "--test",
+        "--command",
+        "echo boom-failure; exit 2",
+    ]);
+    assert_eq!(f.code, 2);
+    let sent = s.amux(&["verify", "d", "--send-failures"]);
+    assert_eq!(sent.code, 0, "{}", sent.err);
+    for _ in 0..100 {
+        seen = s.amux(&["logs", "d"]).out;
+        if seen.contains("got The tests failed") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(seen.contains("got The tests failed"), "{seen}");
+    assert!(seen.contains("boom-failure"), "{seen}");
+    assert!(s.amux(&["ps", "--json"]).out.contains("\"sent\""));
+
+    assert_eq!(s.amux(&["send", "d", "quit"]).code, 0);
+    let w = s.amux(&["wait", "d", "--until", "exited", "--timeout", "10"]);
+    assert_eq!(w.code, 0, "{}", w.out);
+    assert!(s.amux(&["send", "d", "x"]).err.contains("not running"));
+}
+
+#[test]
+fn opens_a_pr_and_sends_failing_ci_to_the_agent() {
+    let s = Sandbox::new("github");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    let remote = s.home.join("remote.git");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "x");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&s.home, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    // A stand-in for the GitHub CLI: a PR exists once created, and its CI fails.
+    let gh = s.home.join("bin/gh");
+    let state = s.home.join("gh-pr");
+    write(
+        &gh,
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1 $2\" in\n\
+             'pr view') [ -f {st} ] && echo '{{\"url\":\"https://github.com/o/r/pull/7\",\"number\":7,\"state\":\"OPEN\"}}' && exit 0; echo 'no pull requests found for branch' >&2; exit 1;;\n\
+             'pr create') touch {st}; echo https://github.com/o/r/pull/7;;\n\
+             'pr checks') echo '[{{\"name\":\"test\",\"bucket\":\"fail\",\"link\":\"https://github.com/o/r/actions/runs/42/job/1\",\"workflow\":\"CI\"}},{{\"name\":\"lint\",\"bucket\":\"pass\",\"link\":\"\",\"workflow\":\"CI\"}}]'; exit 1;;\n\
+             'run view') echo 'test\tRun tests\tassertion failed: parser-broke';;\n\
+             esac\n",
+            log = s.home.join("gh-log").display(),
+            st = state.display()
+        ),
+    );
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = [("FAKE_CHAT", "1"), ("AMUX_GH", gh.to_str().unwrap())];
+    let r = s.amux_with(
+        &["spawn", "--name", "g", "--worktree", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "g", "running");
+
+    let none = s.amux_with(&["checks", "g"], &env, None);
+    assert!(none.err.contains("no pull request yet"), "{}", none.err);
+    let pr = s.amux_with(&["pr", "g", "--draft"], &env, None);
+    assert_eq!(pr.code, 0, "{}", pr.err);
+    assert!(pr.out.contains("Opened PR #7"), "{}", pr.out);
+    let log = fs::read_to_string(s.home.join("gh-log")).unwrap();
+    assert!(
+        log.contains("pr create --head amux/g --fill --draft"),
+        "{log}"
+    );
+    assert!(s
+        .amux_with(&["pr", "g"], &env, None)
+        .out
+        .contains("already has PR #7"));
+
+    let c = s.amux_with(&["checks", "g"], &env, None);
+    assert_eq!(c.code, 1, "failing checks: {}", c.err);
+    assert!(
+        c.out.contains("checks failing") && c.out.contains("✗ CI / test"),
+        "{}",
+        c.out
+    );
+    let ps = s.amux(&["ps", "--json"]).out;
+    assert!(ps.contains("\"checks\": \"failing\""), "{ps}");
+
+    let sent = s.amux_with(&["checks", "g", "--send-failures"], &env, None);
+    assert_eq!(sent.code, 0, "{}", sent.err);
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = s.amux(&["logs", "g"]).out;
+        if seen.contains("parser-broke") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(seen.contains("got CI failed on PR #7"), "{seen}");
+    assert!(seen.contains("parser-broke"), "{seen}");
+    let ui = s.amux(&["ui", "--dump", "--size", "30x140"]).out;
+    assert!(ui.contains("PR #7 ✗ 1 fai"), "{ui}");
+    s.amux(&["stop", "g"]);
+}
+
+#[test]
+fn reviews_a_runs_changes_and_sends_line_comments() {
+    let s = Sandbox::new("review");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.rs"), "one\ntwo\nthree\n");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let chat = [("FAKE_CHAT", "1")];
+    let r = s.amux_with(
+        &["spawn", "--name", "rv", "--worktree", "fake"],
+        &chat,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "rv", "running");
+    let wt = s.amux_home.join("worktrees/repo-rv");
+    write(&wt.join("a.rs"), "one\nTWO\nthree\n");
+
+    // From the CLI: the line's text is kept with the comment.
+    let c = s.amux(&["comment", "rv", "a.rs:2", "Why", "uppercase?"]);
+    assert_eq!(c.code, 0, "{}", c.err);
+    assert!(s.amux(&["comment", "rv", "../x:1", "no"]).code != 0);
+    // From the UI: c opens the review, ⏎ comments on the line under the cursor.
+    let ui = s.amux(&[
+        "ui",
+        "--dump",
+        "--size",
+        "30x120",
+        "--keys",
+        "c\nkeep three\n",
+    ]);
+    assert!(
+        ui.out.contains("Review rv · 1 file · 2 comments to send"),
+        "{}",
+        ui.out
+    );
+    assert!(ui.out.contains("+TWO"), "{}", ui.out);
+    let list = s.amux(&["comments", "rv"]).out;
+    assert!(
+        list.contains("1. a.rs:2  [pending]\n    > TWO\n    Why uppercase?"),
+        "{list}"
+    );
+    assert!(
+        list.contains("2. a.rs:1  [pending]") && list.contains("keep three"),
+        "{list}"
+    );
+
+    let sent = s.amux(&["comments", "rv", "--send"]);
+    assert_eq!(sent.code, 0, "{}", sent.err);
+    assert!(sent.out.contains("Sent 2 comments to rv."), "{}", sent.out);
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = s.amux(&["logs", "rv"]).out;
+        if seen.contains("got Review of your changes: 2 comments.") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        seen.contains("got Review of your changes: 2 comments."),
+        "{seen}"
+    );
+    assert!(seen.contains("a.rs:2"), "{seen}");
+    assert!(s
+        .amux(&["comments", "rv", "--send"])
+        .err
+        .contains("no comments waiting"));
+    assert_eq!(s.amux(&["comments", "rv", "--rm", "1"]).code, 0);
+    s.amux(&["stop", "rv"]);
+}
+
+#[test]
+fn streams_events_and_shows_board_and_tiles() {
+    use std::io::{BufRead, BufReader};
+    let s = Sandbox::new("events");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let mut ev = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["events"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let env = [("FAKE_CHAT", "1")];
+    assert_eq!(
+        s.amux_with(&["spawn", "--name", "e", "fake"], &env, None)
+            .code,
+        0
+    );
+    wait_ps(&s, "e", "running");
+    s.amux(&["send", "e", "ask"]);
+    let mut lines = BufReader::new(ev.stdout.take().unwrap()).lines();
+    let mut got = vec![];
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        let waiting = line.contains("\"to\":\"waiting\"");
+        got.push(line);
+        if waiting {
+            break;
+        }
+    }
+    ev.kill().unwrap();
+    ev.wait().unwrap();
+    assert!(
+        got[0].contains("\"event\":\"added\"") && got[0].contains("\"run\":\"e\""),
+        "{got:?}"
+    );
+    let w: serde_json::Value = serde_json::from_str(got.last().unwrap()).unwrap();
+    assert_eq!(w["event"], "state");
+    assert_eq!(w["reason"], "approve THIS?");
+
+    let board = s
+        .amux(&["ui", "--dump", "--size", "20x120", "--keys", "b"])
+        .out;
+    assert!(
+        board.contains("Needs you 1") && board.contains("Working 0"),
+        "{board}"
+    );
+    let tiles = s
+        .amux(&["ui", "--dump", "--size", "20x120", "--keys", "t"])
+        .out;
+    assert!(tiles.contains("╭ e  fake@one"), "{tiles}");
+    s.amux(&["stop", "e"]);
+}
+
+#[test]
+fn runs_and_drives_agents_on_another_machine_over_ssh() {
+    let s = Sandbox::new("remote-local");
+    let r = Sandbox::new("remote-box");
+    r.amux(&["account", "add", "fake", "one", "--no-login"]);
+    // A stand-in for ssh: runs the remote command as "the other machine" (the second
+    // sandbox), the way sshd runs it in the user's shell there.
+    let ssh = s.home.join("bin/ssh");
+    write(
+        &ssh,
+        &format!(
+            "#!/bin/sh\nfor a; do last=\"$a\"; done\nexport HOME={h} AMUX_HOME={a}\nexec sh -c \"$last\"\n",
+            h = r.home.display(),
+            a = r.amux_home.display()
+        ),
+    );
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = [("AMUX_SSH", ssh.to_str().unwrap()), ("FAKE_CHAT", "1")];
+    let bin = env!("CARGO_BIN_EXE_amux");
+    let add = s.amux_with(
+        &["machine", "add", "box", "me@box", "--amux", bin],
+        &env,
+        None,
+    );
+    assert_eq!(add.code, 0, "{}{}", add.out, add.err);
+    assert!(add.out.contains("box: amux"), "{}", add.out);
+    assert!(s.amux(&["machine", "add", "bad", "-oProxyCommand=x"]).code != 0);
+
+    let sp = s.amux_with(
+        &["spawn", "--on", "box:~", "--name", "w", "fake"],
+        &env,
+        None,
+    );
+    assert_eq!(sp.code, 0, "{}", sp.err);
+    let mut ps = String::new();
+    for _ in 0..100 {
+        ps = s.amux_with(&["ps"], &env, None).out;
+        if ps.contains("box:w") && ps.contains("running") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(ps.contains("box:w") && ps.contains("running"), "{ps}");
+    assert!(
+        r.amux(&["ps"]).out.lines().any(|l| l.starts_with("w ")),
+        "it runs on the box"
+    );
+
+    assert_eq!(
+        s.amux_with(&["send", "box:w", "hello box"], &env, None)
+            .code,
+        0
+    );
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = s.amux_with(&["peek", "box:w"], &env, None).out;
+        if seen.contains("got hello box") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(seen.contains("got hello box"), "{seen}");
+    // The UI shows the remote run, and its live screen through the SSH pipe.
+    let ui = s.amux_with(
+        &["ui", "--dump", "--size", "24x120", "--select", "box:w"],
+        &env,
+        None,
+    );
+    assert!(ui.out.contains("box:w"), "{}{}", ui.out, ui.err);
+    assert!(ui.out.contains("got hello box"), "{}", ui.out);
+    assert_eq!(s.amux_with(&["stop", "box:w"], &env, None).code, 0);
+    assert!(s.amux_with(&["peek", "nobox:w"], &env, None).code != 0);
+}
+
+/// One HTTP/1.1 request; returns the status line, headers and body as one string.
+fn http(addr: &str, req: &str) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.write_all(req.as_bytes()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn serves_a_phone_app_behind_a_token() {
+    use std::io::{BufRead, BufReader};
+    let s = Sandbox::new("serve");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let env = [("FAKE_CHAT", "1")];
+    assert_eq!(
+        s.amux_with(&["spawn", "--name", "p", "fake"], &env, None)
+            .code,
+        0
+    );
+    wait_ps(&s, "p", "running");
+    let mut srv = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut url = String::new();
+    for line in BufReader::new(srv.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        if let Some(u) = line.trim().strip_prefix("http://") {
+            url = u.to_string();
+            break;
+        }
+    }
+    let (addr, query) = url.split_once('/').unwrap();
+    let token = query.trim_start_matches("?t=");
+    assert!(token.len() >= 32, "{url}");
+
+    let get = |path: &str, cookie: &str| {
+        http(
+            addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n"),
+        )
+    };
+    assert!(get("/api/runs", "").starts_with("HTTP/1.1 401"));
+    assert!(get("/api/runs", "amux=wrong").starts_with("HTTP/1.1 401"));
+    let login = get(&format!("/?t={token}"), "");
+    assert!(
+        login.starts_with("HTTP/1.1 303") && login.contains("HttpOnly; SameSite=Strict"),
+        "{login}"
+    );
+    let cookie = format!("amux={token}");
+    let runs = get("/api/runs", &cookie);
+    assert!(
+        runs.starts_with("HTTP/1.1 200") && runs.contains("\"id\": \"p\""),
+        "{runs}"
+    );
+    assert!(get("/", &cookie).contains("<title>amux</title>"));
+    assert!(get("/", &cookie).contains("Content-Security-Policy: default-src 'self'"));
+
+    let post = |path: &str, body: &str, extra: &str| {
+        http(
+            addr,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+    let body = r#"{"text":"from my phone"}"#;
+    assert!(
+        post("/api/runs/p/send", body, "").starts_with("HTTP/1.1 403"),
+        "needs X-Amux"
+    );
+    let sent = post("/api/runs/p/send", body, "X-Amux: 1\r\n");
+    assert!(sent.starts_with("HTTP/1.1 200"), "{sent}");
+    assert!(
+        post("/api/runs/p/key", r#"{"key":"rm -rf"}"#, "X-Amux: 1\r\n").starts_with("HTTP/1.1 400")
+    );
+    assert!(post("/api/runs/..%2Fx/stop", "{}", "X-Amux: 1\r\n").starts_with("HTTP/1.1 400"));
+    let mut screen = String::new();
+    for _ in 0..100 {
+        screen = get("/api/runs/p/screen", &cookie);
+        if screen.contains("got from my phone") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(screen.contains("got from my phone"), "{screen}");
+    // Everything else the app does: accounts, load, starting a run, live events, comments.
+    assert!(get("/api/accounts", &cookie).contains("\"id\": \"fake@one\""));
+    assert!(get("/api/slots", &cookie).contains("\"classes\""));
+    let events = {
+        use std::io::{Read, Write};
+        let mut es = std::net::TcpStream::connect(addr).unwrap();
+        es.write_all(
+            format!("GET /api/events HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        es.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut head = [0u8; 256];
+        let n = es.read(&mut head).unwrap();
+        assert!(String::from_utf8_lossy(&head[..n]).contains("text/event-stream"));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        es
+    };
+    let started = post(
+        "/api/spawn",
+        r#"{"account":"fake@one","name":"q","prompt":"hello from the phone"}"#,
+        "X-Amux: 1\r\n",
+    );
+    assert!(
+        started.starts_with("HTTP/1.1 200") && started.contains("started q"),
+        "{started}"
+    );
+    assert!(post("/api/spawn", r#"{"account":"--x"}"#, "X-Amux: 1\r\n").starts_with("HTTP/1.1 400"));
+    {
+        use std::io::Read;
+        let mut es = events;
+        let mut got = String::new();
+        let mut buf = [0u8; 4096];
+        while !got.contains("\"run\":\"q\"") {
+            let n = es.read(&mut buf).unwrap();
+            assert!(n > 0, "the stream ended: {got}");
+            got.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(got.contains("data: {"), "{got}");
+    }
+    assert!(!s.amux(&["ps"]).out.contains("--prompt"));
+    let c = post(
+        "/api/runs/p/comment",
+        r#"{"file":"a.rs","line":3,"note":"from the phone"}"#,
+        "X-Amux: 1\r\n",
+    );
+    assert!(c.starts_with("HTTP/1.1 200"), "{c}");
+    assert!(get("/api/runs/p/comments", &cookie).contains("from the phone"));
+    assert!(post("/api/runs/p/stop", "{}", "X-Amux: 1\r\n").starts_with("HTTP/1.1 200"));
+    s.amux(&["stop", "q"]);
+    srv.kill().unwrap();
+    srv.wait().unwrap();
+}
+
+#[test]
+fn plugins_hooks_and_the_agent_skill() {
+    let s = Sandbox::new("plugins");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    // A plugin: `amux plugin new`, then `amux <name>` runs it with AMUX_BIN set.
+    let made = s.amux(&["plugin", "new", "hello"]);
+    assert_eq!(made.code, 0, "{}", made.err);
+    let p = s.amux_home.join("plugins/hello");
+    write(
+        &p,
+        "#!/bin/sh\n# amux: says hello\necho \"hello $1 via $(basename \"$AMUX_BIN\")\"\n",
+    );
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(s
+        .amux(&["plugin", "list"])
+        .out
+        .contains("hello            says hello"));
+    assert_eq!(
+        s.amux(&["hello", "world"]).out.trim(),
+        "hello world via amux"
+    );
+    // Others can't change what amux runs: a group-writable plugin is ignored.
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o770)).unwrap();
+    assert!(s.amux(&["hello"]).err.contains("Unknown command"));
+
+    // A hook runs when a run exits.
+    let hook = s.amux_home.join("hooks/on-exited");
+    write(
+        &hook,
+        &format!(
+            "#!/bin/sh\necho \"$AMUX_EVENT $AMUX_RUN $AMUX_MESSAGE\" >> {}\n",
+            s.home.join("hooked").display()
+        ),
+    );
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(s.amux(&["spawn", "--name", "h", "fake"]).code, 0);
+    wait_ps(&s, "h", "exited 0");
+    let mut hooked = String::new();
+    for _ in 0..100 {
+        hooked = fs::read_to_string(s.home.join("hooked")).unwrap_or_default();
+        if !hooked.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(hooked.trim(), "exited h 0");
+
+    // The skill installs into the shared home that every account sees.
+    assert!(s.amux(&["skill"]).out.starts_with("---\nname: amux"));
+    let claude_home = s.home.join(".claude");
+    fs::create_dir_all(&claude_home).unwrap();
+    let i = s.amux(&["skill", "--install"]);
+    assert_eq!(i.code, 0, "{}", i.err);
+    assert!(
+        claude_home.join("skills/amux/SKILL.md").exists(),
+        "{}",
+        i.out
+    );
 }

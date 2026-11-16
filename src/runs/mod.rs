@@ -7,11 +7,13 @@
 //!   sock         the host's Unix socket, present while the run is alive
 
 pub mod attach;
+pub mod client;
 pub mod detect;
 pub mod host;
 pub mod notify;
 pub mod program;
 pub mod screen;
+pub mod state;
 
 use crate::store::{read_json, write_json};
 use crate::{fsx, paths, time};
@@ -57,6 +59,10 @@ pub struct Run {
     /// What the CLI last reported about itself with OSC 7501, if it reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProgramStatus>,
+    /// Set by the host while it waits for a `runs` slot before starting the CLI
+    /// (`"limits"` in config.json): why, and since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<Waiting>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -93,16 +99,28 @@ pub struct Worktree {
     pub repo: String,
     pub path: String,
     pub branch: String,
+    /// The commit it started from, so `amux diff` shows only the run's own changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
     Starting,
+    /// The host is waiting for a slot before it starts the CLI.
+    Queued,
     Running,
     Exited(i32),
     Failed,
     /// The host is gone without recording an exit (killed, or the machine restarted).
     Lost,
+}
+
+impl State {
+    /// Its host is alive: starting, queued or running.
+    pub fn is_live(&self) -> bool {
+        matches!(self, State::Starting | State::Queued | State::Running)
+    }
 }
 
 impl Run {
@@ -114,6 +132,7 @@ impl Run {
             return State::Exited(code);
         }
         match self.host_pid {
+            Some(pid) if alive(pid) && self.pid.is_none() && self.queued.is_some() => State::Queued,
             Some(pid) if alive(pid) => State::Running,
             None if time::now_ms() - self.started_at < 10_000 => State::Starting,
             _ => State::Lost,
@@ -306,6 +325,9 @@ mod tests {
         };
         assert_eq!(r.state(), State::Starting);
         r.host_pid = Some(std::process::id());
+        r.queued = Some(Waiting::default());
+        assert_eq!(r.state(), State::Queued);
+        r.pid = Some(1);
         assert_eq!(r.state(), State::Running);
         r.exit_code = Some(3);
         assert_eq!(r.state(), State::Exited(3));

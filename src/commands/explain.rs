@@ -3,9 +3,9 @@
 //! a notification, or output timing), what amux watches for in this run, and the bottom of
 //! its screen.
 
+use crate::runs::state::{classify, last_output, short_age, IDLE_AFTER_MS};
 use crate::runs::{self, Run, State};
 use crate::time;
-use crate::ui::status::{classify, last_output, short_age, IDLE_AFTER_MS};
 use crate::util::need;
 use anyhow::Result;
 use serde_json::json;
@@ -91,6 +91,16 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
     let mut why = vec![];
     let mut source = "output";
     match state {
+        State::Queued => {
+            source = "slots";
+            why.push(format!(
+                "It hasn't started yet: {}.",
+                run.queued.as_ref().map_or("it waits for a run slot", |q| q.reason.as_str())
+            ));
+            why.push(
+                "It starts on its own once a run slot is free and the machine has room. `amux slots` shows who holds them; the limits are under \"limits\" in ~/.amux/config.json.".into(),
+            );
+        }
         State::Starting => {
             source = "host";
             why.push("Its host is starting the CLI.".into());

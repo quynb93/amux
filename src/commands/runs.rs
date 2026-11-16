@@ -1,5 +1,6 @@
 //! `amux spawn | ps | attach | logs | stop | rm`: parallel background runs.
 
+use crate::git::git;
 use crate::launch::{log_launch, prepare};
 use crate::paths::{self, tildify};
 use crate::runs::{self, attach::attach, Run, State, Worktree};
@@ -13,11 +14,15 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const SPAWN_USAGE: &str =
-    "amux spawn [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--attach] <provider>[@name] [args...]";
+    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--attach] <provider>[@name] [args...]";
 
 #[derive(Default)]
 struct SpawnOpts {
     name: Option<String>,
+    /// Start in this folder instead of the current one.
+    dir: Option<String>,
+    /// A first prompt, passed the way the provider takes one (its `promptArgs`).
+    prompt: Option<String>,
     worktree: bool,
     branch: Option<String>,
     base: Option<String>,
@@ -56,6 +61,11 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--base" => o.base = Some(value()?),
             "--worktree" | "-w" => o.worktree = true,
             "--attach" | "-a" => o.attach = true,
+            "--dir" | "-C" => o.dir = Some(value()?),
+            "--prompt" => {
+                // A prompt may start with anything but "-", like any value here.
+                o.prompt = Some(value()?)
+            }
             "--" => {
                 i += 1;
                 break;
@@ -67,20 +77,6 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
     o.worktree |= o.branch.is_some() || o.base.is_some();
     let acct = need(argv.get(i), SPAWN_USAGE)?;
     Ok((o, acct, argv.get(i + 1..).unwrap_or_default()))
-}
-
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .context("could not run git")?;
-    if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Adds a worktree on a new branch for the run. Returns it and the directory to start in:
@@ -121,11 +117,13 @@ fn add_worktree(cwd: &Path, id: &str, o: &SpawnOpts) -> Result<(Worktree, PathBu
     .map_err(|e| anyhow!("git worktree add failed: {e}"))?;
     let start = path.join(&sub);
     let start = if start.is_dir() { start } else { path.clone() };
+    let base = git(&path, &["rev-parse", "HEAD"]).ok();
     Ok((
         Worktree {
             repo: top.to_string_lossy().into_owned(),
             path: path_s,
             branch,
+            base,
         },
         start,
     ))
@@ -162,6 +160,20 @@ fn remove_worktree(wt: &Worktree, drop_branch: bool) -> Option<String> {
 }
 
 pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
+    // `--on <machine>[:<dir>]`: the same spawn, on that machine, in that folder.
+    if let Some(i) = argv.iter().position(|a| a == "--on") {
+        let on = need(argv.get(i + 1), SPAWN_USAGE)?;
+        let (name, dir) = match on.split_once(':') {
+            Some((n, d)) => (n, Some(d)),
+            None => (on, None),
+        };
+        let m = crate::remote::find(name)
+            .ok_or_else(|| anyhow!("No machine \"{name}\". `amux machine list` shows them."))?;
+        let mut rest: Vec<String> = vec!["spawn".into()];
+        rest.extend(argv[..i].iter().cloned());
+        rest.extend(argv[i + 2..].iter().cloned());
+        return m.run(&rest, dir);
+    }
     let (o, acct_ref, args) = parse_spawn(argv)?;
     if let Some(n) = &o.name {
         if !valid_name(n) {
@@ -170,7 +182,24 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     }
     let acct = resolve_account(acct_ref)?;
     let (spec, env) = prepare(&acct)?;
-    let cwd = std::env::current_dir()?;
+    let cwd = match &o.dir {
+        Some(d) => {
+            let p = paths::expand_home(d);
+            if !p.is_dir() {
+                bail!("No folder {}.", tildify(&p));
+            }
+            p
+        }
+        None => std::env::current_dir()?,
+    };
+    let mut args = args.to_vec();
+    if let Some(p) = o.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        match &spec.prompt_args {
+            Some(t) => args.extend(crate::launch::fill_args(t, &[("prompt", p)])),
+            None => args.push(p.to_string()),
+        }
+    }
+    let args = args.as_slice();
     let id = runs::claim_id(o.name.as_deref(), &acct.provider)?;
 
     let mut run = Run {
@@ -207,6 +236,15 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         Some(wt) => format!("{} (branch {})", tildify(Path::new(&run.cwd)), wt.branch),
         None => tildify(Path::new(&run.cwd)),
     };
+    let now = runs::load(&id)?;
+    if now.state() == State::Queued {
+        let why = now.queued.map(|q| q.reason).unwrap_or_default();
+        eprintln!("amux: queued {id} as {} in {place}: {why}", acct.id());
+        eprintln!(
+            "  It starts by itself when there is room.  amux ps    amux slots    amux stop {id}"
+        );
+        return Ok(0);
+    }
     eprintln!("amux: started {id} as {} in {place}", acct.id());
     if o.attach {
         return attach(&runs::load(&id)?);
@@ -240,7 +278,8 @@ fn start_host(run: &Run, env: &crate::launch::EnvPlan) -> Result<()> {
         if let Some(e) = r.error {
             bail!("{e}");
         }
-        if r.pid.is_some() {
+        // Queued for a run slot: it starts by itself later, so don't hold the terminal.
+        if r.pid.is_some() || r.queued.is_some() {
             return Ok(());
         }
         if host.try_wait()?.is_some() {
@@ -274,6 +313,10 @@ fn last_output(run: &Run) -> Option<i64> {
 fn state_label(run: &Run, now: i64) -> String {
     match run.state() {
         State::Starting => "starting".into(),
+        State::Queued => {
+            let t = run.queued.as_ref().map_or(now, |q| q.since);
+            format!("queued {}", since(t, now).trim_end_matches(" ago"))
+        }
         State::Running if run.waiting.is_some() => {
             let t = run.waiting.as_ref().map_or(now, |w| w.since);
             format!("waiting {}", since(t, now).trim_end_matches(" ago"))
@@ -304,24 +347,87 @@ fn state_label(run: &Run, now: i64) -> String {
     }
 }
 
-pub fn ps_cmd(_argv: &[String]) -> Result<i32> {
+/// One object per run, for `ps --json`, scripts, agents and other machines' `amux ui`.
+pub(crate) fn ps_values(all: &[Run]) -> Vec<serde_json::Value> {
+    use crate::runs::state::run_kind;
+    let now = time::now_ms();
+    all.iter()
+        .map(|r| {
+            let (kind, label) = run_kind(r, now);
+            let state = if r.state() == State::Queued {
+                "queued".to_string()
+            } else {
+                format!("{kind:?}").to_lowercase()
+            };
+            let verify = crate::work::verify::load(&r.id);
+            serde_json::json!({
+                "id": r.id,
+                "account": r.account,
+                "state": state,
+                "kind": kind.name(),
+                "label": label,
+                "psLabel": state_label(r, now),
+                "live": kind.is_live(),
+                "waiting": r.waiting.as_ref().map(|w| &w.reason),
+                "queued": r.queued.as_ref().map(|q| &q.reason),
+                "exitCode": r.exit_code,
+                "cwd": r.cwd,
+                "branch": r.worktree.as_ref().map(|w| &w.branch),
+                "worktree": r.worktree.as_ref().map(|w| &w.path),
+                // The space it belongs to: the repo of its worktree, else its folder.
+                "repo": r.worktree.as_ref().map_or(&r.cwd, |w| &w.repo),
+                "verifyLabel": verify.as_ref().map(|v| v.label()),
+                "verify": verify,
+                "pr": crate::work::github::load(&r.id),
+                "startedAt": r.started_at,
+                "args": r.args,
+                "run": r,
+            })
+        })
+        .collect()
+}
+
+pub fn ps_cmd(argv: &[String]) -> Result<i32> {
+    let local_only = argv.iter().any(|a| a == "--local");
     let all = runs::list();
-    if all.is_empty() {
+    let mut values = ps_values(&all);
+    if !local_only {
+        values.extend(crate::remote::runs(false));
+    }
+    if argv.iter().any(|a| a == "--json") {
+        println!("{}", serde_json::to_string_pretty(&values)?);
+        return Ok(0);
+    }
+    if values.is_empty() {
         println!("No runs. Start one with: amux spawn <provider>[@name] [args...]");
         return Ok(0);
     }
     let now = time::now_ms();
-    let rows: Vec<Vec<String>> = all
+    let s = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let rows: Vec<Vec<String>> = values
         .iter()
-        .map(|r| {
+        .map(|v| {
+            let args: Vec<String> = v["args"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let dir = s(v, "cwd");
             vec![
-                r.id.clone(),
-                r.account.clone(),
-                state_label(r, now),
-                since(r.started_at, now),
-                tildify(Path::new(&r.cwd)),
-                r.worktree.as_ref().map_or("-".into(), |w| w.branch.clone()),
-                one_line(&r.args.join(" "), 50),
+                s(v, "id"),
+                s(v, "account"),
+                s(v, "psLabel"),
+                since(v["startedAt"].as_i64().unwrap_or(now), now),
+                if v.get("machine").is_some() {
+                    dir
+                } else {
+                    tildify(Path::new(&dir))
+                },
+                v["branch"].as_str().unwrap_or("-").to_string(),
+                one_line(&args.join(" "), 50),
             ]
         })
         .collect();
@@ -339,6 +445,13 @@ pub fn attach_cmd(argv: &[String]) -> Result<i32> {
     let run = runs::find(need(argv.first(), "amux attach <run>")?)?;
     match run.state() {
         State::Running | State::Starting => attach(&run),
+        State::Queued => bail!(
+            "{} is queued and hasn't started yet: {}. `amux slots` shows what it waits for.",
+            run.id,
+            run.queued
+                .as_ref()
+                .map_or("waiting for a run slot", |q| q.reason.as_str())
+        ),
         State::Exited(c) => bail!(
             "{0} exited with code {c}. See its output with `amux logs {0}`.",
             run.id
@@ -379,6 +492,9 @@ pub fn logs_cmd(argv: &[String]) -> Result<i32> {
 }
 
 fn signal(run: &Run, sig: libc::c_int) -> Result<()> {
+    if run.state() == State::Queued {
+        return cancel_queued(run);
+    }
     let pid = run
         .pid
         .ok_or_else(|| anyhow!("{} has no process yet.", run.id))?;
@@ -390,11 +506,34 @@ fn signal(run: &Run, sig: libc::c_int) -> Result<()> {
     Ok(())
 }
 
+/// Ends a run that is still waiting for a slot: its host has started nothing yet, so
+/// ending the host ends the run. Recorded as stopped (143), like `amux stop` would.
+fn cancel_queued(run: &Run) -> Result<()> {
+    let host = run
+        .host_pid
+        .ok_or_else(|| anyhow!("{} has no host.", run.id))?;
+    if unsafe { libc::kill(host as libc::pid_t, libc::SIGTERM) } != 0 {
+        return Err(std::io::Error::last_os_error()).context(format!("could not stop {}", run.id));
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while runs::alive(host) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut r = runs::load(&run.id)?;
+    if r.exit_code.is_none() {
+        r.exit_code = Some(128 + libc::SIGTERM);
+        r.ended_at = Some(time::now_ms());
+        r.queued = None;
+        runs::save(&r)?;
+    }
+    Ok(())
+}
+
 fn wait_exit(id: &str, limit: Duration) -> Option<Run> {
     let deadline = Instant::now() + limit;
     while Instant::now() < deadline {
         match runs::load(id) {
-            Ok(r) if r.state() != State::Running => return Some(r),
+            Ok(r) if !matches!(r.state(), State::Running | State::Queued) => return Some(r),
             Err(_) => return None,
             _ => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -409,7 +548,7 @@ pub fn stop_cmd(argv: &[String]) -> Result<i32> {
         "amux stop <run> [--force]",
     )?;
     let run = runs::find(id)?;
-    if run.state() != State::Running {
+    if !matches!(run.state(), State::Running | State::Queued) {
         bail!("{} is not running.", run.id);
     }
     signal(&run, if force { libc::SIGKILL } else { libc::SIGTERM })?;
@@ -432,7 +571,7 @@ pub fn rm_cmd(argv: &[String]) -> Result<i32> {
     let targets: Vec<Run> = if done {
         runs::list()
             .into_iter()
-            .filter(|r| r.state() != State::Running && r.state() != State::Starting)
+            .filter(|r| !r.state().is_live())
             .collect()
     } else {
         if ids.is_empty() {
@@ -444,7 +583,7 @@ pub fn rm_cmd(argv: &[String]) -> Result<i32> {
         println!("Nothing to remove.");
     }
     for run in targets {
-        if matches!(run.state(), State::Running | State::Starting) {
+        if run.state().is_live() {
             if !force {
                 bail!(
                     "{0} is still running. Stop it first (`amux stop {0}`) or use --force.",

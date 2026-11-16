@@ -7,24 +7,35 @@
 //! `stop` and `rm` commands you would type, in the background, so they behave exactly as
 //! they do in a shell and never block the screen.
 
+mod actions;
 pub mod attach;
 mod draw;
+mod input;
+mod keys;
+mod layout;
 pub mod palette;
 pub mod preview;
+mod review;
 pub mod spawn;
 pub mod status;
 pub mod theme;
+mod typing;
+mod views;
 
 use crate::runs::{self, Run};
 use crate::store;
 use crate::time;
+use crate::work::{github, verify};
 use anyhow::{bail, Result};
 use palette::{Action, Ctx};
 use preview::Previews;
 use ratatui::backend::{Backend, TestBackend};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::crossterm::{cursor, execute, terminal};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 use spawn::{Field, SpawnForm};
@@ -36,11 +47,15 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use theme::Theme;
+use views::View;
 
 /// How often run.json files are re-read.
+/// How often runs on other machines are fetched.
+const REMOTE_EVERY: Duration = Duration::from_secs(2);
 const RELOAD_EVERY: Duration = Duration::from_millis(500);
 /// Previews kept connected at once. Only these hold a socket, however many runs exist.
-const PREVIEW_CACHE: usize = 4;
+/// Live previews kept connected: enough for the most tiles, plus one for the list view.
+const PREVIEW_CACHE: usize = layout::MAX_TILES + 1;
 
 const USAGE: &str =
     "amux ui [--dump [--ansi] [--size <rows>x<cols>] [--select <run>] [--keys <keys>]]";
@@ -73,12 +88,18 @@ pub fn ui_cmd(argv: &[String]) -> Result<i32> {
     }
     let (theme, notes) = Theme::from_config();
     let mut app = App::new(theme);
+    app.layout = layout::Layout::from_config();
+    app.view = app.layout.view;
     if !notes.is_empty() {
         app.say(format!("Theme: {}", notes.join("; ")), true);
     }
     app.reload();
     if let Some(id) = select {
-        app.select_id(&runs::find(&id)?.id);
+        if crate::remote::split(&id).is_some() {
+            app.select_id(&id);
+        } else {
+            app.select_id(&runs::find(&id)?.id);
+        }
     }
     if dump {
         // Keys to press first, to show a dialog: \n is Enter, \t Tab, \x1b Esc.
@@ -109,14 +130,16 @@ pub fn ui_cmd(argv: &[String]) -> Result<i32> {
     }
     app.guard = true;
     let mut term = ratatui::try_init()?;
+    let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let r = app.run(&mut term);
+    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     r.map(|_| 0)
 }
 
 /// Keys that do something in the list.
 fn is_shortcut(c: char) -> bool {
-    c.is_ascii_digit()
+    matches!(c, '1'..='9')
         || matches!(
             c,
             'q' | 'j'
@@ -132,6 +155,10 @@ fn is_shortcut(c: char) -> bool {
                 | 'x'
                 | 'f'
                 | 'e'
+                | 'v'
+                | 'c'
+                | 'b'
+                | 't'
                 | '/'
                 | ':'
                 | '?'
@@ -149,6 +176,10 @@ struct Row {
     run: Run,
     kind: Kind,
     label: String,
+    /// How its last `amux verify` went: "tests passed", "pushed", …
+    verify: Option<String>,
+    /// Its pull request and CI checks, as last seen.
+    pr: Option<github::PullRequest>,
 }
 
 enum Mode {
@@ -158,6 +189,8 @@ enum Mode {
     Help,
     Palette(PaletteState),
     Output(OutputView),
+    /// A run's diff, with comments on its lines (`c`).
+    Review(Box<review::ReviewView>),
 }
 
 /// The command palette while it is open.
@@ -187,6 +220,8 @@ enum Pending {
     },
     /// A run's output in your pager.
     Logs(String),
+    /// What a run changed, in your pager.
+    Diff(String),
 }
 
 #[derive(Clone)]
@@ -201,6 +236,8 @@ enum Confirm {
     },
     /// Every finished run.
     Clean,
+    /// Check a run's work: t runs its tests here, p pushes its branch for CI.
+    Verify(Box<verify::Plan>),
 }
 
 impl Confirm {
@@ -216,7 +253,27 @@ impl Confirm {
                 "Remove every finished run? Worktrees go only if they have no uncommitted changes"
                     .into()
             }
+            Confirm::Verify(p) => {
+                let mut q = format!("Verify {}:", p.id);
+                if p.dirty > 0 {
+                    q.push_str(&format!(" {} uncommitted,", p.dirty));
+                }
+                if let Some(b) = &p.busy {
+                    q.push_str(&format!(" {b},"));
+                }
+                q.trim_end_matches(',').to_string()
+            }
         }
+    }
+
+    /// For a Verify choice: what `t` and `p` do, if they can, and which ⏎ picks.
+    fn verify_choices(p: &verify::Plan) -> (Option<String>, Option<String>, bool) {
+        let test = p.test.as_ref().map(|t| format!("test ({t})"));
+        let push = match (&p.branch, &p.remote) {
+            (Some(b), Some(_)) => Some(format!("push {b} for CI")),
+            _ => None,
+        };
+        (test, push, p.recommend_push())
     }
 
     fn argv(&self) -> Vec<String> {
@@ -224,6 +281,7 @@ impl Confirm {
             Confirm::Stop { id, force } => ("stop", id, *force),
             Confirm::Remove { id, force } => ("rm", id, *force),
             Confirm::Clean => return vec!["rm".into(), "--done".into()],
+            Confirm::Verify(p) => return vec!["verify".into(), p.id.clone()],
         };
         let mut v = vec![cmd.to_string(), id.clone()];
         if force {
@@ -281,6 +339,29 @@ struct App {
     typing_until: Option<Instant>,
     /// When the open confirmation appeared.
     confirm_at: Instant,
+    /// Keys go to the selected run, typed in its pane, instead of being shortcuts.
+    focus_run: bool,
+    /// Ctrl-B was pressed while typing into a run: the next key is a command.
+    prefix: bool,
+    /// The run the host was told a person is typing into (so it doesn't notify).
+    typing_into: Option<String>,
+    /// The size the focused run was last fitted to, so it is resized only on change.
+    fitted: Option<(String, u16, u16)>,
+    /// When each run's PR checks were last asked about.
+    checked: HashMap<String, Instant>,
+    /// Where the list and the preview's inside were last drawn, for the mouse.
+    list_area: Rect,
+    preview_area: Rect,
+    /// List and preview, a board by state (`b`), or live tiles (`t`).
+    view: View,
+    /// Widths, sides and tile counts, from config.json (`/layout`).
+    layout: layout::Layout,
+    /// Runs on other machines from their last fetch, and whether no fetch is running.
+    remote: std::sync::Arc<std::sync::Mutex<(Vec<serde_json::Value>, bool)>>,
+    remote_at: Option<Instant>,
+    /// Where each tile and board card was drawn, and its run, for the mouse.
+    panes: Vec<(Rect, usize)>,
+    cards: Vec<(Rect, usize)>,
 }
 
 /// How long letters count as typing after one that isn't a shortcut.
@@ -317,13 +398,58 @@ impl App {
             guard: false,
             typing_until: None,
             confirm_at: Instant::now(),
+            focus_run: false,
+            prefix: false,
+            typing_into: None,
+            fitted: None,
+            checked: HashMap::new(),
+            list_area: Rect::default(),
+            preview_area: Rect::default(),
+            view: View::default(),
+            layout: layout::Layout::default(),
+            panes: Vec::new(),
+            remote: std::sync::Arc::new(std::sync::Mutex::new((vec![], true))),
+            remote_at: None,
+            cards: Vec::new(),
         }
+    }
+
+    /// Runs on other machines, as last fetched (in the background; at once for --dump).
+    fn remote_rows(&mut self) -> Vec<Row> {
+        if crate::remote::list().is_empty() {
+            return vec![];
+        }
+        if !self.guard {
+            let v = crate::remote::runs(true);
+            *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = (v, true);
+        } else {
+            let fetch = {
+                let mut r = self.remote.lock().unwrap_or_else(|e| e.into_inner());
+                let due = self.remote_at.is_none_or(|t| t.elapsed() >= REMOTE_EVERY);
+                let go = due && r.1;
+                if go {
+                    r.1 = false;
+                }
+                go
+            };
+            if fetch {
+                self.remote_at = Some(Instant::now());
+                let shared = self.remote.clone();
+                std::thread::spawn(move || {
+                    let v = crate::remote::runs(true);
+                    *shared.lock().unwrap_or_else(|e| e.into_inner()) = (v, true);
+                });
+            }
+        }
+        let r = self.remote.lock().unwrap_or_else(|e| e.into_inner());
+        r.0.iter().filter_map(remote_row).collect()
     }
 
     fn reload(&mut self) {
         let now = time::now_ms();
         let all = runs::list();
-        self.total = all.len();
+        let remote = self.remote_rows();
+        self.total = all.len() + remote.len();
         let filter = self.filter.to_lowercase();
         let show = self.show;
         self.rows = all
@@ -337,8 +463,21 @@ impl App {
                     last_output(&run),
                     now,
                 );
-                Row { run, kind, label }
+                let verify = verify::load(&run.id).map(|v| v.label());
+                let pr = github::load(&run.id);
+                Row {
+                    run,
+                    kind,
+                    label,
+                    verify,
+                    pr,
+                }
             })
+            .chain(
+                remote
+                    .into_iter()
+                    .filter(|r| filter.is_empty() || matches_filter(&r.run, &filter)),
+            )
             .filter(|r| show.matches(r.kind))
             .collect();
         let first = self.last_reload.is_none();
@@ -351,6 +490,7 @@ impl App {
                 self.unseen.insert(r.run.id.clone());
             }
         }
+        self.refresh_checks();
         let ids: HashSet<&str> = self.rows.iter().map(|r| r.run.id.as_str()).collect();
         self.unseen.retain(|id| ids.contains(id.as_str()));
         self.last_kind.retain(|id, _| ids.contains(id.as_str()));
@@ -443,6 +583,9 @@ impl App {
         while let Ok(d) = self.rx.try_recv() {
             any = true;
             self.busy = self.busy.saturating_sub(1);
+            if let Mode::Review(r) = &mut self.mode {
+                r.reload_comments();
+            }
             if let Some((title, text)) = d.output {
                 let view = OutputView {
                     title,
@@ -504,8 +647,11 @@ impl App {
             if event::poll(Duration::from_millis(40))? {
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
+                    Event::Mouse(m) => self.mouse(m),
+                    Event::Paste(text) => self.paste(&text),
                     _ => {}
                 }
+                self.sync_focus();
                 dirty = true;
             }
             match self.pending.take() {
@@ -537,12 +683,26 @@ impl App {
             return Ok(());
         }
         let mut out = io::stdout();
-        execute!(out, terminal::LeaveAlternateScreen, cursor::Show)?;
+        execute!(
+            out,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            terminal::LeaveAlternateScreen,
+            cursor::Show
+        )?;
         let outcome = match self.previews.find(id) {
             Some(p) => attach::attach_in_place(p),
             None => Ok(attach::Outcome::Ended),
         };
-        execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
+        execute!(
+            out,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        // The run was sized to the whole terminal; fit it to the pane again when typing.
+        self.fitted = None;
         // Repaint everything. Not `clear()`: it asks the terminal where the cursor is and
         // waits for the answer.
         let size = term.size()?;
@@ -578,10 +738,23 @@ impl App {
                     .arg(&id);
                 (c, false, format!("logs of {id}"))
             }
+            Pending::Diff(id) => {
+                let mut c = Command::new("sh");
+                c.args(["-c", "\"$0\" diff \"$1\" --color | ${PAGER:-less -R}"])
+                    .arg(&exe)
+                    .arg(&id);
+                (c, false, format!("changes of {id}"))
+            }
             Pending::Attach(_) => return Ok(()),
         };
         let mut out = io::stdout();
-        execute!(out, terminal::LeaveAlternateScreen, cursor::Show)?;
+        execute!(
+            out,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            terminal::LeaveAlternateScreen,
+            cursor::Show
+        )?;
         terminal::disable_raw_mode()?;
         let status = cmd.env("AMUX_NO_UPDATE_CHECK", "1").status();
         if pause {
@@ -590,7 +763,13 @@ impl App {
             let _ = io::stdin().read_line(&mut String::new());
         }
         terminal::enable_raw_mode()?;
-        execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
+        execute!(
+            out,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         let size = term.size()?;
         term.resize(Rect::new(0, 0, size.width, size.height))?;
         match status {
@@ -603,518 +782,6 @@ impl App {
         }
         self.reload();
         Ok(())
-    }
-
-    fn key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let typing = matches!(self.mode, Mode::Spawn(_) | Mode::Palette(_));
-        if ctrl && k.code == KeyCode::Char('c') && !typing {
-            self.quit = true;
-            return;
-        }
-        let was_confirm = matches!(self.mode, Mode::Confirm(_));
-        self.key_mode(k);
-        if !was_confirm && matches!(self.mode, Mode::Confirm(_)) {
-            self.confirm_at = Instant::now();
-        }
-    }
-
-    fn key_mode(&mut self, k: KeyEvent) {
-        match std::mem::replace(&mut self.mode, Mode::Normal) {
-            Mode::Normal => self.key_normal(k),
-            Mode::Help => {}
-            Mode::Palette(p) => {
-                if let Some(p) = self.key_palette(p, k) {
-                    self.mode = Mode::Palette(p);
-                }
-            }
-            Mode::Output(mut o) => {
-                let max = o.lines.len().saturating_sub(1);
-                match k.code {
-                    KeyCode::Down | KeyCode::Char('j') => o.scroll = (o.scroll + 1).min(max),
-                    KeyCode::Up | KeyCode::Char('k') => o.scroll = o.scroll.saturating_sub(1),
-                    KeyCode::PageDown => o.scroll = (o.scroll + 10).min(max),
-                    KeyCode::PageUp => o.scroll = o.scroll.saturating_sub(10),
-                    _ => return,
-                }
-                self.mode = Mode::Output(o);
-            }
-            // Typed ahead, before the question could be read: neither yes nor no.
-            Mode::Confirm(c) if self.guard && self.confirm_at.elapsed() < CONFIRM_GUARD => {
-                self.mode = Mode::Confirm(c);
-            }
-            Mode::Confirm(c) => match k.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                    let what = c.question();
-                    self.background(c.argv(), what.trim_end_matches('?').to_string());
-                }
-                _ => self.say("Cancelled.", false),
-            },
-            Mode::Spawn(mut f) => {
-                if self.key_spawn(&mut f, k) {
-                    self.mode = Mode::Spawn(f);
-                }
-            }
-        }
-    }
-
-    fn key_normal(&mut self, k: KeyEvent) {
-        let cur = self.current().map(|r| (r.run.id.clone(), r.kind));
-        // Letters in the list are shortcuts, so text meant for a run would open dialogs
-        // and panels (and "sky" would stop it). A letter that isn't a shortcut starts a
-        // short typing window: until it ends, letters only repeat how to type into the run.
-        if let KeyCode::Char(c) = k.code {
-            let plain = !k
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-            let typing = self.typing_until.is_some_and(|t| Instant::now() < t);
-            if plain && self.guard && (typing || !is_shortcut(c)) {
-                self.typing_until = Some(Instant::now() + TYPING);
-                let hint = match &cur {
-                    Some((id, kind)) if kind.is_live() => {
-                        format!("Letters here are shortcuts. Press ⏎ to type into {id}; Ctrl-] comes back.")
-                    }
-                    _ => "Letters here are shortcuts; ? lists them.".to_string(),
-                };
-                self.say(hint, false);
-                return;
-            }
-        }
-        match k.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::Char('g') | KeyCode::Home => {
-                self.set_index((!self.rows.is_empty()).then_some(0))
-            }
-            KeyCode::Char('G') | KeyCode::End => self.set_index(self.rows.len().checked_sub(1)),
-            KeyCode::Char(c @ '1'..='9') => {
-                let i = c as usize - '1' as usize;
-                if i < self.rows.len() {
-                    self.set_index(Some(i));
-                }
-            }
-            KeyCode::Tab => {
-                let kinds: Vec<Kind> = self.rows.iter().map(|r| r.kind).collect();
-                // Unseen runs first: they changed while you were away.
-                let unseen = self
-                    .rows
-                    .iter()
-                    .position(|r| self.unseen.contains(&r.run.id));
-                let from = self.list.selected().unwrap_or(0);
-                match unseen.or_else(|| next_attention(&kinds, from)) {
-                    Some(i) => self.set_index(Some(i)),
-                    None => self.say("Nothing needs you.", false),
-                }
-            }
-            KeyCode::Enter | KeyCode::Char('a') => {
-                if let Some((id, kind)) = cur {
-                    self.attach_run(id, kind)
-                }
-            }
-            KeyCode::Char('n') => self.open_spawn(None, ""),
-            KeyCode::Char(c @ ('s' | 'S')) => {
-                if let Some((id, kind)) = cur {
-                    self.stop_run(id, kind, c == 'S')
-                }
-            }
-            KeyCode::Char(c @ ('d' | 'D' | 'x')) => {
-                if let Some((id, kind)) = cur {
-                    self.remove_run(id, kind, c == 'D')
-                }
-            }
-            KeyCode::Char('/' | ':') => self.open_palette(),
-            KeyCode::Char('f') => {
-                self.show = self.show.next();
-                self.reload();
-            }
-            KeyCode::Char('e') => {
-                if let Some((id, _)) = cur {
-                    self.explain(id)
-                }
-            }
-            KeyCode::Esc if self.scroll == 0 && self.filtered() => {
-                self.filter.clear();
-                self.show = Show::All;
-                self.reload();
-            }
-            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Esc => {
-                self.scroll = match k.code {
-                    KeyCode::PageUp => self.scroll + 10,
-                    KeyCode::PageDown => self.scroll.saturating_sub(10),
-                    _ => 0,
-                };
-                if let Some(p) = self.selected.as_ref().and_then(|id| self.previews.find(id)) {
-                    let mut s = p.lock();
-                    s.parser.screen_mut().set_scrollback(self.scroll);
-                    // The emulator caps it at the history it has.
-                    self.scroll = s.parser.screen().scrollback();
-                }
-            }
-            KeyCode::Char('?') => self.mode = Mode::Help,
-            _ => {}
-        }
-    }
-
-    /// Whether the list hides runs (a text or state filter).
-    fn filtered(&self) -> bool {
-        !self.filter.is_empty() || self.show != Show::All
-    }
-
-    fn explain(&mut self, id: String) {
-        let label = self
-            .rows
-            .iter()
-            .find(|r| r.run.id == id)
-            .map(|r| r.label.clone())
-            .unwrap_or_default();
-        self.background_output(
-            vec!["explain".into(), id.clone()],
-            format!("Why {id} is {label}"),
-        );
-    }
-
-    fn attach_run(&mut self, id: String, kind: Kind) {
-        if kind.is_live() {
-            self.pending = Some(Pending::Attach(id));
-        } else {
-            self.say(format!("{id} has ended; d removes it."), true);
-        }
-    }
-
-    fn stop_run(&mut self, id: String, kind: Kind, force: bool) {
-        if kind.is_live() {
-            self.mode = Mode::Confirm(Confirm::Stop { id, force });
-        } else {
-            self.say(format!("{id} is not running."), true);
-        }
-    }
-
-    fn remove_run(&mut self, id: String, kind: Kind, force: bool) {
-        if kind.is_live() && !force {
-            self.say(
-                format!("{id} is still running. s stops it; D kills and removes it."),
-                true,
-            );
-        } else {
-            self.mode = Mode::Confirm(Confirm::Remove { id, force });
-        }
-    }
-
-    fn open_spawn(&mut self, account: Option<&str>, prompt: &str) {
-        let accounts = account_ids();
-        if accounts.is_empty() {
-            self.say(
-                "No accounts yet. Add one with /add-account <provider> <name>.",
-                true,
-            );
-            return;
-        }
-        // The account asked for, else the one you switched to, else the selected run's.
-        let preferred = account
-            .map(str::to_string)
-            .or_else(|| self.account.clone())
-            .or_else(|| self.current().map(|r| r.run.account.clone()));
-        if let Some(a) = account.filter(|a| !accounts.iter().any(|x| x == a)) {
-            self.say(format!("No account \"{a}\". /accounts lists them."), true);
-            return;
-        }
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let mut form = SpawnForm::new(accounts, preferred.as_deref(), in_git_repo(&cwd));
-        form.prompt = prompt.to_string();
-        self.mode = Mode::Spawn(Box::new(form));
-    }
-
-    fn open_palette(&mut self) {
-        self.mode = Mode::Palette(PaletteState {
-            input: "/".into(),
-            sel: 0,
-            ctx: Ctx {
-                runs: self.rows.iter().map(|r| r.run.id.clone()).collect(),
-                accounts: account_ids(),
-                themes: theme::available(),
-            },
-        });
-    }
-
-    /// Returns the palette if it stays open.
-    fn key_palette(&mut self, mut p: PaletteState, k: KeyEvent) -> Option<PaletteState> {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let items = palette::items(&p.input, &p.ctx);
-        let last = items.len().saturating_sub(1);
-        match k.code {
-            KeyCode::Esc => return None,
-            KeyCode::Char('c') if ctrl => return None,
-            KeyCode::Up => p.sel = p.sel.saturating_sub(1),
-            KeyCode::Char('p') if ctrl => p.sel = p.sel.saturating_sub(1),
-            KeyCode::Down => p.sel = (p.sel + 1).min(last),
-            KeyCode::Char('n') if ctrl => p.sel = (p.sel + 1).min(last),
-            KeyCode::Tab => {
-                if let Some(it) = items.get(p.sel) {
-                    p.input = it.fill.clone();
-                    p.sel = 0;
-                }
-            }
-            KeyCode::Enter => {
-                let line = match items.get(p.sel) {
-                    // A command that needs an argument: fill it in and wait for it.
-                    Some(it) if !it.complete => {
-                        p.input = it.fill.clone();
-                        p.sel = 0;
-                        return Some(p);
-                    }
-                    Some(it) => it.fill.clone(),
-                    None => p.input.clone(),
-                };
-                return match palette::parse(&line) {
-                    Ok(action) => {
-                        self.run_action(action);
-                        None
-                    }
-                    Err(e) => {
-                        self.say(e, true);
-                        Some(p)
-                    }
-                };
-            }
-            KeyCode::Backspace => {
-                p.input.pop();
-                if p.input.is_empty() {
-                    return None;
-                }
-                p.sel = 0;
-            }
-            KeyCode::Char('w') if ctrl => {
-                spawn::delete_word(&mut p.input);
-                if p.input.is_empty() {
-                    p.input.push('/');
-                }
-                p.sel = 0;
-            }
-            KeyCode::Char('u') if ctrl => {
-                p.input = "/".into();
-                p.sel = 0;
-            }
-            KeyCode::Char(c) if !ctrl => {
-                p.input.push(c);
-                p.sel = 0;
-            }
-            _ => {}
-        }
-        Some(p)
-    }
-
-    /// A run by name or unique prefix among those shown; the selected one when None.
-    fn resolve_run(&mut self, name: Option<String>) -> Option<(String, Kind)> {
-        let Some(name) = name else {
-            let cur = self.current().map(|r| (r.run.id.clone(), r.kind));
-            if cur.is_none() {
-                self.say("No run selected.", true);
-            }
-            return cur;
-        };
-        let exact = self.rows.iter().find(|r| r.run.id == name);
-        let mut m = self.rows.iter().filter(|r| r.run.id.starts_with(&name));
-        let found = exact.or_else(|| match (m.next(), m.next()) {
-            (Some(r), None) => Some(r),
-            _ => None,
-        });
-        match found {
-            Some(r) => Some((r.run.id.clone(), r.kind)),
-            None => {
-                self.say(format!("No run matches \"{name}\"."), true);
-                None
-            }
-        }
-    }
-
-    fn run_action(&mut self, action: Action) {
-        match action {
-            Action::New { account, prompt } => self.open_spawn(account.as_deref(), &prompt),
-            Action::Attach(r) => {
-                if let Some((id, kind)) = self.resolve_run(r) {
-                    self.attach_run(id, kind)
-                }
-            }
-            Action::Stop(r) => {
-                if let Some((id, kind)) = self.resolve_run(r) {
-                    self.stop_run(id, kind, false)
-                }
-            }
-            Action::Kill(r) => {
-                if let Some((id, kind)) = self.resolve_run(r) {
-                    self.stop_run(id, kind, true)
-                }
-            }
-            Action::Remove(r) => {
-                if let Some((id, kind)) = self.resolve_run(r) {
-                    self.remove_run(id, kind, false)
-                }
-            }
-            Action::Clean => self.mode = Mode::Confirm(Confirm::Clean),
-            Action::Logs(r) => {
-                if let Some((id, _)) = self.resolve_run(r) {
-                    self.pending = Some(Pending::Logs(id));
-                }
-            }
-            Action::Filter(text) => {
-                self.filter = text;
-                self.reload();
-                if !self.filter.is_empty() {
-                    self.say(
-                        format!("{} of {} runs match.", self.rows.len(), self.total),
-                        false,
-                    );
-                }
-            }
-            Action::SwitchAccount(a) => {
-                if !account_ids().contains(&a) {
-                    self.say(format!("No account \"{a}\". /accounts lists them."), true);
-                    return;
-                }
-                self.account = Some(a.clone());
-                self.background(
-                    vec!["account".into(), "default".into(), a.clone()],
-                    format!("Switching to {a}"),
-                );
-            }
-            Action::AddAccount(args) => {
-                let mut argv = vec!["account".to_string(), "add".to_string()];
-                argv.extend(args);
-                self.pending = Some(Pending::Amux { argv, pause: true });
-            }
-            Action::Accounts => {
-                self.background_output(vec!["account".into(), "list".into()], "Accounts".into())
-            }
-            Action::Doctor => self.background_output(vec!["doctor".into()], "Doctor".into()),
-            Action::Theme(None) => {
-                let mut lines: Vec<String> = theme::available()
-                    .into_iter()
-                    .map(|n| {
-                        let mark = if n == self.theme.name { "●" } else { "○" };
-                        format!("{mark} {n}")
-                    })
-                    .collect();
-                lines.extend([
-                    String::new(),
-                    "/theme <name> switches and saves it in config.json.".into(),
-                    format!(
-                        "Your own: {}/<name>.json",
-                        crate::paths::tildify(&theme::themes_dir())
-                    ),
-                    "  { \"extends\": \"dark\", \"colors\": { \"accent\": \"#ff9e64 bold\" } }"
-                        .into(),
-                    String::new(),
-                    "Roles:".into(),
-                ]);
-                lines.extend(
-                    theme::ROLES
-                        .chunks(6)
-                        .map(|c| format!("  {}", c.join(", "))),
-                );
-                self.mode = Mode::Output(OutputView {
-                    title: "Themes".into(),
-                    lines,
-                    scroll: 0,
-                });
-            }
-            Action::Theme(Some(name)) => match Theme::named(&name) {
-                Ok((t, notes)) => match Theme::save_choice(&name) {
-                    Err(e) => {
-                        self.theme = t;
-                        self.say(format!("Theme {name}, but not saved: {e:#}"), true)
-                    }
-                    Ok(()) => {
-                        // Read back as a restart would, so ui.colors overrides apply too.
-                        let (t, more) = Theme::from_config();
-                        self.theme = t;
-                        let notes: Vec<String> = notes.into_iter().chain(more).collect();
-                        if notes.is_empty() {
-                            self.say(format!("Theme {name}, saved in config.json."), false)
-                        } else {
-                            self.say(format!("Theme {name}: {}", notes.join("; ")), true)
-                        }
-                    }
-                },
-                Err(e) => self.say(e, true),
-            },
-            Action::Explain(r) => {
-                if let Some((id, _)) = self.resolve_run(r) {
-                    self.explain(id)
-                }
-            }
-            Action::Show(state) => {
-                let next = match state {
-                    None => Some(self.show.next()),
-                    Some(s) => Show::parse(&s),
-                };
-                match next {
-                    Some(s) => {
-                        self.show = s;
-                        self.reload();
-                    }
-                    None => self.say(
-                        "Show which? waiting, working, idle, ended or all.".to_string(),
-                        true,
-                    ),
-                }
-            }
-            Action::Help => self.mode = Mode::Help,
-            Action::Quit => self.quit = true,
-        }
-    }
-
-    /// Returns whether the form stays open.
-    fn key_spawn(&mut self, f: &mut SpawnForm, k: KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Esc => return false,
-            KeyCode::Char('c') if ctrl => return false,
-            KeyCode::Tab | KeyCode::Down => f.next_field(false),
-            KeyCode::BackTab | KeyCode::Up => f.next_field(true),
-            KeyCode::Enter => {
-                let provider = f.account().and_then(|a| a.split('@').next()).unwrap_or("");
-                let template = store::get_provider(provider)
-                    .ok()
-                    .and_then(|p| p.prompt_args);
-                match f.argv(template.as_deref()) {
-                    Ok(argv) => {
-                        let what = format!("Starting {}", f.account().unwrap_or("run"));
-                        self.background(argv, what);
-                        return false;
-                    }
-                    Err(e) => f.error = Some(e),
-                }
-            }
-            KeyCode::Left | KeyCode::Right if f.focus == Field::Account => {
-                f.cycle_account(k.code == KeyCode::Left)
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if f.focus == Field::Worktree => {
-                f.worktree = !f.worktree
-            }
-            KeyCode::Char('w') if ctrl => {
-                if let Some(t) = f.text_mut() {
-                    spawn::delete_word(t);
-                }
-            }
-            KeyCode::Char('u') if ctrl => {
-                if let Some(t) = f.text_mut() {
-                    t.clear();
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(t) = f.text_mut() {
-                    t.pop();
-                }
-            }
-            KeyCode::Char(c) if !ctrl => {
-                if let Some(t) = f.text_mut() {
-                    t.push(c);
-                }
-            }
-            _ => {}
-        }
-        true
     }
 
     /// One frame rendered off screen, as text. Waits briefly for the selected run's
@@ -1216,6 +883,18 @@ fn account_ids() -> Vec<String> {
 }
 
 /// Whether a run's name, account, branch or folder contains `needle` (lowercase).
+/// A run on another machine, from its `ps --json` object.
+fn remote_row(v: &serde_json::Value) -> Option<Row> {
+    let run: Run = serde_json::from_value(v.get("run")?.clone()).ok()?;
+    Some(Row {
+        run,
+        kind: Kind::from_name(v["kind"].as_str()?)?,
+        label: v["label"].as_str().unwrap_or_default().to_string(),
+        verify: v["verifyLabel"].as_str().map(str::to_string),
+        pr: serde_json::from_value(v["pr"].clone()).ok(),
+    })
+}
+
 fn matches_filter(run: &Run, needle: &str) -> bool {
     let branch = run.worktree.as_ref().map_or("", |w| w.branch.as_str());
     [run.id.as_str(), &run.account, branch, &run.cwd]
@@ -1233,6 +912,31 @@ fn in_git_repo(dir: &Path) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// Starts this amux binary with `argv` in its own session, with no terminal, and doesn't
+/// wait: it keeps going after the UI quits. It reports through the files it writes.
+fn detach_amux(argv: &[String]) {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(argv)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    // Reap it when it ends, so it doesn't linger as a zombie while the UI runs.
+    if let Ok(mut child) = cmd.spawn() {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// Runs this amux binary with `argv`, without a terminal, and sums up the result.
@@ -1308,6 +1012,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mouse_selects_runs_and_wheel_moves_the_list() {
+        let mut app = App::new(Theme::built_in("default").unwrap());
+        for i in 0..3 {
+            app.rows.push(Row {
+                run: Run {
+                    id: format!("r{i}"),
+                    exit_code: Some(0),
+                    ..Default::default()
+                },
+                kind: Kind::Done,
+                label: "done".into(),
+                verify: None,
+                pr: None,
+            });
+        }
+        app.set_index(Some(0));
+        app.list_area = Rect::new(0, 1, 40, 20);
+        let click = |row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Border at y=1, then two lines per run: r1 is on rows 4 and 5.
+        app.mouse(click(5));
+        assert_eq!(app.selected.as_deref(), Some("r1"));
+        app.mouse(click(1));
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("r1"),
+            "the border selects nothing"
+        );
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            ..click(3)
+        });
+        assert_eq!(app.selected.as_deref(), Some("r2"));
+        // An ended run can't be typed into: Enter doesn't start typing.
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.focus_run);
+    }
+
+    #[test]
     fn draws_on_tiny_terminals_without_panicking() {
         let mut app = App::new(Theme::built_in("default").unwrap());
         for i in 0..5 {
@@ -1320,6 +1067,8 @@ mod tests {
                 },
                 kind: Kind::Done,
                 label: "done".into(),
+                verify: Some("tests passed".into()),
+                pr: None,
             });
         }
         app.set_index(Some(0));
@@ -1366,6 +1115,7 @@ mod tests {
                 repo: "/src/app".into(),
                 path: "/x".into(),
                 branch: "amux/fix-login".into(),
+                base: None,
             }),
             ..Default::default()
         };

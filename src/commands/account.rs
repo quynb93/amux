@@ -125,6 +125,24 @@ fn add(argv: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// `amux account list --json`: ids, providers and which is each CLI's default. No secrets.
+fn list_json() -> Result<i32> {
+    let cfg = load_config()?;
+    let out: Vec<serde_json::Value> = load_accounts()?
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id(),
+                "provider": a.provider,
+                "default": cfg.default_for(&a.provider) == Some(a.name.as_str()),
+                "note": a.note,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(0)
+}
+
 fn list() -> Result<i32> {
     let accounts = load_accounts()?;
     if accounts.is_empty() {
@@ -309,6 +327,7 @@ pub fn account_cmd(argv: &[String]) -> Result<i32> {
     let args = argv.get(1..).unwrap_or_default();
     match argv.first().map(String::as_str) {
         Some("add") => add(args),
+        Some("list" | "ls") if argv.get(1).map(String::as_str) == Some("--json") => list_json(),
         Some("list" | "ls") | None => list(),
         Some("default") => set_default(args),
         Some("token") => token(args),

@@ -79,6 +79,13 @@ impl SpawnForm {
     }
 
     /// The text being edited, if the focused field is a text field.
+    /// Pasted text goes into the field being edited, on one line.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(t) = self.text_mut() {
+            t.push_str(&text.replace(['\n', '\r'], " "));
+        }
+    }
+
     pub fn text_mut(&mut self) -> Option<&mut String> {
         match self.focus {
             Field::Prompt => Some(&mut self.prompt),

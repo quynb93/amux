@@ -4,11 +4,12 @@
 //! attach in place (see ui/attach.rs), which then paints the emulator's screen at once
 //! instead of replaying raw output.
 
-use crate::runs::{run_dir, size_payload, write_frame, Run, RESIZE, WATCH};
+use crate::runs::client::{connect, run_size};
+use crate::runs::screen::nz;
+use crate::runs::{size_payload, write_frame, Run, RESIZE, WATCH};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::io::{self, Read, Write};
-use std::num::NonZeroU16;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -53,63 +54,8 @@ pub struct Preview {
     exact_size: bool,
 }
 
-fn nz(n: u16) -> NonZeroU16 {
-    NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
-}
-
 pub fn new_parser(rows: u16, cols: u16) -> Parser {
     vt100::Parser::new_with_callbacks(nz(rows), nz(cols), SCROLLBACK, Signals::default())
-}
-
-pub fn parse_size_file(s: &str) -> Option<(u16, u16)> {
-    let mut it = s.split_whitespace().map(|n| n.parse::<u16>().ok());
-    match (it.next()??, it.next()??) {
-        (0, _) | (_, 0) => None,
-        size => Some(size),
-    }
-}
-
-/// The run's terminal size: what its host last published, else what it started with.
-/// The bool says whether it is the published (exact) size.
-pub fn run_size(run: &Run) -> ((u16, u16), bool) {
-    if let Some(s) = std::fs::read_to_string(run.dir().join("size"))
-        .ok()
-        .and_then(|s| parse_size_file(&s))
-    {
-        return (s, true);
-    }
-    let guess = if run.rows > 0 && run.cols > 0 {
-        (run.rows, run.cols)
-    } else {
-        (40, 120)
-    };
-    (guess, false)
-}
-
-/// Connects to a run's socket. Socket paths are limited to about 100 bytes, so a long one
-/// is reached through a short symlink in a private temporary folder. Unlike `amux attach`,
-/// the UI never changes its working directory: background `amux spawn`s inherit it.
-pub fn connect(id: &str) -> io::Result<UnixStream> {
-    let path = run_dir(id).join("sock");
-    if path.as_os_str().len() < 100 {
-        return UnixStream::connect(path);
-    }
-    let link_dir = short_dir()?;
-    let link = link_dir.join("s");
-    let r = std::os::unix::fs::symlink(&path, &link).and_then(|_| UnixStream::connect(&link));
-    let _ = std::fs::remove_file(&link);
-    let _ = std::fs::remove_dir(&link_dir);
-    r
-}
-
-/// A new mode-0700 folder under /tmp, whose path is short whatever $TMPDIR is.
-fn short_dir() -> io::Result<std::path::PathBuf> {
-    let mut template = *b"/tmp/amux-XXXXXX\0";
-    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let s = std::str::from_utf8(&template[..template.len() - 1]).map_err(io::Error::other)?;
-    Ok(s.into())
 }
 
 impl Preview {
@@ -165,7 +111,6 @@ impl Preview {
     /// A still picture of a finished run: its final screen.
     pub fn from_log(run: &Run) -> Preview {
         let ((rows, cols), bytes) = crate::runs::screen::ended(run);
-        let exact_size = true;
         let mut parser = new_parser(rows, cols);
         parser.process(&bytes);
         Preview {
@@ -177,7 +122,7 @@ impl Preview {
                 dirty: true,
             })),
             conn: None,
-            exact_size,
+            exact_size: true,
         }
     }
 
@@ -189,8 +134,12 @@ impl Preview {
         self.conn.is_some() && !self.lock().ended
     }
 
-    /// Follows a size change made by another client (an `amux attach` elsewhere).
+    /// Follows a size change made by another client (an `amux attach` elsewhere). A
+    /// finished run's still picture keeps the size it was drawn at.
     pub fn follow_size(&mut self, run: &Run) {
+        if self.conn.is_none() {
+            return;
+        }
         let ((rows, cols), exact) = run_size(run);
         if !exact && !self.exact_size {
             return;
@@ -211,6 +160,16 @@ impl Preview {
             let mut w = conn;
             let _ = write_frame(&mut w, WATCH, &[u8::from(on)]);
         }
+    }
+
+    /// Sends typed bytes to the run.
+    pub fn send(&self, bytes: &[u8]) -> io::Result<()> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| io::Error::other("not connected"))?;
+        let mut w = conn;
+        write_frame(&mut w, crate::runs::INPUT, bytes)
     }
 
     /// Resizes the run's terminal (which makes the CLI redraw) and the emulator with it.
@@ -440,14 +399,6 @@ pub fn plain(lines: &[Line]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_the_size_file() {
-        assert_eq!(parse_size_file("40 120\n"), Some((40, 120)));
-        assert_eq!(parse_size_file("0 120"), None);
-        assert_eq!(parse_size_file("40"), None);
-        assert_eq!(parse_size_file("x y"), None);
-    }
 
     #[test]
     fn window_keeps_the_bottom_of_the_content() {
