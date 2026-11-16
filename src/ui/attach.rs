@@ -3,7 +3,7 @@
 //! replay: the emulator's current screen is painted at once, then output streams through.
 
 use super::preview::{lock, Preview};
-use crate::runs::attach::{DETACH_KEY, RESET_MODES};
+use crate::runs::attach::{find_detach, RESET_MODES};
 use crate::runs::{term_size, write_frame, INPUT};
 use std::io::{self, Write};
 
@@ -14,9 +14,19 @@ pub enum Outcome {
     Ended,
 }
 
-/// Modes some CLIs turn on that `RESET_MODES` doesn't cover: the kitty keyboard protocol
-/// and xterm's modifyOtherKeys. Left on, the UI would get keys it can't read.
-const RESET_KEYBOARD: &str = "\x1b[<u\x1b[>4;0m";
+/// Hands the terminal back to the UI however attaching ends, errors included: stops
+/// passing output through, marks the connection as watching again, and resets modes.
+struct Restore<'a>(&'a Preview);
+
+impl Drop for Restore<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.shared).passthrough = false;
+        self.0.set_watching(true);
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(RESET_MODES.as_bytes());
+        let _ = out.flush();
+    }
+}
 
 /// Runs the attached session. The caller has left the UI's alternate screen; raw mode is
 /// still on from the UI.
@@ -24,6 +34,7 @@ pub fn attach_in_place(p: &Preview) -> io::Result<Outcome> {
     let Some(conn) = &p.conn else {
         return Ok(Outcome::Ended);
     };
+    let _restore = Restore(p);
     {
         let mut s = p.lock();
         if s.ended {
@@ -42,9 +53,9 @@ pub fn attach_in_place(p: &Preview) -> io::Result<Outcome> {
     // Fits the CLI to this terminal; it redraws (SIGWINCH) even if the size is the same.
     p.resize(size.0, size.1);
 
-    let outcome = loop {
+    loop {
         if lock(&p.shared).ended {
-            break Outcome::Ended;
+            return Ok(Outcome::Ended);
         }
         if let Some(now) = term_size().filter(|s| *s != size) {
             size = now;
@@ -52,36 +63,22 @@ pub fn attach_in_place(p: &Preview) -> io::Result<Outcome> {
         }
         let mut buf = [0u8; 4096];
         let n = match read_stdin(&mut buf, 100)? {
-            Some(0) => break Outcome::Ended,
+            Some(0) => return Ok(Outcome::Ended),
             Some(n) => n,
             None => continue,
         };
-        let (chunk, detach) = split_detach(&buf[..n]);
+        let input = &buf[..n];
+        let cut = find_detach(input);
+        let chunk = &input[..cut.unwrap_or(n)];
         if !chunk.is_empty() {
             let mut w = conn;
             if write_frame(&mut w, INPUT, chunk).is_err() {
-                break Outcome::Ended;
+                return Ok(Outcome::Ended);
             }
         }
-        if detach {
-            break Outcome::Detached;
+        if cut.is_some() {
+            return Ok(Outcome::Detached);
         }
-    };
-
-    lock(&p.shared).passthrough = false;
-    p.set_watching(true);
-    let mut out = io::stdout().lock();
-    out.write_all(RESET_MODES.as_bytes())?;
-    out.write_all(RESET_KEYBOARD.as_bytes())?;
-    out.flush()?;
-    Ok(outcome)
-}
-
-/// The input before the detach key, and whether the key was pressed.
-pub fn split_detach(input: &[u8]) -> (&[u8], bool) {
-    match input.iter().position(|&b| b == DETACH_KEY) {
-        Some(i) => (&input[..i], true),
-        None => (input, false),
     }
 }
 
@@ -114,16 +111,4 @@ fn read_stdin(buf: &mut [u8], timeout_ms: i32) -> io::Result<Option<usize>> {
         };
     }
     Ok(Some(n as usize))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stops_input_at_the_detach_key() {
-        assert_eq!(split_detach(b"ls\r"), (&b"ls\r"[..], false));
-        assert_eq!(split_detach(b"ab\x1dcd"), (&b"ab"[..], true));
-        assert_eq!(split_detach(b"\x1d"), (&b""[..], true));
-    }
 }

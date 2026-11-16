@@ -91,18 +91,29 @@ pub fn run_size(run: &Run) -> ((u16, u16), bool) {
 }
 
 /// Connects to a run's socket. Socket paths are limited to about 100 bytes, so a long one
-/// is reached by relative name from the run folder, as `amux attach` does.
+/// is reached through a short symlink in a private temporary folder. Unlike `amux attach`,
+/// the UI never changes its working directory: background `amux spawn`s inherit it.
 pub fn connect(id: &str) -> io::Result<UnixStream> {
-    let dir = run_dir(id);
-    let path = dir.join("sock");
+    let path = run_dir(id).join("sock");
     if path.as_os_str().len() < 100 {
         return UnixStream::connect(path);
     }
-    let back = std::env::current_dir()?;
-    std::env::set_current_dir(&dir)?;
-    let r = UnixStream::connect("sock");
-    std::env::set_current_dir(back)?;
+    let link_dir = short_dir()?;
+    let link = link_dir.join("s");
+    let r = std::os::unix::fs::symlink(&path, &link).and_then(|_| UnixStream::connect(&link));
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir(&link_dir);
     r
+}
+
+/// A new mode-0700 folder under /tmp, whose path is short whatever $TMPDIR is.
+fn short_dir() -> io::Result<std::path::PathBuf> {
+    let mut template = *b"/tmp/amux-XXXXXX\0";
+    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let s = std::str::from_utf8(&template[..template.len() - 1]).map_err(io::Error::other)?;
+    Ok(s.into())
 }
 
 /// The last `max` bytes of the run's output, across the rotated log too.
@@ -138,6 +149,9 @@ impl Preview {
             ended: false,
             dirty: true,
         }));
+        // First thing on the connection, so the host can read it before its replay.
+        let mut w = &stream;
+        write_frame(&mut w, WATCH, &[1])?;
         let mut reader = stream.try_clone()?;
         {
             let shared = shared.clone();
@@ -169,8 +183,6 @@ impl Preview {
             conn: Some(stream),
             exact_size,
         };
-        // Only watching: the host keeps notifying you while the preview is on screen.
-        p.set_watching(true);
         if exact_size {
             // Same size as now, so nothing moves; the CLI just redraws, which repairs a
             // screen whose replayed output started mid-way.

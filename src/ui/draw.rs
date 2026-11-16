@@ -33,7 +33,9 @@ impl App {
                 Layout::horizontal([Constraint::Length(w), Constraint::Min(10)]).areas(body);
             (l, p)
         } else {
-            let h = (self.rows.len() as u16 * 2 + 2).clamp(4, body.height / 2);
+            // Not clamp(): on a short terminal the upper bound is below the lower one.
+            let max = (body.height / 2).max(1);
+            let h = (self.rows.len() as u16 * 2 + 2).min(max).max(4.min(max));
             let [l, p] = Layout::vertical([Constraint::Length(h), Constraint::Min(3)]).areas(body);
             (l, p)
         };

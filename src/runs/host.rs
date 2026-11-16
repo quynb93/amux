@@ -309,12 +309,41 @@ fn replay(h: &Hub) -> Vec<u8> {
     }
 }
 
+/// A client may send WATCH as its first frame. It is read before the replay, so a preview
+/// never counts as attached, not even while the replay is being sent. Clients that send
+/// something else first (`amux attach` sends RESIZE) are left alone.
+fn leading_watch(stream: &UnixStream) -> bool {
+    let mut head = [0u8; 6];
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+    let n = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            head.as_mut_ptr().cast(),
+            head.len(),
+            libc::MSG_PEEK,
+        )
+    };
+    let _ = stream.set_read_timeout(None);
+    match watch_frame(&head[..n.max(0) as usize]) {
+        Some(on) => (&*stream).read_exact(&mut head).is_ok() && on,
+        None => false,
+    }
+}
+
+/// The value of a complete WATCH frame.
+fn watch_frame(d: &[u8]) -> Option<bool> {
+    match d {
+        [WATCH, 0, 0, 0, 1, v] => Some(*v == 1),
+        _ => None,
+    }
+}
+
 fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let watching = Arc::new(AtomicBool::new(false));
+    let watching = Arc::new(AtomicBool::new(leading_watch(&stream)));
     {
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
         if out.write_all(&replay(&h)).is_err() {
@@ -365,5 +394,13 @@ mod tests {
         assert_eq!(replay(&h), b"\x1b[3partial\nline two\n");
         h.trimmed = true;
         assert_eq!(replay(&h), b"line two\n");
+    }
+
+    #[test]
+    fn recognizes_a_leading_watch_frame() {
+        assert_eq!(watch_frame(&[WATCH, 0, 0, 0, 1, 1]), Some(true));
+        assert_eq!(watch_frame(&[WATCH, 0, 0, 0, 1, 0]), Some(false));
+        assert_eq!(watch_frame(&[RESIZE, 0, 0, 0, 4, 0]), None);
+        assert_eq!(watch_frame(&[WATCH, 0, 0]), None);
     }
 }

@@ -12,6 +12,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 - The run host takes a new `WATCH` message from clients that only show a run's screen, such as the preview in `amux ui`. They don't count as attached, so the desktop notification still goes out. Older hosts ignore the message.
 
+### Fixed
+
+- `amux attach`: Ctrl-] detaches even after the CLI has turned on the kitty keyboard protocol, and detaching turns that protocol and modifyOtherKeys off again.
+
 ## [0.4.0] - 2026-11-16
 
 Background runs now tell you when they need you.

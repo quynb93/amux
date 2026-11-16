@@ -58,10 +58,15 @@ impl SpawnForm {
         self.accounts.get(self.account).map(String::as_str)
     }
 
+    /// Moves focus, skipping Branch while it is hidden (no worktree).
     pub fn next_field(&mut self, back: bool) {
-        let i = FIELDS.iter().position(|f| *f == self.focus).unwrap_or(0);
-        let n = FIELDS.len();
-        self.focus = FIELDS[if back { (i + n - 1) % n } else { (i + 1) % n }];
+        let fields: Vec<Field> = FIELDS
+            .into_iter()
+            .filter(|f| self.worktree || *f != Field::Branch)
+            .collect();
+        let n = fields.len();
+        let i = fields.iter().position(|f| *f == self.focus).unwrap_or(0);
+        self.focus = fields[if back { (i + n - 1) % n } else { (i + 1) % n }];
     }
 
     pub fn cycle_account(&mut self, back: bool) {
@@ -109,6 +114,12 @@ impl SpawnForm {
         }
         v.push(acct.to_string());
         let prompt = self.prompt.trim();
+        // It goes to the CLI as an argument, where it would read as an option.
+        if prompt.starts_with('-') {
+            return Err(
+                "A prompt can't start with '-'; the CLI would read it as an option.".into(),
+            );
+        }
         if !prompt.is_empty() {
             match prompt_args {
                 Some(t) => v.extend(fill_args(t, &[("prompt", prompt)])),
@@ -190,6 +201,26 @@ mod tests {
         assert_eq!(f.account(), Some("claude@work"));
         f.cycle_account(true);
         assert_eq!(f.account(), Some("gemini@me"));
+    }
+
+    #[test]
+    fn skips_the_hidden_branch_field() {
+        let mut f = form();
+        f.worktree = false;
+        f.focus = Field::Worktree;
+        f.next_field(false);
+        assert_eq!(f.focus, Field::Account);
+        f.next_field(true);
+        assert_eq!(f.focus, Field::Worktree);
+    }
+
+    #[test]
+    fn rejects_prompts_that_read_as_options() {
+        let mut f = form();
+        f.prompt = " --dangerous".into();
+        assert!(f.argv(None).unwrap_err().contains("start with '-'"));
+        f.prompt = "fix a-b".into();
+        assert!(f.argv(None).is_ok());
     }
 
     #[test]
