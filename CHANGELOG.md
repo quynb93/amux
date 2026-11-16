@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-16
+
+Background runs now tell you when they need you.
+
 ### Added
 
 - `amux ps` shows `waiting` when a run's CLI is asking you something, such as a permission prompt. Each provider's prompt text is set with `waitingPatterns`. Bells and terminal notification sequences count as well.
