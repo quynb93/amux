@@ -343,7 +343,7 @@ fn check(m: &Machine) -> Result<i32> {
 /// Commands whose run arguments may name a run on another machine.
 const RUN_COMMANDS: &[&str] = &[
     "attach", "logs", "peek", "stop", "rm", "explain", "send", "wait", "diff", "verify", "pr",
-    "checks", "comment", "comments", "events",
+    "checks", "comment", "comments", "events", "overlap", "land",
 ];
 
 /// If this command is about a run on another machine, runs it there and returns its exit

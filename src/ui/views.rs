@@ -140,7 +140,9 @@ impl App {
             (None, Some(s)) => s.message.clone().unwrap_or_default(),
             _ => String::new(),
         };
-        if let Some(pr) = &row.pr {
+        if let Some(c) = self.conflict_note(&row.run.id) {
+            what = format!("{c} {what}");
+        } else if let Some(pr) = &row.pr {
             what = format!("{} {what}", pr.label());
         } else if let Some(v) = &row.verify {
             what = format!("{v} {what}");

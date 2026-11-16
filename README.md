@@ -30,6 +30,7 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
   - [Parallel runs](#parallel-runs)
   - [Driving runs from scripts and agents](#driving-runs-from-scripts-and-agents)
   - [Reviewing a run's changes](#reviewing-a-runs-changes)
+  - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
   - [Other machines](#other-machines)
   - [On your phone](#on-your-phone)
@@ -300,6 +301,23 @@ amux comments tests --send     # one message: file:line, the line, and your note
 ```
 
 Comments are kept in `runs/<id>/review.json` until sent, so a review can be written over time.
+
+### Landing parallel runs
+
+Worktrees keep agents out of each other's files, but two branches that change the same lines still conflict, and you only find out when the second one merges. amux checks while they work:
+
+```sh
+amux overlap                    # which runs touch the same files, and which would conflict
+# ~/src/app (into main)
+#   ✗ fix-login ↔ refactor-auth: conflict in src/auth.rs
+#   tests ↔ fix-login: both change src/login.rs, but merge cleanly
+
+amux land fix-login tests       # rebase each onto main, test in a slot, fast-forward main
+amux land refactor-auth --dry-run
+```
+
+- **`overlap`** includes uncommitted work. It merges in memory (`git merge-tree`, git 2.38 or newer) and changes nothing on disk. `amux ui` marks conflicting runs in the list and on the board, and the phone app shows overlaps under Monitor.
+- **`land`** is a local merge queue. Each run is rebased onto what landed before it, tested in a test slot (`--no-test` to skip), and the branch is fast-forwarded. A run that has uncommitted work, conflicts or fails is skipped, and its agent gets a message saying what to fix and how. The target is never force-moved, and uncommitted work in the main checkout is never overwritten.
 
 ### Pull requests and CI
 

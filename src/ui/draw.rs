@@ -255,6 +255,9 @@ impl App {
                     None => tildify(Path::new(&r.run.cwd)),
                 };
                 let mut detail = format!("{} · {place}", r.run.account);
+                if let Some(c) = self.conflict_note(&r.run.id) {
+                    detail.push_str(&format!(" · {c}"));
+                }
                 if let Some(pr) = &r.pr {
                     detail.push_str(&format!(" · {}", pr.label()));
                 }

@@ -52,6 +52,8 @@ amux comments parser-tests --send               # all comments as one message to
 amux verify parser-tests                        # recommends: test here, or push for CI
 amux verify parser-tests --test                 # tests in its folder, in a test slot
 amux verify parser-tests --send-failures        # failing output back to it
+amux overlap                                    # which helpers would conflict, before merging
+amux land parser-tests review                    # rebase, test in a slot, fast-forward, in turn
 amux pr parser-tests                            # push and open a PR (gh)
 amux checks parser-tests --send-failures        # failing CI back to it
 ```
