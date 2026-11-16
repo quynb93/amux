@@ -108,6 +108,9 @@ struct Hub {
     clients: Vec<Client>,
     /// The CLI's screen, kept current, so a new client gets exactly what is on it.
     screen: screen::Parser,
+    /// The end of the output so far, for an escape sequence or character the last chunk
+    /// cut in two (see `screen::unfinished`).
+    tail: Vec<u8>,
     detector: Detector,
     notifier: Notifier,
     /// The host's copy of run.json, which it alone writes while the run is alive.
@@ -119,6 +122,7 @@ impl Default for Hub {
         Hub {
             clients: Vec::new(),
             screen: screen::new_parser(24, 80, 0),
+            tail: Vec::new(),
             detector: Detector::default(),
             notifier: Notifier::default(),
             run: Run::default(),
@@ -360,6 +364,9 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         log.write(chunk);
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
         h.screen.process(chunk);
+        h.tail.extend_from_slice(chunk);
+        let keep = h.tail.len().saturating_sub(screen::TAIL);
+        h.tail.drain(..keep);
         // A client that can't keep up (write timeout) or has gone is dropped.
         h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
         let change = h.detector.feed(chunk);
@@ -419,8 +426,12 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
     let watching = Arc::new(AtomicBool::new(leading_watch(&stream)));
     {
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
-        // The current screen first, then live output from the same point on.
-        if out.write_all(&screen::snapshot(&h.screen)).is_err() {
+        // The current screen first, then live output from the same point on. The emulator
+        // may be in the middle of an escape sequence or character the last chunk cut off;
+        // the client needs that start too, or the rest of it reads as text.
+        let mut first = screen::snapshot(&h.screen);
+        first.extend_from_slice(screen::unfinished(&h.tail));
+        if out.write_all(&first).is_err() {
             return;
         }
         h.clients.push(Client {

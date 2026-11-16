@@ -46,6 +46,56 @@ pub fn snapshot(p: &Parser) -> Vec<u8> {
     out
 }
 
+/// How much of the latest output the host keeps for `unfinished`: enough for any escape
+/// sequence a CLI sends mid-stream, such as a window title.
+pub const TAIL: usize = 4096;
+
+/// The end of `out` that starts an escape sequence or UTF-8 character but doesn't finish
+/// it, or nothing. A snapshot shows the screen as of the end of `out`; a client that gets
+/// only the snapshot and then the next chunk would read the rest of a cut-off sequence
+/// as text (and miss the cursor move it was).
+pub fn unfinished(out: &[u8]) -> &[u8] {
+    // A cut-off UTF-8 character: up to three bytes after its lead byte.
+    let utf8 = {
+        let n = out.len();
+        let mut cut = None;
+        for back in 1..=n.min(3) {
+            let b = out[n - back];
+            if b & 0xC0 == 0x80 {
+                continue;
+            }
+            let need = match b {
+                0xC0..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF7 => 4,
+                _ => 0,
+            };
+            if need > back {
+                cut = Some(n - back);
+            }
+            break;
+        }
+        cut
+    };
+    let Some(esc) = out.iter().rposition(|&b| b == 0x1b) else {
+        return utf8.map_or(&[], |i| &out[i..]);
+    };
+    let seq = &out[esc..];
+    let done = match seq.get(1) {
+        None => false,
+        // CSI: parameters and intermediates, then one final byte.
+        Some(b'[') => seq[2..].iter().any(|b| (0x40..=0x7e).contains(b)),
+        // OSC, DCS and other strings: until BEL or ESC \ (whose ESC would be the last one).
+        Some(b']' | b'P' | b'X' | b'^' | b'_') => seq[2..].contains(&0x07),
+        // Character sets and the like: ESC, intermediates (0x20–0x2F), one final byte.
+        Some(_) => seq[1..].iter().any(|b| (0x30..=0x7e).contains(b)),
+    };
+    if !done {
+        return seq;
+    }
+    utf8.map_or(&[], |i| &out[i..])
+}
+
 /// A terminal dimension, at least 1.
 pub fn nz(n: u16) -> NonZeroU16 {
     NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
@@ -137,6 +187,39 @@ pub fn text(p: &Parser) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_what_a_chunk_cut_off() {
+        assert_eq!(unfinished(b"text"), b"");
+        assert_eq!(unfinished(b"x\x1b[2K\r\x1b[1"), b"\x1b[1");
+        assert_eq!(unfinished(b"x\x1b[1A\r"), b"");
+        assert_eq!(unfinished(b"x\x1b"), b"\x1b");
+        assert_eq!(unfinished(b"x\x1b]0;tit"), b"\x1b]0;tit");
+        assert_eq!(unfinished(b"x\x1b]0;title\x07"), b"");
+        assert_eq!(unfinished(b"x\x1b(B"), b"");
+        assert_eq!(unfinished(b"x\x1b("), b"\x1b(");
+        assert_eq!(unfinished("é".as_bytes()), b"");
+        assert_eq!(unfinished(&"aé".as_bytes()[..2]), &"é".as_bytes()[..1]);
+        assert_eq!(unfinished(&"a→".as_bytes()[..3]), &"→".as_bytes()[..2]);
+    }
+
+    #[test]
+    fn a_snapshot_plus_the_cut_off_start_draws_the_same_screen() {
+        // The case that broke: a cursor-up cut after "ESC[1".
+        let all: &[u8] = b"top\r\nline 1\r\n  sub\x1b[1A\rdone\r\n";
+        for cut in 0..all.len() {
+            let (a, b) = all.split_at(cut);
+            let mut host = new_parser(6, 20, 0);
+            host.process(a);
+            let mut client = new_parser(6, 20, 0);
+            client.process(&snapshot(&host));
+            client.process(unfinished(a));
+            client.process(b);
+            let mut whole = new_parser(6, 20, 0);
+            whole.process(all);
+            assert_eq!(text(&client), text(&whole), "cut at {cut}");
+        }
+    }
 
     #[test]
     fn a_snapshot_recreates_a_screen_drawn_with_relative_moves() {
