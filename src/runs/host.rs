@@ -5,7 +5,7 @@
 
 use super::detect::{Change, Detector};
 use super::notify::Notifier;
-use super::{load, parse_size, read_frame, run_dir, save, Run, Waiting, INPUT, RESIZE};
+use super::{load, parse_size, read_frame, run_dir, save, Run, Waiting, INPUT, RESIZE, WATCH};
 use crate::{fsx, time};
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
@@ -16,6 +16,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -85,10 +86,25 @@ fn set_size(fd: RawFd, rows: u16, cols: u16) {
     unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws) };
 }
 
+/// Publishes the terminal size as `size` ("rows cols") in the run folder (the host's
+/// cwd), for clients that emulate the screen themselves, like `amux ui`'s preview.
+fn record_size(rows: u16, cols: u16) {
+    if fs::write("size.tmp", format!("{rows} {cols}\n")).is_ok() {
+        let _ = fs::rename("size.tmp", "size");
+    }
+}
+
+struct Client {
+    stream: UnixStream,
+    /// Set by a WATCH frame: a client that only shows the screen, like a preview in
+    /// `amux ui`. It doesn't count as someone attached, so notifications still go out.
+    watching: Arc<AtomicBool>,
+}
+
 /// Shared between the output pump and the clients.
 #[derive(Default)]
 struct Hub {
-    clients: Vec<UnixStream>,
+    clients: Vec<Client>,
     recent: VecDeque<u8>,
     trimmed: bool,
     detector: Detector,
@@ -98,6 +114,13 @@ struct Hub {
 }
 
 impl Hub {
+    /// Whether a terminal is attached, so you already see what the CLI shows.
+    fn attached(&self) -> bool {
+        self.clients
+            .iter()
+            .any(|c| !c.watching.load(Ordering::Relaxed))
+    }
+
     fn title(&self) -> String {
         format!("amux: {} ({})", self.run.id, self.run.account)
     }
@@ -108,7 +131,7 @@ impl Hub {
         match change {
             None => return,
             Some(Change::Waiting(reason)) => {
-                if self.clients.is_empty() {
+                if !self.attached() {
                     let msg = format!("Waiting for you: {reason}");
                     self.notifier
                         .send(&self.run.id, "waiting", &self.title(), &msg);
@@ -134,6 +157,7 @@ fn host(id: &str) -> Result<i32> {
     let listener = UnixListener::bind("sock")?;
 
     let (master, slave) = openpty(run.rows.max(1), run.cols.max(1))?;
+    record_size(run.rows.max(1), run.cols.max(1));
     let mut cmd = Command::new(&run.bin);
     cmd.args(&run.args)
         .current_dir(&run.cwd)
@@ -204,12 +228,12 @@ fn host(id: &str) -> Result<i32> {
     h.run.waiting = None;
     save(&h.run)?;
     let _ = fs::remove_file("sock");
-    if h.clients.is_empty() {
+    if !h.attached() {
         let msg = format!("Exited with code {code}");
         h.notifier.send(&h.run.id, "exited", &h.title(), &msg);
     }
     for c in &h.clients {
-        let _ = c.shutdown(std::net::Shutdown::Both);
+        let _ = c.stream.shutdown(std::net::Shutdown::Both);
     }
     Ok(code)
 }
@@ -266,7 +290,7 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
             h.trimmed = true;
         }
         // A client that can't keep up (write timeout) or has gone is dropped.
-        h.clients.retain_mut(|c| c.write_all(chunk).is_ok());
+        h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
         let change = h.detector.feed(chunk);
         h.apply(change);
     }
@@ -290,12 +314,16 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
+    let watching = Arc::new(AtomicBool::new(false));
     {
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
         if out.write_all(&replay(&h)).is_err() {
             return;
         }
-        h.clients.push(out);
+        h.clients.push(Client {
+            stream: out,
+            watching: watching.clone(),
+        });
     }
     let (master, hub) = (master.clone(), hub.clone());
     std::thread::spawn(move || {
@@ -313,11 +341,13 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
                 RESIZE => {
                     if let Some((rows, cols)) = parse_size(&data) {
                         set_size(master.as_raw_fd(), rows.max(1), cols.max(1));
+                        record_size(rows.max(1), cols.max(1));
                         // Also when the size didn't change, so the CLI redraws for the
                         // client that just attached.
                         unsafe { libc::killpg(pid as libc::pid_t, libc::SIGWINCH) };
                     }
                 }
+                WATCH => watching.store(data.first() == Some(&1), Ordering::Relaxed),
                 _ => {}
             }
         }

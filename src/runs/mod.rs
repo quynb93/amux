@@ -198,6 +198,9 @@ pub fn claim_id(name: Option<&str>, base: &str) -> Result<String> {
 // Host → client is the raw terminal output.
 pub const INPUT: u8 = 0;
 pub const RESIZE: u8 = 1;
+/// Payload `[1]`: this client only watches (a preview), so the host still notifies you.
+/// `[0]`: a person is attached again. Hosts before 0.5 ignore it.
+pub const WATCH: u8 = 2;
 const MAX_FRAME: usize = 1 << 20;
 
 pub fn write_frame(w: &mut impl Write, kind: u8, data: &[u8]) -> io::Result<()> {
