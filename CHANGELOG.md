@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-16
+
+Fixes `amux ui` showing garbled screens, and letters typed into its list triggering shortcuts.
+
 ### Added
 
 - `amux peek <run>` prints what is on a run's screen now, or its last screen once it has ended.
