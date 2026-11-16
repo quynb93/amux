@@ -7,7 +7,7 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 ### Added
 
 - Homebrew install for macOS and Linux: `brew install quynb93/tap/amux`. Each release updates the formula.
-- npm install: `npm install -g @quynb93/amux`. The npm package is now named `@quynb93/amux`, because `amux` is taken on npm. The command is still `amux`.
+- npm install: `npm install -g @quynb/amux`. The npm package is now named `@quynb/amux`, because `amux` is taken on npm. The command is still `amux`.
 - `amux update` prints `brew upgrade amux` when amux was installed with Homebrew.
 
 ## [0.1.1] - 2026-11-16

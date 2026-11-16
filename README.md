@@ -62,7 +62,7 @@ brew install quynb93/tap/amux
 **npm** (any platform with Node.js 20 or newer):
 
 ```sh
-npm install -g @quynb93/amux
+npm install -g @quynb/amux
 ```
 
 **From a GitHub release** (Node.js 20 or newer, no npm account or registry needed):

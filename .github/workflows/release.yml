@@ -5,7 +5,7 @@ name: Release
 #
 # Optional repo secrets turn on more channels; without them those steps are skipped:
 #   TAP_DEPLOY_KEY  SSH deploy key with write access to quynb93/homebrew-tap
-#   NPM_TOKEN       npm automation token that can publish @quynb93/amux
+#   NPM_TOKEN       npm automation token that can publish @quynb/amux
 on:
   push:
     tags: ["v*.*.*"]
@@ -54,7 +54,7 @@ jobs:
       - name: Build the package
         run: |
           npm pack
-          mv quynb93-amux-*.tgz amux.tgz
+          mv quynb-amux-*.tgz amux.tgz
 
       - name: Create the GitHub release
         env:
