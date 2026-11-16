@@ -53,7 +53,7 @@ Never commit anything from a real home directory. Session transcripts, `.claude.
 npm test
 ```
 
-The suite uses Node's built-in test runner and needs no extra packages. Every test runs in its own temporary `HOME` and `AMUX_HOME`, and no test reads or writes the Keychain. The suite runs in CI on macOS and Ubuntu, with Node 20 and 22.
+The suite uses Node's built-in test runner and needs no extra packages. Every test runs in its own temporary `HOME` and `AMUX_HOME`, and no test reads or writes the Keychain. The suite runs in CI on macOS and Ubuntu, with Node 20, 22 and 24.
 
 | File | Covers |
 |---|---|
