@@ -39,6 +39,7 @@ impl Sandbox {
             "#!/bin/sh\nfor a in \"$@\"; do echo \"ARG $a\"; done\n\
              for k in FAKE_HOME FAKE_BASE_URL FAKE_TELEMETRY AMUX_ACCOUNT FAKE_TOKEN AMUX_RUN; do eval \"v=\\${$k-<unset>}\"; echo \"ENV $k=$v\"; done\n\
              [ -t 0 ] && echo TTY yes\n\
+             [ -n \"$FAKE_ASK\" ] && echo \"Approve this? [y/n]\"\n\
              [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = quit ] && exit 7; done\n\
              exit 0\n",
         );
@@ -47,8 +48,9 @@ impl Sandbox {
         let config = serde_json::json!({ "providers": [{
             "id": "fake", "label": "Fake CLI", "bin": bin, "sharedHome": shared, "homeEnv": "FAKE_HOME",
             "privateEntries": ["auth.json"], "sharedDirs": ["sessions"], "baseUrlEnv": "FAKE_BASE_URL",
-            "tokenEnv": "FAKE_TOKEN", "privacyEnv": { "FAKE_TELEMETRY": "0" }
-        }]});
+            "tokenEnv": "FAKE_TOKEN", "privacyEnv": { "FAKE_TELEMETRY": "0" },
+            "waitingPatterns": ["approve THIS?"]
+        }], "notifyCommand": ["sh", "-c", "echo \"$AMUX_EVENT $AMUX_RUN $AMUX_MESSAGE\" >> \"$HOME/notes\""]});
         write(&amux_home.join("config.json"), &config.to_string());
         Sandbox {
             home,
@@ -409,4 +411,60 @@ fn gives_a_run_its_own_worktree() {
     let bad = s.amux_with(&["spawn", "--worktree", "fake"], &[], Some(&s.home));
     assert!(bad.err.contains("needs a git repository"), "{}", bad.err);
     assert!(s.amux(&["ps"]).out.contains("No runs"));
+}
+
+#[test]
+fn shows_when_a_run_waits_for_you_and_notifies() {
+    let s = Sandbox::new("waiting");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let env = [("FAKE_CHAT", "1"), ("FAKE_ASK", "1")];
+    assert_eq!(
+        s.amux_with(&["spawn", "--name", "ask", "fake"], &env, None)
+            .code,
+        0
+    );
+    wait_ps(&s, "ask", "waiting");
+    let notes = s.home.join("notes");
+    let mut text = String::new();
+    for _ in 0..100 {
+        text = fs::read_to_string(&notes).unwrap_or_default();
+        if !text.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(text, "waiting ask Waiting for you: approve THIS?\n");
+
+    // Answering clears it; with a terminal attached, the exit is not announced.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["attach", "ask"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"y\n").unwrap();
+    wait_ps(&s, "ask", "running");
+    child.stdin.as_mut().unwrap().write_all(b"quit\n").unwrap();
+    assert_eq!(child.wait_with_output().unwrap().status.code(), Some(7));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!fs::read_to_string(&notes).unwrap().contains("exited"));
+
+    // Detached, the exit is announced.
+    s.amux(&["spawn", "--name", "quick", "fake"]);
+    wait_ps(&s, "quick", "exited 0");
+    for _ in 0..100 {
+        if fs::read_to_string(&notes)
+            .unwrap()
+            .contains("exited quick Exited with code 0")
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("no exit notice: {}", fs::read_to_string(&notes).unwrap());
 }

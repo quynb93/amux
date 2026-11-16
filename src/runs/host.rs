@@ -3,7 +3,9 @@
 //! clients, and passes client keystrokes and window sizes back to the CLI. It exits when
 //! the CLI does, after recording the exit code.
 
-use super::{load, parse_size, read_frame, run_dir, save, INPUT, RESIZE};
+use super::detect::{Change, Detector};
+use super::notify::Notifier;
+use super::{load, parse_size, read_frame, run_dir, save, Run, Waiting, INPUT, RESIZE};
 use crate::{fsx, time};
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
@@ -89,6 +91,37 @@ struct Hub {
     clients: Vec<UnixStream>,
     recent: VecDeque<u8>,
     trimmed: bool,
+    detector: Detector,
+    notifier: Notifier,
+    /// The host's copy of run.json, which it alone writes while the run is alive.
+    run: Run,
+}
+
+impl Hub {
+    fn title(&self) -> String {
+        format!("amux: {} ({})", self.run.id, self.run.account)
+    }
+
+    /// Records a change in whether the CLI is waiting for you, and notifies you when it
+    /// starts waiting and no terminal is attached to see it.
+    fn apply(&mut self, change: Option<Change>) {
+        match change {
+            None => return,
+            Some(Change::Waiting(reason)) => {
+                if self.clients.is_empty() {
+                    let msg = format!("Waiting for you: {reason}");
+                    self.notifier
+                        .send(&self.run.id, "waiting", &self.title(), &msg);
+                }
+                self.run.waiting = Some(Waiting {
+                    reason,
+                    since: time::now_ms(),
+                });
+            }
+            Some(Change::Cleared) => self.run.waiting = None,
+        }
+        let _ = save(&self.run);
+    }
 }
 
 fn host(id: &str) -> Result<i32> {
@@ -134,7 +167,12 @@ fn host(id: &str) -> Result<i32> {
     save(&run)?;
 
     let master = Arc::new(File::from(master));
-    let hub = Arc::new(Mutex::new(Hub::default()));
+    let hub = Arc::new(Mutex::new(Hub {
+        detector: Detector::new(&run.waiting_patterns),
+        notifier: Notifier::from_config(),
+        run: run.clone(),
+        ..Default::default()
+    }));
     let (done_tx, done_rx) = mpsc::channel::<()>();
     {
         let (master, hub) = (master.clone(), hub.clone());
@@ -160,11 +198,17 @@ fn host(id: &str) -> Result<i32> {
     // Let the last output reach the log and clients. A process the CLI left behind can
     // keep the terminal open, so don't wait for that.
     let _ = done_rx.recv_timeout(Duration::from_millis(500));
-    run.exit_code = Some(code);
-    run.ended_at = Some(time::now_ms());
-    save(&run)?;
+    let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
+    h.run.exit_code = Some(code);
+    h.run.ended_at = Some(time::now_ms());
+    h.run.waiting = None;
+    save(&h.run)?;
     let _ = fs::remove_file("sock");
-    for c in &hub.lock().unwrap_or_else(|e| e.into_inner()).clients {
+    if h.clients.is_empty() {
+        let msg = format!("Exited with code {code}");
+        h.notifier.send(&h.run.id, "exited", &h.title(), &msg);
+    }
+    for c in &h.clients {
         let _ = c.shutdown(std::net::Shutdown::Both);
     }
     Ok(code)
@@ -223,6 +267,8 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         }
         // A client that can't keep up (write timeout) or has gone is dropped.
         h.clients.retain_mut(|c| c.write_all(chunk).is_ok());
+        let change = h.detector.feed(chunk);
+        h.apply(change);
     }
 }
 
@@ -251,7 +297,7 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
         }
         h.clients.push(out);
     }
-    let master = master.clone();
+    let (master, hub) = (master.clone(), hub.clone());
     std::thread::spawn(move || {
         let mut stream = stream;
         while let Ok((kind, data)) = read_frame(&mut stream) {
@@ -260,6 +306,9 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
                     if (&*master).write_all(&data).is_err() {
                         break;
                     }
+                    let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
+                    let change = h.detector.answered();
+                    h.apply(change);
                 }
                 RESIZE => {
                     if let Some((rows, cols)) = parse_size(&data) {

@@ -74,6 +74,8 @@ The host (`runs/host.rs`) is a small terminal multiplexer, in the spirit of dtac
 
 `amux attach` (`runs/attach.rs`) puts the terminal in raw mode and copies bytes both ways. It polls the window size and sends `RESIZE` when it changes. On Ctrl-], or when the host closes, it restores the terminal and switches off modes a full-screen CLI may have left on: the alternate screen, a hidden cursor, mouse reporting and bracketed paste.
 
+The pump also feeds each chunk to a detector (`runs/detect.rs`). It strips escape sequences as they arrive, even when one is split across chunks, and keeps the last 4 KB of text. It reports "waiting" when the text contains one of the provider's `waitingPatterns`, or when the CLI rings the bell or sends a notification OSC (9, 777 or 99). It reports "cleared" when a client sends input, or after 4 KB more output with no new signal. The host records the reason and time in `run.json`. When no client is attached, it sends a notification through `runs/notify.rs`. The CLI's own bell already reaches an attached terminal.
+
 `amux ps` derives each run's state from `run.json` and whether the host pid is alive. It reads "working or idle" from the modification time of `output.log`.
 
 ## Update check

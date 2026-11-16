@@ -180,6 +180,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         args: args.to_vec(),
         cwd: cwd.to_string_lossy().into_owned(),
         started_at: time::now_ms(),
+        waiting_patterns: spec.waiting_patterns.clone(),
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));
@@ -273,6 +274,10 @@ fn last_output(run: &Run) -> Option<i64> {
 fn state_label(run: &Run, now: i64) -> String {
     match run.state() {
         State::Starting => "starting".into(),
+        State::Running if run.waiting.is_some() => {
+            let t = run.waiting.as_ref().map_or(now, |w| w.since);
+            format!("waiting {}", since(t, now).trim_end_matches(" ago"))
+        }
         State::Running => match last_output(run) {
             // Output in the last few seconds means the CLI is working; quiet usually
             // means it is waiting for you.

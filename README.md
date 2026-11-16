@@ -192,7 +192,7 @@ amux spawn --name review claude@work -p "review the open diff"
 amux ps
 # RUN       ACCOUNT          STATE     STARTED  DIR                              BRANCH         ARGS
 # claude-1  claude@work      running   2m ago   ~/.amux/worktrees/app-claude-1   amux/claude-1
-# codex-1   codex@personal   idle 40s  1m ago   ~/.amux/worktrees/app-codex-1    amux/codex-1
+# codex-1   codex@personal   waiting 40s  1m ago   ~/.amux/worktrees/app-codex-1    amux/codex-1
 # review    claude@work      exited 0  30s ago  ~/src/app                        -              -p review the open diff
 
 amux attach codex-1      # work with it as usual; Ctrl-] detaches and leaves it running
@@ -201,7 +201,8 @@ amux stop claude-1       # SIGTERM; --force for SIGKILL
 amux rm --done           # remove finished runs
 ```
 
-- **STATE** shows `running` while the CLI is printing and `idle <time>` once it has been quiet for a few seconds, which usually means it is waiting for you.
+- **STATE** is `waiting <time>` when the CLI is asking you something: a permission or confirmation prompt, a terminal bell, or a notification it sent to the terminal. Otherwise it is `running` while the CLI prints and `idle <time>` once it has been quiet for a few seconds. Typing into the run clears `waiting`.
+- **Notifications.** When a run starts waiting, or exits, and no terminal is attached to it, amux shows a desktop notification (Notification Center on macOS, `notify-send` on Linux). Set `"notify": false` in `~/.amux/config.json` to turn them off, or `"notifyCommand": ["my-notifier"]` to run your own command. It gets `AMUX_RUN`, `AMUX_EVENT` (`waiting` or `exited`), `AMUX_TITLE` and `AMUX_MESSAGE` in its environment.
 - **`--worktree`** runs `git worktree add` on a new branch (`amux/<run>`, or `--branch <name>`) from `HEAD` (or `--base <ref>`). The run starts in the same subdirectory you spawned from. Worktrees live in `~/.amux/worktrees/`.
 - **`amux rm`** removes a run's worktree only if git reports no uncommitted or untracked files. Otherwise the worktree is kept and amux tells you where it is. Branches are always kept.
 - amux's own flags go before the account. Everything after the account is passed to the CLI unchanged.
