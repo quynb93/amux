@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
+Many agents on one machine without overloading it, steered from a phone, another laptop or another agent, with their work checked, reviewed and shipped from amux.
+
 ### Added
 
 - **Sharing the machine between agents.** `amux slot -- <command>` runs a test suite, build or dev server only when a slot of its class is free (by default a quarter of the CPUs for `test` and `build`, and 2 for `dev`), and holds new work back while the load average or free memory is past a limit. Waiters are served first come, first served, and a slot frees itself when its process ends, however it ends. With `--timeout` or `--no-wait` it exits 75 when no slot came free, so an agent can push the branch for CI instead of piling onto the machine.
