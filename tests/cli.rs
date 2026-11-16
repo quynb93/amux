@@ -40,7 +40,7 @@ impl Sandbox {
              for k in FAKE_HOME FAKE_BASE_URL FAKE_TELEMETRY AMUX_ACCOUNT FAKE_TOKEN AMUX_RUN; do eval \"v=\\${$k-<unset>}\"; echo \"ENV $k=$v\"; done\n\
              [ -t 0 ] && echo TTY yes\n\
              [ -n \"$FAKE_ASK\" ] && echo \"Approve this? [y/n]\"\n\
-             [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = quit ] && exit 7; done\n\
+             [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = ask ] && echo \"Approve this? [y/n]\"; [ \"$l\" = quit ] && exit 7; done\n\
              exit 0\n",
         );
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
@@ -467,4 +467,95 @@ fn shows_when_a_run_waits_for_you_and_notifies() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!("no exit notice: {}", fs::read_to_string(&notes).unwrap());
+}
+
+/// Polls until `f` holds, for up to five seconds.
+fn eventually(what: &str, mut f: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if f() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn ui_dump_shows_runs_their_state_and_a_live_preview() {
+    let s = Sandbox::new("ui");
+    let empty = s.amux(&["ui", "--dump", "--size", "10x80"]);
+    assert_eq!(empty.code, 0, "{}", empty.err);
+    assert!(empty.out.contains("No runs yet."), "{}", empty.out);
+
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let env = [("FAKE_CHAT", "1"), ("FAKE_ASK", "1")];
+    s.amux_with(&["spawn", "--name", "ask", "fake", "hi"], &env, None);
+    s.amux(&["spawn", "--name", "quick", "fake"]);
+    wait_ps(&s, "ask", "waiting");
+    wait_ps(&s, "quick", "exited 0");
+
+    let ui = s.amux(&["ui", "--dump", "--size", "24x120", "--select", "ask"]);
+    assert_eq!(ui.code, 0, "{}", ui.err);
+    let out = ui.out;
+    assert!(out.contains("1 waiting · 1 done"), "{out}");
+    assert!(out.contains("ask") && out.contains("quick"), "{out}");
+    // The preview is the run's screen, through a terminal emulator.
+    assert!(out.contains("ARG hi"), "{out}");
+    assert!(out.contains("Approve this? [y/n]"), "{out}");
+    assert!(out.contains("waiting: approve THIS?"), "{out}");
+    // A finished run's preview comes from its log.
+    let done = s
+        .amux(&["ui", "--dump", "--size", "24x120", "--select", "qu"])
+        .out;
+    assert!(done.contains("ENV AMUX_RUN=quick"), "{done}");
+
+    assert!(s.amux(&["ui", "--bogus"]).err.contains("Unknown option"));
+    let tty = s.amux(&["ui"]);
+    assert_eq!(tty.code, 1);
+    assert!(tty.err.contains("needs a terminal"), "{}", tty.err);
+    s.amux(&["stop", "ask"]);
+}
+
+#[test]
+fn a_watching_client_does_not_silence_notifications() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let s = Sandbox::new("watch");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    s.amux_with(
+        &["spawn", "--name", "w", "fake"],
+        &[("FAKE_CHAT", "1")],
+        None,
+    );
+    wait_ps(&s, "w", "running");
+    // Socket paths are limited to about 100 bytes; reach it through a short link.
+    let link = PathBuf::from(format!("/tmp/amux-e2e-{}-w", std::process::id()));
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(s.amux_home.join("runs/w"), &link).unwrap();
+    let mut c = UnixStream::connect(link.join("sock")).unwrap();
+    let frame = |kind: u8, data: &[u8]| {
+        let mut v = vec![kind];
+        v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        v.extend_from_slice(data);
+        v
+    };
+    let notes = s.home.join("notes");
+    let waiting = || s.amux(&["ps"]).out.contains("waiting");
+
+    // An attached client sees the question itself: no notification.
+    c.write_all(&frame(0, b"ask\n")).unwrap();
+    eventually("waiting", waiting);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!notes.exists());
+    c.write_all(&frame(0, b"y\n")).unwrap();
+    eventually("answered", || !waiting());
+
+    // A watching client (a preview in `amux ui`) doesn't count as attached.
+    c.write_all(&frame(2, &[1])).unwrap();
+    c.write_all(&frame(0, b"ask\n")).unwrap();
+    eventually("a notification", || {
+        fs::read_to_string(&notes).is_ok_and(|t| t.contains("waiting w"))
+    });
+    let _ = fs::remove_file(&link);
+    s.amux(&["stop", "w"]);
 }

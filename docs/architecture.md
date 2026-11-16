@@ -69,12 +69,14 @@ The host (`runs/host.rs`) is a small terminal multiplexer, in the spirit of dtac
 - A pump thread reads the master side. Each chunk is appended to `output.log` (rotated to `output.log.1` at 4 MB), kept in a 256 KB in-memory buffer, and written to every attached client. A client that can't take output within 2 seconds is dropped.
 - It listens on `runs/<id>/sock`. The folder is mode 0700, so only you can connect. The socket is bound by relative name, because socket paths are limited to about 100 bytes.
 - A new client first gets the buffered output (from a line boundary once the buffer has wrapped), then live output.
-- Clients send framed messages: a kind byte, a big-endian length, and the payload. `INPUT` bytes are written to the CLI. `RESIZE` sets the terminal size and sends `SIGWINCH` to the CLI's process group, so the CLI redraws for the client that just attached.
+- Clients send framed messages: a kind byte, a big-endian length, and the payload. `INPUT` bytes are written to the CLI. `RESIZE` sets the terminal size and sends `SIGWINCH` to the CLI's process group, so the CLI redraws for the client that just attached. `WATCH` (`[1]` or `[0]`) marks a client as only watching, like the preview in `amux ui`. A watching client doesn't count as attached when the host decides whether to notify you. The host also writes the current terminal size to `runs/<id>/size`, so a watching client can emulate the screen at the right size.
 - When the CLI exits, the host records the exit code (128 + signal if it was killed), closes the clients and removes the socket.
 
 `amux attach` (`runs/attach.rs`) puts the terminal in raw mode and copies bytes both ways. It polls the window size and sends `RESIZE` when it changes. On Ctrl-], or when the host closes, it restores the terminal and switches off modes a full-screen CLI may have left on: the alternate screen, a hidden cursor, mouse reporting and bracketed paste.
 
 The pump also feeds each chunk to a detector (`runs/detect.rs`). It strips escape sequences as they arrive, even when one is split across chunks, and keeps the last 4 KB of text. It reports "waiting" when the text contains one of the provider's `waitingPatterns`, or when the CLI rings the bell or sends a notification OSC (9, 777 or 99). It reports "cleared" when a client sends input, or after 4 KB more output with no new signal. The host records the reason and time in `run.json`. When no client is attached, it sends a notification through `runs/notify.rs`. The CLI's own bell already reaches an attached terminal.
+
+`amux ui` (`src/ui/`) is one more client of the same hosts. It keeps a vt100 terminal emulator per previewed run, fed from the host socket, and holds at most four previews open whatever the number of runs. Its actions run `amux spawn`, `stop` and `rm` in the background. See [tui-design.md](tui-design.md).
 
 `amux ps` derives each run's state from `run.json` and whether the host pid is alive. It reads "working or idle" from the modification time of `output.log`.
 

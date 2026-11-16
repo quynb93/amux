@@ -39,7 +39,7 @@ impl Drop for RawMode {
 
 /// Undoes terminal modes a full-screen CLI may have left on when we detach mid-screen:
 /// alternate screen, hidden cursor, mouse reporting, bracketed paste, focus events.
-const RESET_MODES: &str =
+pub const RESET_MODES: &str =
     "\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[0m";
 
 enum Event {
