@@ -305,7 +305,7 @@ impl App {
                         span(" ", t.muted),
                     ])
                 }
-                None => border_hints(&t, &[("⏎", "attach"), ("Ctrl-]", "back")]),
+                None => border_hints(&t, &[("⏎", "type in run"), ("Ctrl-]", "back")]),
             },
         };
         let border = if kind == Kind::Attention {
@@ -383,7 +383,7 @@ impl App {
             _ => {
                 // As many hints as fit, most useful first.
                 let all = [
-                    ("⏎", "attach"),
+                    ("⏎", "type in run"),
                     ("n", "new"),
                     ("/", "commands"),
                     ("⇥", "next waiting"),
@@ -663,8 +663,10 @@ fn draw_spawn(f: &mut Frame, area: Rect, t: &Theme, form: &SpawnForm) {
         Some(e) => lines.push(Line::from(span(format!("   ✗ {e}"), t.error))),
         None => {
             let cwd = std::env::current_dir().unwrap_or_default();
+            // One line, cut from the left, so a long path doesn't spill past the border.
+            let room = (inner.width as usize).saturating_sub(14);
             lines.push(Line::from(span(
-                format!("   Starts in {}", tildify(&cwd)),
+                format!("   Starts in {}", tail_fit(&tildify(&cwd), room)),
                 t.muted,
             )));
         }
@@ -675,7 +677,7 @@ fn draw_spawn(f: &mut Frame, area: Rect, t: &Theme, form: &SpawnForm) {
 const HELP_KEYS: &[(&str, &str)] = &[
     ("↑ ↓  j k  1–9", "select a run"),
     ("⇥", "next run that needs you"),
-    ("⏎", "attach here; Ctrl-] comes back"),
+    ("⏎", "type into the run, full screen; Ctrl-] comes back"),
     ("n", "start a new run"),
     ("s  S", "stop, or kill"),
     ("d  D", "remove a finished run, or kill and remove"),
@@ -724,6 +726,17 @@ fn draw_help(f: &mut Frame, area: Rect, t: &Theme) {
         .title(span(" amux ui ", t.title))
         .title_bottom(Line::from(span(" any key closes ", t.muted)));
     f.render_widget(Paragraph::new(lines).block(block), r);
+}
+
+/// `s` cut from the left to at most `max` characters, marked with "…".
+fn tail_fit(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let tail: String = s.chars().skip(n - keep).collect();
+    format!("…{tail}")
 }
 
 #[cfg(test)]

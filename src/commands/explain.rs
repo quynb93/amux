@@ -5,7 +5,6 @@
 
 use crate::runs::{self, Run, State};
 use crate::time;
-use crate::ui::preview::Preview;
 use crate::ui::status::{classify, last_output, short_age, IDLE_AFTER_MS};
 use crate::util::need;
 use anyhow::Result;
@@ -232,19 +231,8 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
 
 /// The last non-empty lines of the run's screen, emulated from its log.
 fn screen_tail(run: &Run) -> Vec<String> {
-    let p = Preview::from_log(run);
-    let s = p.lock();
-    let text = s.parser.screen().contents();
-    let lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
-    let end = lines
-        .iter()
-        .rposition(|l| !l.is_empty())
-        .map_or(0, |i| i + 1);
-    lines[..end]
-        .iter()
-        .skip(end.saturating_sub(SCREEN_LINES))
-        .cloned()
-        .collect()
+    let lines = crate::runs::screen::text(&crate::runs::screen::capture(run));
+    lines[lines.len().saturating_sub(SCREEN_LINES)..].to_vec()
 }
 
 #[cfg(test)]

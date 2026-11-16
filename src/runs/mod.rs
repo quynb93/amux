@@ -11,6 +11,7 @@ pub mod detect;
 pub mod host;
 pub mod notify;
 pub mod program;
+pub mod screen;
 
 use crate::store::{read_json, write_json};
 use crate::{fsx, paths, time};

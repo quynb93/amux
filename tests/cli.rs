@@ -716,3 +716,73 @@ fn reads_the_state_a_cli_reports_with_osc_7501() {
     // done outlives the process; working and blocked would not.
     assert_eq!(run_json()["status"]["state"], "done");
 }
+
+/// Polls `amux peek` until the run's screen contains `want`.
+fn wait_peek(s: &Sandbox, run: &str, want: &str) -> String {
+    for _ in 0..200 {
+        let out = s.amux(&["peek", run]).out;
+        if out.contains(want) {
+            return out;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "{run} never showed {want:?}:\n{}",
+        s.amux(&["peek", run]).out
+    );
+}
+
+#[test]
+fn shows_the_real_screen_of_a_cli_that_redraws_in_place() {
+    let s = Sandbox::new("screen");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    // Like Claude Code: a status area rewritten in place with relative cursor moves, far
+    // more than 256 KB of it, so no slice of the output redraws the screen correctly.
+    let bin = s.home.join("bin/fake-cli");
+    write(
+        &bin,
+        "#!/bin/sh\nprintf 'TITLE fake\\r\\n'\ni=0\nwhile [ $i -lt 4000 ]; do\n\
+         printf '\\033[2K\\rworking on step %d ................................................\\r\\n\\033[2K\\r  tokens %d\\033[1A\\r' $i $i\n\
+         i=$((i+1)); done\n\
+         printf '\\033[2K\\rall steps done\\r\\n\\033[2K\\r  tokens 4000\\r\\n> ready\\r\\n'\nread x\n",
+    );
+    assert_eq!(s.amux(&["spawn", "--name", "tui", "fake"]).code, 0);
+    let expected = "TITLE fake\nall steps done\n  tokens 4000\n> ready\n";
+    assert_eq!(wait_peek(&s, "tui", "> ready"), expected);
+    let log = fs::metadata(s.amux_home.join("runs/tui/output.log"))
+        .unwrap()
+        .len();
+    assert!(log > 256 * 1024, "the log is only {log} bytes");
+
+    // The UI's preview gets the same screen from the host.
+    let ui = s.amux(&["ui", "--dump", "--size", "20x100", "--select", "tui"]);
+    for line in ["TITLE fake", "all steps done", "  tokens 4000", "> ready"] {
+        assert!(
+            ui.out.contains(&format!("│{line} ")),
+            "{line:?} in:\n{}",
+            ui.out
+        );
+    }
+    assert!(!ui.out.contains("working on step"), "{}", ui.out);
+
+    // After it ends, its last screen is kept.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["attach", "tui"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"bye\n").unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    wait_ps(&s, "tui", "exited 0");
+    assert!(s.amux_home.join("runs/tui/screen.ans").exists());
+    assert!(s
+        .amux(&["peek", "tui"])
+        .out
+        .starts_with("TITLE fake\nall steps done\n  tokens 4000\n> ready\n"));
+}

@@ -341,6 +341,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux explain <run> [--json]` | Why a run shows its state: the signal that decided (the CLI's own report, a prompt, a bell, a notification, or output timing), what amux watches for, and the bottom of its screen. |
 | `amux attach <run>` | Connect this terminal to a run. Ctrl-] detaches. |
 | `amux logs <run>` | Print everything the run has output. |
+| `amux peek <run>` | Print what is on the run's screen right now, or its last screen if it has ended. |
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |

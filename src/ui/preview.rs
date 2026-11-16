@@ -7,17 +7,13 @@
 use crate::runs::{run_dir, size_payload, write_frame, Run, RESIZE, WATCH};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::num::NonZeroU16;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Lines of scrollback kept per preview, for PgUp/PgDn.
 const SCROLLBACK: usize = 2_000;
-/// How much of output.log a finished run's preview replays.
-const LOG_TAIL: u64 = 256 * 1024;
-
 /// Things the emulator reports that the UI shows: the window title the CLI sets (Claude
 /// Code and Codex put the task there) and bells (CLIs ring when they need you).
 #[derive(Default)]
@@ -116,27 +112,6 @@ fn short_dir() -> io::Result<std::path::PathBuf> {
     Ok(s.into())
 }
 
-/// The last `max` bytes of the run's output, across the rotated log too.
-fn log_tail(run: &Run, max: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    for f in run.log_files().iter().rev() {
-        let need = max.saturating_sub(out.len() as u64);
-        if need == 0 {
-            break;
-        }
-        let Ok(mut file) = File::open(f) else {
-            continue;
-        };
-        let len = file.metadata().map_or(0, |m| m.len());
-        let _ = file.seek(SeekFrom::Start(len.saturating_sub(need)));
-        let mut chunk = Vec::new();
-        let _ = file.read_to_end(&mut chunk);
-        chunk.extend_from_slice(&out);
-        out = chunk;
-    }
-    out
-}
-
 impl Preview {
     /// A live preview of a running run. The host first replays its recent output, then
     /// streams; a reader thread feeds both into the emulator.
@@ -177,25 +152,22 @@ impl Preview {
                 s.dirty = true;
             });
         }
-        let p = Preview {
+        // The host sends its current screen first, so there is nothing to repair, and the
+        // CLI isn't asked to redraw just because someone is looking.
+        Ok(Preview {
             id: run.id.clone(),
             shared,
             conn: Some(stream),
             exact_size,
-        };
-        if exact_size {
-            // Same size as now, so nothing moves; the CLI just redraws, which repairs a
-            // screen whose replayed output started mid-way.
-            p.resize(rows, cols);
-        }
-        Ok(p)
+        })
     }
 
-    /// A still picture of a finished run, from the end of its log.
+    /// A still picture of a finished run: its final screen.
     pub fn from_log(run: &Run) -> Preview {
-        let ((rows, cols), exact_size) = run_size(run);
+        let ((rows, cols), bytes) = crate::runs::screen::ended(run);
+        let exact_size = true;
         let mut parser = new_parser(rows, cols);
-        parser.process(&log_tail(run, LOG_TAIL));
+        parser.process(&bytes);
         Preview {
             id: run.id.clone(),
             shared: Arc::new(Mutex::new(Shared {

@@ -4,6 +4,17 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- `amux peek <run>` prints what is on a run's screen now, or its last screen once it has ended.
+
+### Fixed
+
+- `amux ui` showed overlapping, unrelated text for runs of Claude Code and other full-screen CLIs, because it replayed only the last 256 KB of output, which starts mid-redraw. The run host now keeps the CLI's screen in a terminal emulator and gives every new client (the UI's preview, `amux attach`, `amux explain`) an exact snapshot. It saves the final screen when the CLI exits. Older runs are redrawn from their whole log.
+- A preview in `amux ui` no longer makes the CLI redraw when you select its run.
+- In `amux ui`, letters typed into the list by mistake no longer open panels or dialogs one after another. A letter that isn't a shortcut shows how to type into the run (⏎), and letters right after it are ignored. Stop and remove confirmations ignore keys pressed in the first half second, so typed-ahead text can't answer them.
+- The new-run dialog no longer lets a long folder path spill past its border.
+
 ## [0.5.0] - 2026-11-16
 
 `amux ui`: one screen to watch, attach to, start and stop all your runs.

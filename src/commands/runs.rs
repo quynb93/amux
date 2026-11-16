@@ -355,6 +355,15 @@ pub fn attach_cmd(argv: &[String]) -> Result<i32> {
     }
 }
 
+/// `amux peek <run>`: the run's screen as it is now (or as it ended), as plain text.
+pub fn peek_cmd(argv: &[String]) -> Result<i32> {
+    let run = runs::find(need(argv.first(), "amux peek <run>")?)?;
+    for line in runs::screen::text(&runs::screen::capture(&run)) {
+        println!("{line}");
+    }
+    Ok(0)
+}
+
 pub fn logs_cmd(argv: &[String]) -> Result<i32> {
     let run = runs::find(need(argv.first(), "amux logs <run>")?)?;
     let mut out = std::io::stdout().lock();
