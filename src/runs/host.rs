@@ -61,7 +61,8 @@ fn openpty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
             &mut s,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut ws,
+            // *mut on macOS, *const on Linux; a raw pointer fits both.
+            std::ptr::addr_of_mut!(ws),
         ))?;
         let (m, s) = (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s));
         // Neither end may leak into the CLI beyond its stdio.
