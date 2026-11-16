@@ -2,12 +2,17 @@ name: Release
 
 # Push a tag like v0.2.0 to publish a GitHub release. The tag must match
 # "version" in package.json, and CHANGELOG.md must have a "## [0.2.0]" section.
+#
+# Optional repo secrets turn on more channels; without them those steps are skipped:
+#   TAP_DEPLOY_KEY  SSH deploy key with write access to quynb93/homebrew-tap
+#   NPM_TOKEN       npm automation token that can publish @quynb93/amux
 on:
   push:
     tags: ["v*.*.*"]
 
 permissions:
-  contents: write
+  contents: write # create the GitHub release
+  id-token: write # npm provenance
 
 jobs:
   release:
@@ -18,6 +23,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          registry-url: https://registry.npmjs.org
 
       - name: Check the tag matches package.json
         run: |
@@ -48,9 +54,45 @@ jobs:
       - name: Build the package
         run: |
           npm pack
-          mv amux-*.tgz amux.tgz
+          mv quynb93-amux-*.tgz amux.tgz
 
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" amux.tgz --title "amux $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+
+      - name: Update the Homebrew tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "::notice::TAP_DEPLOY_KEY is not set; skipping the Homebrew tap update"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          sha="$(sha256sum amux.tgz | cut -d' ' -f1)"
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --depth 1 git@github.com:quynb93/homebrew-tap.git "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          sed -i -E \
+            -e "s#^(  url \").*(\")#\1https://github.com/quynb93/amux/releases/download/v${version}/amux.tgz\2#" \
+            -e "s#^(  sha256 \").*(\")#\1${sha}\2#" \
+            Formula/amux.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "amux ${version}"
+          git push
+          rm -f "$key"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN is not set; skipping npm publish"
+            exit 0
+          fi
+          npm publish --provenance --access public

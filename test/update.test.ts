@@ -3,7 +3,18 @@ import { describe, it } from "node:test";
 import { isolate } from "./helpers.js";
 
 isolate();
-const { isNewer, parseRepo, version } = await import("../src/update.js");
+const { isNewer, parseRepo, upgradeCommand, version } = await import("../src/update.js");
+
+describe("upgradeCommand", () => {
+  it("uses brew for Homebrew installs and the release package otherwise", () => {
+    assert.equal(upgradeCommand("/opt/homebrew/Cellar/amux/0.1.1/libexec/lib/node_modules/@quynb93/amux/dist/update.js", "o/r", "0.2.0"), "brew upgrade amux");
+    assert.equal(upgradeCommand("/home/linuxbrew/.linuxbrew/Cellar/amux/0.1.1/libexec/x.js", "o/r", "0.2.0"), "brew upgrade amux");
+    assert.equal(
+      upgradeCommand("/usr/local/lib/node_modules/@quynb93/amux/dist/update.js", "o/r", "0.2.0"),
+      "npm install -g https://github.com/o/r/releases/download/v0.2.0/amux.tgz",
+    );
+  });
+});
 
 describe("isNewer", () => {
   it("compares versions numerically", () => {

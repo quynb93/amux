@@ -51,17 +51,31 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
 
 ## Install
 
-amux needs Node.js 20 or newer, and macOS or Linux.
+amux runs on macOS and Linux. On Windows, use it inside [WSL](https://learn.microsoft.com/windows/wsl/); native Windows support is [planned](https://github.com/quynb93/amux/issues?q=is%3Aissue+Windows+support).
 
-Install the latest release from GitHub:
+**Homebrew** (macOS and Linux):
+
+```sh
+brew install quynb93/tap/amux
+```
+
+**npm** (any platform with Node.js 20 or newer):
+
+```sh
+npm install -g @quynb93/amux
+```
+
+**From a GitHub release** (Node.js 20 or newer, no npm account or registry needed):
 
 ```sh
 npm install -g https://github.com/quynb93/amux/releases/latest/download/amux.tgz
 ```
 
-To install a specific version, use its release URL, for example `https://github.com/quynb93/amux/releases/download/v0.1.1/amux.tgz`. Run the same command again to upgrade.
+To install a specific version, use its release URL, for example `https://github.com/quynb93/amux/releases/download/v0.1.1/amux.tgz`.
 
-Or build from source:
+To upgrade, run `brew upgrade amux`, or run the same npm command again. `amux update` tells you the right command for your install.
+
+**From source:**
 
 ```sh
 git clone https://github.com/quynb93/amux.git

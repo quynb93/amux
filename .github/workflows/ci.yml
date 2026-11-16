@@ -30,6 +30,6 @@ jobs:
         run: |
           npm pack
           prefix="$(mktemp -d)"
-          npm install -g --prefix "$prefix" ./amux-*.tgz
+          npm install -g --prefix "$prefix" ./quynb93-amux-*.tgz
           "$prefix/bin/amux" --version
           "$prefix/bin/amux" help > /dev/null

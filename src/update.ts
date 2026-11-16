@@ -25,14 +25,14 @@ interface Cache {
 
 let pkgCache: PackageJson | undefined;
 
-/** amux's package.json, found next to the compiled output (dist/ → ../package.json). */
+/** amux's package.json (the one that defines the `amux` bin), found next to the compiled output: dist/ → ../package.json. */
 function pkg(): PackageJson {
   if (pkgCache) return pkgCache;
   for (const rel of ["../package.json", "../../package.json"]) {
     try {
       const file = fileURLToPath(new URL(rel, import.meta.url));
-      const data = JSON.parse(fs.readFileSync(file, "utf8")) as PackageJson & { name?: string };
-      if (data.name === "amux") return (pkgCache = data);
+      const data = JSON.parse(fs.readFileSync(file, "utf8")) as PackageJson & { bin?: Record<string, string> };
+      if (data.bin?.amux) return (pkgCache = data);
     } catch {
       // Try the next location.
     }
@@ -116,6 +116,15 @@ export function checkForUpdates(): void {
   }
 }
 
+/**
+ * The command that upgrades this copy of amux, based on where it is installed:
+ * Homebrew keeps formulae under a Cellar directory, and everything else gets the release package.
+ */
+export function upgradeCommand(installPath: string, r: string, latest: string): string {
+  if (/[/\\]Cellar[/\\]amux[/\\]/.test(installPath)) return "brew upgrade amux";
+  return `npm install -g https://github.com/${r}/releases/download/v${latest}/amux.tgz`;
+}
+
 /** `amux update`: checks now and prints how to upgrade. */
 export async function updateCmd(): Promise<number> {
   const r = repo();
@@ -133,7 +142,7 @@ export async function updateCmd(): Promise<number> {
     return 0;
   }
   console.log(`Update available: amux ${version()} → ${latest}`);
-  console.log(`  npm install -g https://github.com/${r}/releases/download/v${latest}/amux.tgz`);
+  console.log(`  ${upgradeCommand(fs.realpathSync(fileURLToPath(import.meta.url)), r, latest)}`);
   console.log(`  Release notes: ${releasesUrl(r)}`);
   return 0;
 }

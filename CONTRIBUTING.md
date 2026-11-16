@@ -131,7 +131,20 @@ The PR template has a short checklist. CI must pass before a merge.
    git tag vx.y.z
    git push origin main vx.y.z
    ```
-4. The [release workflow](.github/workflows/release.yml) checks that the tag matches `package.json`, runs the tests, and builds the package with `npm pack`. It then publishes a GitHub release with that version's changelog section as the notes, and attaches the package as `amux.tgz`, which is the file users install. Installed copies of amux see the new version within a day, through the update check.
+4. The [release workflow](.github/workflows/release.yml) then:
+   - checks that the tag matches `package.json` and runs the tests,
+   - builds the package with `npm pack` and publishes a GitHub release with `amux.tgz` attached, using that version's changelog section as the notes,
+   - updates the formula in [quynb93/homebrew-tap](https://github.com/quynb93/homebrew-tap) to the new `url` and `sha256` (needs the `TAP_DEPLOY_KEY` secret),
+   - publishes `@quynb93/amux` to npm with provenance (needs the `NPM_TOKEN` secret).
+
+   If a secret is missing, its step is skipped with a notice, and the GitHub release still goes out. Installed copies of amux see the new version within a day, through the update check.
+
+### Release secrets
+
+| Secret | What it is | How to create it |
+|---|---|---|
+| `TAP_DEPLOY_KEY` | Private half of an SSH key that can push to `quynb93/homebrew-tap` and nothing else | `ssh-keygen -t ed25519 -N "" -f tap_key`, add `tap_key.pub` as a deploy key with write access on the tap repo, then `gh secret set TAP_DEPLOY_KEY -R quynb93/amux < tap_key`, and delete both files. |
+| `NPM_TOKEN` | npm granular access token with read and write access to `@quynb93/amux` | On npmjs.com: Access Tokens → Generate New Token → Granular. Then `gh secret set NPM_TOKEN -R quynb93/amux`. |
 
 ## Code of conduct
 
