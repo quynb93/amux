@@ -316,6 +316,11 @@ impl Previews {
         self.list.last_mut()
     }
 
+    /// Whether any preview holds a live connection.
+    pub fn any_live(&self) -> bool {
+        self.list.iter().any(|p| p.conn.is_some())
+    }
+
     pub fn find(&self, id: &str) -> Option<&Preview> {
         self.list.iter().find(|p| p.id == id)
     }
