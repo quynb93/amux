@@ -81,6 +81,7 @@ A CLI can also report its own state with OSC 7501, the Program Status Protocol (
 From the first report on, the reports decide instead of the text, bell and OSC 9 signals:
 - `blocked` sets "waiting", with the CLI's message as the reason.
 - Any other state clears it. Typing doesn't clear it, because the CLI says when it moves on.
+- While the latest report is `idle` or `done`, `waitingPatterns` still apply, because a CLI doesn't report its own dialogs. Claude Code's confirmations after a turn are an example. Prompt text from before the latest state change is forgotten. Such a match is cleared by your answer, the next `working` or `blocked` report, or 4 KB more output. Bells and OSC 9 no longer count once reports have started.
 - The root record (state, kind, message, since) is saved in `run.json` as `status`. Child records, such as subagents, are ignored.
 - When the CLI exits, `working` and `blocked` records are dropped and `done` and `error` are kept, as the spec says. A new shell prompt (OSC 133 A) also drops `working` and `blocked`.
 

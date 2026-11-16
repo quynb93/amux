@@ -53,6 +53,9 @@ pub struct Detector {
     reports: bool,
     /// Its current root record.
     record: Option<Report>,
+    /// `waiting` came from `waitingPatterns` while the CLI reported idle or done (a
+    /// dialog of its own it doesn't report, like a confirmation), not from a report.
+    pattern_wait: bool,
     record_changed: bool,
     probed: bool,
     since_signal: usize,
@@ -73,6 +76,7 @@ impl Detector {
             osc_overflow: false,
             reports: false,
             record: None,
+            pattern_wait: false,
             record_changed: false,
             probed: false,
             since_signal: 0,
@@ -88,7 +92,11 @@ impl Detector {
     pub fn answered(&mut self) -> Option<Change> {
         // The CLI says itself when it stops being blocked.
         if self.reports {
-            return None;
+            // A reported block ends when the CLI says so; a matched dialog when you answer.
+            if !(self.waiting && self.pattern_wait) {
+                return None;
+            }
+            self.pattern_wait = false;
         }
         self.text.clear();
         self.since_signal = 0;
@@ -142,18 +150,7 @@ impl Detector {
             }
         }
         if self.reports {
-            let blocked = self.record.as_ref().filter(|r| r.state == "blocked");
-            return match (blocked, self.waiting) {
-                (Some(r), false) => {
-                    self.waiting = true;
-                    Some(Change::Waiting(r.reason()))
-                }
-                (None, true) => {
-                    self.waiting = false;
-                    Some(Change::Cleared)
-                }
-                _ => None,
-            };
+            return self.reported(chunk.len());
         }
         let signal = signal.or_else(|| self.matched());
         if let Some(reason) = signal {
@@ -193,8 +190,55 @@ impl Detector {
 
     fn set_record(&mut self, r: Option<Report>) {
         if self.record != r {
+            let state = |r: &Option<Report>| r.as_ref().map(|r| r.state.clone());
+            if state(&self.record) != state(&r) {
+                // Prompt text from before this report is old news.
+                self.text.clear();
+            }
             self.record = r;
             self.record_changed = true;
+        }
+    }
+
+    /// Whether the CLI is waiting, once it reports its state. A reported block decides.
+    /// While it reports idle or done, `waitingPatterns` still catch dialogs it doesn't
+    /// report (Claude Code's confirmations after a turn); the next working or blocked
+    /// report, or your answer, ends those. Bells and OSC 9 no longer count.
+    fn reported(&mut self, len: usize) -> Option<Change> {
+        let state = self.record.as_ref().map(|r| r.state.as_str());
+        if state == Some("blocked") {
+            let reason = self.record.as_ref().map(Report::reason).unwrap_or_default();
+            self.pattern_wait = false;
+            return (!std::mem::replace(&mut self.waiting, true))
+                .then_some(Change::Waiting(reason));
+        }
+        let quiet = matches!(state, None | Some("idle" | "done"));
+        if self.waiting && (!self.pattern_wait || !quiet) {
+            // A reported block ended, or the CLI went back to work past a dialog.
+            self.waiting = false;
+            self.pattern_wait = false;
+            return Some(Change::Cleared);
+        }
+        if !quiet {
+            return None;
+        }
+        match self.matched() {
+            Some(p) => {
+                self.since_signal = 0;
+                self.pattern_wait = true;
+                (!std::mem::replace(&mut self.waiting, true)).then_some(Change::Waiting(p))
+            }
+            None if self.waiting => {
+                // The dialog has scrolled out of view without a report: as without reports.
+                self.since_signal += len;
+                (self.since_signal >= CLEAR_AFTER).then(|| {
+                    self.waiting = false;
+                    self.pattern_wait = false;
+                    self.text.clear();
+                    Change::Cleared
+                })
+            }
+            None => None,
         }
     }
 
@@ -374,6 +418,43 @@ mod tests {
         d.feed(b"\x1b]7501;state=done\x07");
         d.take_record();
         assert_eq!(d.exited(), None);
+    }
+
+    #[test]
+    fn catches_unreported_dialogs_while_the_cli_reports_idle_or_done() {
+        let mut d = det();
+        d.feed(b"\x1b]7501;state=working\x07");
+        // While working, prompt text doesn't count, and it is forgotten once the turn ends.
+        assert_eq!(d.feed(b"Enter to confirm"), None);
+        assert_eq!(d.feed(b"\x1b]7501;state=done\x07"), None);
+        // A dialog after the turn, which Claude Code doesn't report: waiting.
+        assert_eq!(
+            d.feed(b"Teach auto mode? \x1b[1mEnter to confirm\x1b[0m"),
+            Some(Change::Waiting("Enter to confirm".into()))
+        );
+        assert_eq!(d.feed(b" (still on screen)"), None);
+        // Answering it clears it, though the CLI stays done.
+        assert_eq!(d.answered(), Some(Change::Cleared));
+        assert_eq!(d.feed(b"redraw"), None);
+        // Shown again, then the CLI goes back to work: that clears it too.
+        assert_eq!(
+            d.feed(b"Enter to confirm"),
+            Some(Change::Waiting("Enter to confirm".into()))
+        );
+        assert_eq!(
+            d.feed(b"\x1b]7501;state=working\x07"),
+            Some(Change::Cleared)
+        );
+        // Bells and OSC 9 stay off once the CLI reports, even while idle.
+        d.feed(b"\x1b]7501;state=idle\x07");
+        assert_eq!(d.feed(b"\x07\x1b]9;hey\x07"), None);
+        // A reported block ends with the next report, whatever the screen says.
+        assert_eq!(
+            d.feed(b"\x1b]7501;state=blocked:kind=permission\x07"),
+            Some(Change::Waiting("permission request".into()))
+        );
+        assert_eq!(d.answered(), None);
+        assert_eq!(d.feed(b"\x1b]7501;state=idle\x07"), Some(Change::Cleared));
     }
 
     #[test]
