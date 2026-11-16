@@ -4,6 +4,13 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- Parallel runs. `amux spawn` starts a CLI in the background in its own terminal, under any account, and optionally in its own git worktree and branch (`--worktree`, `--branch`, `--base`).
+- `amux ps` lists runs and shows whether each is working or idle. `amux attach` connects your terminal to a run, and Ctrl-] detaches.
+- `amux logs`, `amux stop` and `amux rm` show, end and remove runs. `amux rm` deletes a run's worktree only when it has no uncommitted or untracked files.
+- The CLI sees `AMUX_RUN` in its environment when it was started by `amux spawn`.
+
 ## [0.2.1] - 2026-11-16
 
 0.2.0 was never published to npm, and its tag missed the fixes below. Use 0.2.1.

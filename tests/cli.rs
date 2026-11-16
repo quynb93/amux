@@ -37,7 +37,10 @@ impl Sandbox {
         write(
             &bin,
             "#!/bin/sh\nfor a in \"$@\"; do echo \"ARG $a\"; done\n\
-             for k in FAKE_HOME FAKE_BASE_URL FAKE_TELEMETRY AMUX_ACCOUNT FAKE_TOKEN; do eval \"v=\\${$k-<unset>}\"; echo \"ENV $k=$v\"; done\n",
+             for k in FAKE_HOME FAKE_BASE_URL FAKE_TELEMETRY AMUX_ACCOUNT FAKE_TOKEN AMUX_RUN; do eval \"v=\\${$k-<unset>}\"; echo \"ENV $k=$v\"; done\n\
+             [ -t 0 ] && echo TTY yes\n\
+             [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = quit ] && exit 7; done\n\
+             exit 0\n",
         );
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         write(&shared.join("settings.json"), "{}");
@@ -55,14 +58,22 @@ impl Sandbox {
     }
 
     fn amux(&self, args: &[&str]) -> Out {
-        let r = Command::new(env!("CARGO_BIN_EXE_amux"))
-            .args(args)
+        self.amux_with(args, &[], None)
+    }
+
+    /// Runs amux with extra env vars, in `dir` when given.
+    fn amux_with(&self, args: &[&str], env: &[(&str, &str)], dir: Option<&Path>) -> Out {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_amux"));
+        cmd.args(args)
             .env("HOME", &self.home)
             .env("AMUX_HOME", &self.amux_home)
             .env("AMUX_NO_UPDATE_CHECK", "1")
             .env("FAKE_TOKEN", "inherited-from-shell")
-            .output()
-            .unwrap();
+            .envs(env.iter().copied());
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        let r = cmd.output().unwrap();
         Out {
             code: r.status.code().unwrap_or(-1),
             out: String::from_utf8_lossy(&r.stdout).into(),
@@ -148,6 +159,7 @@ fn account_lifecycle() {
             "FAKE_TELEMETRY=0".into(),
             "AMUX_ACCOUNT=fake@one".into(),
             "FAKE_TOKEN=<unset>".into(),
+            "AMUX_RUN=<unset>".into(),
         ]
     );
     let mode = fs::metadata(s.amux_home.join("launches.jsonl"))
@@ -262,4 +274,139 @@ fn keeps_unknown_top_level_keys_in_accounts_json() {
             .unwrap();
     assert_eq!(saved["future"]["x"], 1);
     assert_eq!(saved["accounts"][0]["name"], "a");
+}
+
+/// Polls `amux ps` until the run's row contains `want`.
+fn wait_ps(s: &Sandbox, run: &str, want: &str) -> String {
+    for _ in 0..100 {
+        let ps = s.amux(&["ps"]).out;
+        if ps.lines().any(|l| l.starts_with(run) && l.contains(want)) {
+            return ps;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{run} never showed {want:?}:\n{}", s.amux(&["ps"]).out);
+}
+
+#[test]
+fn spawns_a_background_run_in_a_terminal() {
+    let s = Sandbox::new("spawn");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let r = s.amux(&["spawn", "fake", "--model", "x"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("started fake-1 as fake@one"), "{}", r.err);
+
+    let ps = wait_ps(&s, "fake-1", "exited 0");
+    assert!(ps.contains("--model x"), "{ps}");
+    let logs = s.amux(&["logs", "fake-1"]).out;
+    assert!(logs.contains("ARG --model"), "{logs}");
+    assert!(logs.contains("ENV AMUX_ACCOUNT=fake@one"), "{logs}");
+    assert!(logs.contains("ENV AMUX_RUN=fake-1"), "{logs}");
+    assert!(logs.contains("ENV FAKE_TOKEN=<unset>"), "{logs}");
+    assert!(
+        logs.contains("TTY yes"),
+        "the CLI runs on a terminal: {logs}"
+    );
+
+    let a = s.amux(&["attach", "fake-1"]);
+    assert!(a.err.contains("exited with code 0"), "{}", a.err);
+    assert_eq!(s.amux(&["spawn", "fake"]).code, 0);
+    wait_ps(&s, "fake-2", "exited");
+    assert!(s.amux(&["rm", "--done"]).out.contains("Removed fake-1."));
+    assert!(s.amux(&["ps"]).out.contains("No runs"));
+}
+
+#[test]
+fn attaches_to_a_running_cli_and_stops_it() {
+    let s = Sandbox::new("attach");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let chat = [("FAKE_CHAT", "1")];
+    let r = s.amux_with(&["spawn", "--name", "chat", "fake"], &chat, None);
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "chat", "running");
+    assert!(s.amux(&["rm", "chat"]).err.contains("still running"));
+
+    // Piped input reaches the CLI, and the exit code comes back when it ends.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["attach", "ch"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"hello\nquit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("got hello"), "{stdout}");
+    assert_eq!(out.status.code(), Some(7));
+    wait_ps(&s, "chat", "exited 7");
+
+    // stop ends a run that is waiting for input.
+    s.amux_with(&["spawn", "--name", "idle", "fake"], &chat, None);
+    wait_ps(&s, "idle", "running");
+    let stop = s.amux(&["stop", "idle"]);
+    assert!(
+        stop.out.contains("Stopped idle (exited 143)"),
+        "{}",
+        stop.out
+    );
+}
+
+#[test]
+fn gives_a_run_its_own_worktree() {
+    let s = Sandbox::new("worktree");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    write(&repo.join("src/main.txt"), "x");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+
+    let r = s.amux_with(
+        &["spawn", "--worktree", "fake"],
+        &[],
+        Some(&repo.join("src")),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let wt = s.amux_home.join("worktrees/repo-fake-1");
+    assert!(r.err.contains("(branch amux/fake-1)"), "{}", r.err);
+    wait_ps(&s, "fake-1", "exited 0");
+    // Started in the same subdirectory of the new checkout.
+    let run: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(s.amux_home.join("runs/fake-1/run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(run["cwd"], wt.join("src").to_string_lossy().as_ref());
+
+    // A clean worktree is removed with the run; the branch stays.
+    let rm = s.amux(&["rm", "fake-1"]);
+    assert!(rm.out.contains("kept branch amux/fake-1"), "{}", rm.out);
+    assert!(!wt.exists());
+
+    // Outside a repository, --worktree fails and leaves nothing behind.
+    let bad = s.amux_with(&["spawn", "--worktree", "fake"], &[], Some(&s.home));
+    assert!(bad.err.contains("needs a git repository"), "{}", bad.err);
+    assert!(s.amux(&["ps"]).out.contains("No runs"));
 }

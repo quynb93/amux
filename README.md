@@ -27,6 +27,7 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
 - [Usage](#usage)
   - [Accounts and sign-in](#accounts-and-sign-in)
   - [Sessions and handoff](#sessions-and-handoff)
+  - [Parallel runs](#parallel-runs)
   - [Privacy mode](#privacy-mode)
   - [Gateways and custom endpoints](#gateways-and-custom-endpoints)
   - [Shell integration](#shell-integration)
@@ -46,6 +47,7 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
 - **Run accounts side by side.** Each launch gets its own overlay directory, so two accounts can run at the same time in different terminals.
 - **Sign in your way.** Use the CLI's own login flow or a stored token (macOS Keychain, or a `0600` file on Linux).
 - **Sessions across accounts and CLIs.** List every session from every CLI in one place. Resume one under another account, or hand it to a different CLI with a transcript handoff.
+- **Parallel runs.** Start several agents in the background, across accounts and CLIs, each in its own git worktree if you like. See which are working and which are waiting, attach to any of them, and detach again.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
 - **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
 
@@ -178,6 +180,34 @@ amux resume 01a01da9 --as claude@work       # Codex → Claude: transcript hando
 
 For the same CLI, `resume` uses the CLI's own resume command, which is useful when an account hits its rate limit. Across CLIs, amux writes the original request and the most recent turns to a Markdown file in `~/.amux/handoffs/`. It then starts the target CLI in the session's directory and asks it to read that file and continue.
 
+### Parallel runs
+
+`amux spawn` starts a CLI in the background, in a terminal of its own, and returns right away. Start as many as you like, under any accounts.
+
+```sh
+amux spawn --worktree claude@work          # its own git worktree on branch amux/claude-1
+amux spawn --worktree codex@personal       # a second agent on the same repo, on amux/codex-1
+amux spawn --name review claude@work -p "review the open diff"
+
+amux ps
+# RUN       ACCOUNT          STATE     STARTED  DIR                              BRANCH         ARGS
+# claude-1  claude@work      running   2m ago   ~/.amux/worktrees/app-claude-1   amux/claude-1
+# codex-1   codex@personal   idle 40s  1m ago   ~/.amux/worktrees/app-codex-1    amux/codex-1
+# review    claude@work      exited 0  30s ago  ~/src/app                        -              -p review the open diff
+
+amux attach codex-1      # work with it as usual; Ctrl-] detaches and leaves it running
+amux logs review         # everything the run printed
+amux stop claude-1       # SIGTERM; --force for SIGKILL
+amux rm --done           # remove finished runs
+```
+
+- **STATE** shows `running` while the CLI is printing and `idle <time>` once it has been quiet for a few seconds, which usually means it is waiting for you.
+- **`--worktree`** runs `git worktree add` on a new branch (`amux/<run>`, or `--branch <name>`) from `HEAD` (or `--base <ref>`). The run starts in the same subdirectory you spawned from. Worktrees live in `~/.amux/worktrees/`.
+- **`amux rm`** removes a run's worktree only if git reports no uncommitted or untracked files. Otherwise the worktree is kept and amux tells you where it is. Branches are always kept.
+- amux's own flags go before the account. Everything after the account is passed to the CLI unchanged.
+- The CLI sees `AMUX_RUN=<run>` in its environment. Runs survive closing the terminal, but not a reboot: `amux ps` then shows them as `lost`.
+- macOS and Linux only.
+
 ### Privacy mode
 
 ```sh
@@ -267,6 +297,12 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux account rm <cli>@<name> [--purge]` | Remove an account. `--purge` also deletes its overlay. |
 | `amux sessions [<cli>] [--here] [-n <count>]` | List sessions from every CLI, newest first. |
 | `amux resume <id> [--as <cli>@<name>]` | Resume a session under any account, or hand it to another CLI. |
+| `amux spawn [--name <run>] [--worktree] [--branch <b>] [--base <ref>] [--attach] <cli>[@name] [args…]` | Start the CLI in the background, optionally in its own git worktree. |
+| `amux ps` | List runs: state, working or idle, directory and branch. |
+| `amux attach <run>` | Connect this terminal to a run. Ctrl-] detaches. |
+| `amux logs <run>` | Print everything the run has output. |
+| `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
+| `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux providers` | List providers, shared homes and private entries. |
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
@@ -282,6 +318,8 @@ Commands never wait on the network. The notice comes from a cached result, which
   accounts.json        the account list (no secrets)
   accounts/<cli>/<name>/   each account's overlay (and token file on Linux)
   handoffs/            transcripts written by cross-CLI `resume`
+  runs/<run>/          each background run: run.json, output.log and the attach socket
+  worktrees/           git worktrees made by `amux spawn --worktree`
   launches.jsonl       local log of launches: time, account, directory, arguments (mode 0600)
   update-check.json    cached result of the update check
 ```
@@ -291,6 +329,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `AMUX_HOME` | Use a different directory instead of `~/.amux`. Handy for testing. |
 | `AMUX_NO_UPDATE_CHECK=1` | Turn off the update check. |
 | `AMUX_ACCOUNT` | Set by amux in the launched CLI's environment, e.g. `claude@work`. Read it from hooks or scripts. |
+| `AMUX_RUN` | Set in the CLI's environment when it was started by `amux spawn`: the run's name. |
 
 amux makes no network requests of its own, except the daily update check to `api.github.com`.
 
@@ -328,7 +367,7 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-1. **Parallel runs and status.** `amux spawn` starts several agents across accounts and CLIs, each in its own git worktree. `amux ps` shows which are working, blocked or idle, and `amux attach` connects you to one.
+1. **Parallel runs and status.** Shipped: `amux spawn`, `ps`, `attach`, `logs`, `stop`, `rm`. Next: telling "waiting for permission" apart from plain idle, and notifications when a run needs you.
 2. **Messaging between sessions.** An `amux daemon` with a session registry and inboxes, plus an MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
 3. **Rate-limit failover.** Detect a limit error and resume the session under the next account.
 4. **Usage view.** Usage and limits for each account.

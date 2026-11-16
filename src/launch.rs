@@ -105,13 +105,13 @@ pub fn prepare(acct: &Account) -> Result<(ProviderSpec, EnvPlan)> {
     Ok((spec, env))
 }
 
-fn log_launch(acct: &Account, args: &[String], cwd: &Path) {
+pub(crate) fn log_launch(acct: &Account, args: &[String], cwd: &Path) {
     // Args can contain prompts, so the log is readable by the owner only. Best-effort.
     let line = json!({ "ts": time::iso(time::now_ms()), "account": acct.id(), "cwd": cwd.to_string_lossy(), "args": args });
     let _ = fsx::append_private(&paths::launch_log(), &format!("{line}\n"));
 }
 
-fn not_found(spec: &ProviderSpec, e: std::io::Error) -> anyhow::Error {
+pub(crate) fn not_found(spec: &ProviderSpec, e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         anyhow!("\"{}\" not found on PATH.", spec.bin)
     } else {

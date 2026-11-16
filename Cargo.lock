@@ -13,6 +13,7 @@ name = "amux"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

@@ -59,6 +59,23 @@ To list sessions, amux reads the first 32 KB of each JSONL transcript (256 KB if
 
 `build_handoff` writes the first user request, then as many of the most recent turns as fit in a character budget (60,000 by default). If the newest turn is too large, its tail is kept rather than dropping the turn.
 
+## Parallel runs
+
+`amux spawn` resolves the account and prepares its overlay and environment exactly as a launch does. It claims `runs/<id>/` (creating the folder is the claim, so concurrent spawns never share an id), optionally runs `git worktree add`, and writes `run.json`. Then it starts `amux __run-host <id>` in a new session (`setsid`) with the account's environment and waits until the host has recorded the CLI's pid, or an error.
+
+The host (`runs/host.rs`) is a small terminal multiplexer, in the spirit of dtach:
+
+- It opens a pseudo-terminal and starts the CLI on the slave side in a new session, with the terminal as its controlling terminal. The CLI behaves as it would in a real terminal.
+- A pump thread reads the master side. Each chunk is appended to `output.log` (rotated to `output.log.1` at 4 MB), kept in a 256 KB in-memory buffer, and written to every attached client. A client that can't take output within 2 seconds is dropped.
+- It listens on `runs/<id>/sock`. The folder is mode 0700, so only you can connect. The socket is bound by relative name, because socket paths are limited to about 100 bytes.
+- A new client first gets the buffered output (from a line boundary once the buffer has wrapped), then live output.
+- Clients send framed messages: a kind byte, a big-endian length, and the payload. `INPUT` bytes are written to the CLI. `RESIZE` sets the terminal size and sends `SIGWINCH` to the CLI's process group, so the CLI redraws for the client that just attached.
+- When the CLI exits, the host records the exit code (128 + signal if it was killed), closes the clients and removes the socket.
+
+`amux attach` (`runs/attach.rs`) puts the terminal in raw mode and copies bytes both ways. It polls the window size and sends `RESIZE` when it changes. On Ctrl-], or when the host closes, it restores the terminal and switches off modes a full-screen CLI may have left on: the alternate screen, a hidden cursor, mouse reporting and bracketed paste.
+
+`amux ps` derives each run's state from `run.json` and whether the host pid is alive. It reads "working or idle" from the modification time of `output.log`.
+
 ## Update check
 
 `update.rs` follows the pattern Claude Code and Codex use. On each run it reads `~/.amux/update-check.json` and prints a notice if a newer version is cached. If the cache is more than a day old, it starts a detached `amux __update-check` process that asks the GitHub releases API for the latest tag and rewrites the cache. The command the user typed never waits on the network.
@@ -71,6 +88,8 @@ To list sessions, amux reads the first 32 KB of each JSONL transcript (256 KB if
 | `accounts.json` | `amux account …` | Account list: provider, name, auth type, options. No secrets. |
 | `accounts/<p>/<n>/` | `sync_overlay`, the CLI | The overlay, plus a `token` file on Linux |
 | `handoffs/*.md` | `amux resume` | Transcripts for cross-CLI handoff (mode 0600) |
+| `runs/<id>/` | `amux spawn`, the run host | `run.json`, `output.log` (mode 0600) and the attach socket |
+| `worktrees/` | `amux spawn --worktree` | Git worktrees for runs |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
 

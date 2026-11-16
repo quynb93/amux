@@ -1,6 +1,8 @@
 mod commands {
     pub mod account;
     pub mod maintenance;
+    #[cfg(unix)]
+    pub mod runs;
     pub mod sessions;
 }
 mod fsx;
@@ -8,6 +10,8 @@ mod launch;
 mod overlay;
 mod paths;
 mod providers;
+#[cfg(unix)]
+mod runs;
 mod secrets;
 mod sessions;
 mod store;
@@ -36,6 +40,15 @@ Accounts:
   amux account status [<provider>@<name>]  Ask each CLI who is signed in
   amux account rm <provider>@<name> [--purge]
 
+Parallel runs (each CLI in the background, in its own terminal):
+  amux spawn [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
+      Start the CLI in the background. --worktree gives it its own git worktree and branch.
+  amux ps                                  List runs and whether each is working or idle
+  amux attach <run>                        Connect this terminal to a run (Ctrl-] detaches)
+  amux logs <run>                          Print everything a run has output
+  amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
+  amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
+
 Sessions (shared across accounts):
   amux sessions [provider] [--here] [-n <count>]
   amux resume <session-id> [--as <provider>@<name>]
@@ -59,6 +72,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
     match cmd {
         // Internal: the background refresh started by check_for_updates().
         Some("__update-check") => return Ok(update::internal_cmd(rest)),
+        #[cfg(unix)]
+        Some("__run-host") => return Ok(runs::host::main(rest)),
         Some("--version" | "-v" | "version") => {
             println!("{}", update::version());
             return Ok(0);
@@ -85,6 +100,22 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "env" => maintenance::env_cmd(rest),
         "sync" => maintenance::sync_cmd(rest),
         "doctor" => maintenance::doctor_cmd(),
+        #[cfg(unix)]
+        "spawn" => commands::runs::spawn_cmd(rest),
+        #[cfg(unix)]
+        "ps" => commands::runs::ps_cmd(rest),
+        #[cfg(unix)]
+        "attach" => commands::runs::attach_cmd(rest),
+        #[cfg(unix)]
+        "logs" => commands::runs::logs_cmd(rest),
+        #[cfg(unix)]
+        "stop" => commands::runs::stop_cmd(rest),
+        #[cfg(unix)]
+        "rm" => commands::runs::rm_cmd(rest),
+        #[cfg(not(unix))]
+        "spawn" | "ps" | "attach" | "logs" | "stop" | "rm" => {
+            bail!("Parallel runs need macOS or Linux.")
+        }
         _ => {
             // Shorthand: `amux claude@work ...`
             let provider = cmd.split('@').next().unwrap_or_default();
