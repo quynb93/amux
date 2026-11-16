@@ -4,7 +4,9 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-11-17
+## [0.6.1] - 2026-11-17
+
+The first published release with these changes. The v0.6.0 tag was never released: its release check found the screen bug fixed below.
 
 Many agents on one machine without overloading it, steered from a phone, another laptop or another agent, with their work checked, reviewed and shipped from amux.
 
