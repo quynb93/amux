@@ -2,7 +2,7 @@
 name = "amux"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Run Claude Code, Codex and Gemini CLI with many accounts over one shared home"
 license = "MIT"
 repository = "https://github.com/quynb93/amux"

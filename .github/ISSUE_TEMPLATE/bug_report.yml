@@ -33,7 +33,7 @@ body:
   - type: input
     id: env
     attributes:
-      label: OS, Node version, and the CLI and version involved
-      placeholder: macOS 15.2, Node 22.17, Claude Code 2.1.0
+      label: OS, how you installed amux, and the CLI and version involved
+      placeholder: macOS 15.2, Homebrew, Claude Code 2.1.0
     validations:
       required: true

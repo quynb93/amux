@@ -8,8 +8,8 @@
 
 ## Checklist
 
-- [ ] `npm run typecheck` and `npm test` pass
+- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
 - [ ] Added or updated tests
 - [ ] Updated the README or `docs/` if commands or behavior changed
 - [ ] Added a line under `## [Unreleased]` in CHANGELOG.md for anything users will notice
-- [ ] Doesn't print, log or store secrets outside `secrets.ts`, and doesn't delete user data without an explicit flag
+- [ ] Doesn't print, log or store secrets outside `secrets.rs`, and doesn't delete user data without an explicit flag

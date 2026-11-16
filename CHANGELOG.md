@@ -4,6 +4,24 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
+amux is now a single native binary written in Rust. Commands, flags, output and the files in `~/.amux` are unchanged, so existing accounts keep working.
+
+### Changed
+
+- Rewritten in Rust. amux no longer needs Node.js, and starts in about 3 ms instead of about 30 ms. `amux sessions` is about 2.5 times faster.
+- Releases ship static binaries for macOS (Apple silicon and Intel) and Linux (arm64 and x86_64), each with a SHA-256 checksum.
+- The Homebrew formula installs the binary and no longer depends on Node.js.
+- The npm package `@quynb/amux` contains the prebuilt binaries and a small launcher. Installing it runs no scripts.
+- On macOS and Linux, amux replaces itself with the CLI it launches, so the CLI receives Ctrl-C and other signals directly.
+- `amux update` prints the upgrade command for how amux was installed: Homebrew, npm, or the install script.
+- Fields amux doesn't recognize in `accounts.json` and `config.json` are kept when it rewrites them.
+
+### Added
+
+- An install script for macOS and Linux: `curl -fsSL https://github.com/quynb93/amux/releases/latest/download/install.sh | sh`. It verifies the checksum before installing.
+
 ### Security
 
 - On macOS, `amux account token` passes the token to the Keychain on stdin, so it no longer appears in the process list.

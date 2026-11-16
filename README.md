@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/quynb93/amux/actions/workflows/ci.yml/badge.svg)](https://github.com/quynb93/amux/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Node 20+](https://img.shields.io/badge/node-%3E%3D20-brightgreen)
+![Written in Rust](https://img.shields.io/badge/written%20in-Rust-orange)
 
 Agent CLIs keep everything in one home directory: your login, but also your skills, plugins, MCP servers, settings and session history. Using a second account usually means a second home directory, and then nothing is shared between them.
 
@@ -47,7 +47,7 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
 - **Sign in your way.** Use the CLI's own login flow or a stored token (macOS Keychain, or a `0600` file on Linux).
 - **Sessions across accounts and CLIs.** List every session from every CLI in one place. Resume one under another account, or hand it to a different CLI with a transcript handoff.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
-- **Small and dependency-free.** Plain Node.js 20+, with no runtime dependencies.
+- **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
 
 ## Install
 
@@ -59,30 +59,31 @@ amux runs on macOS and Linux. On Windows, use it inside [WSL](https://learn.micr
 brew install quynb93/tap/amux
 ```
 
-**npm** (any platform with Node.js 20 or newer):
+**Install script** (macOS and Linux). It downloads the binary for your machine from the latest GitHub release, checks its SHA-256 checksum, and puts it in `~/.local/bin`:
+
+```sh
+curl -fsSL https://github.com/quynb93/amux/releases/latest/download/install.sh | sh
+```
+
+Set `AMUX_INSTALL_DIR` to install somewhere else, or `AMUX_VERSION=0.2.0` for a specific version.
+
+**npm.** The package contains the prebuilt binaries, so installing it runs no scripts:
 
 ```sh
 npm install -g @quynb/amux
 ```
 
-**From a GitHub release** (Node.js 20 or newer, no npm account or registry needed):
+**Manual download.** Each [release](https://github.com/quynb93/amux/releases/latest) has an `amux-<target>.tar.gz` for macOS (Apple silicon and Intel) and Linux (arm64 and x86_64, statically linked), with a `.sha256` file for each.
+
+**From source** (Rust 1.88 or newer):
 
 ```sh
-npm install -g https://github.com/quynb93/amux/releases/latest/download/amux.tgz
+cargo install --git https://github.com/quynb93/amux --locked
 ```
 
-To install a specific version, use its release URL, for example `https://github.com/quynb93/amux/releases/download/v0.1.2/amux.tgz`.
+To upgrade, run `amux update`. It prints the right command for how you installed amux: `brew upgrade amux`, the npm command, or the install script.
 
-To upgrade, run `brew upgrade amux`, or run the same npm command again. `amux update` tells you the right command for your install. If you are upgrading from 0.1.0 or 0.1.1, which were packaged as `amux` rather than `@quynb/amux`, run `npm uninstall -g amux` first.
-
-**From source:**
-
-```sh
-git clone https://github.com/quynb93/amux.git
-cd amux
-npm install          # also builds dist/
-npm link             # puts `amux` on your PATH
-```
+**Upgrading from 0.1.x.** Versions 0.1.x ran on Node.js. The binary releases replace them, and your accounts and settings in `~/.amux` carry over unchanged. If you installed 0.1.0 or 0.1.1 with npm, run `npm uninstall -g amux` first, because those were packaged as `amux` rather than `@quynb/amux`.
 
 Check it worked:
 
@@ -315,8 +316,6 @@ If you already keep one directory per account, for example `~/.claude-work` and 
 
 **I set `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in my shell.** amux overrides these for each launch, so they don't leak from one account into another.
 
-**Permission denied running `amux` after a rebuild.** Use `npm run build`, which restores the executable bit, rather than running `tsc` on its own.
-
 **Windows.** amux relies on symlinks and POSIX permissions and has not been tested on Windows. WSL works, and native support is tracked in [#1](https://github.com/quynb93/amux/issues/1).
 
 ## Responsible use
@@ -329,10 +328,12 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-1. **Messaging between sessions.** An `amux daemon` with a session registry and inboxes, plus an MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
-2. **Rate-limit failover.** Detect a limit error and resume the session under the next account.
-3. **Usage view.** Usage and limits for each account.
-4. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
+1. **Parallel runs and status.** `amux spawn` starts several agents across accounts and CLIs, each in its own git worktree. `amux ps` shows which are working, blocked or idle, and `amux attach` connects you to one.
+2. **Messaging between sessions.** An `amux daemon` with a session registry and inboxes, plus an MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
+3. **Rate-limit failover.** Detect a limit error and resume the session under the next account.
+4. **Usage view.** Usage and limits for each account.
+5. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
+6. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
 
 Ideas and feedback are welcome in [issues](https://github.com/quynb93/amux/issues).
 

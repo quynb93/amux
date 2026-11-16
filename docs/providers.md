@@ -2,7 +2,7 @@
 
 A *provider* tells amux how one CLI keeps its home directory: which variable moves it, which files belong to a single account, and how to sign in, resume and read sessions.
 
-The built-in providers (`claude`, `codex`, `gemini`) are in [`src/providers/builtin.ts`](../src/providers/builtin.ts). You can add more, or override parts of a built-in, in `~/.amux/config.json` under `"providers"`.
+The built-in providers (`claude`, `codex`, `gemini`) are in [`src/providers.rs`](../src/providers.rs). You can add more, or override parts of a built-in, in `~/.amux/config.json` under `"providers"`.
 
 ```json
 {

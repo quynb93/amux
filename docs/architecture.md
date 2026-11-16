@@ -27,10 +27,10 @@ On macOS, Claude Code stores the OAuth login in the Keychain under a service nam
 
 `amux claude@work --model opus` runs these steps:
 
-1. **Resolve the account** (`store.ts`): `claude@work` is looked up in `accounts.json`. Plain `claude` falls back to the configured default, or the only account.
-2. **Sync the overlay** (`overlay.ts`): link new shared entries, repoint wrong links, prune dangling ones, and unlink entries that have since become private. Real files are never deleted. Real files that should be shared are reported as *stray*, and `amux sync --adopt` can move them.
-3. **Build the environment** (`launch.ts`): copy the current environment and remove variables that would point at another account (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, …). Then set the home variable, `AMUX_ACCOUNT`, and the account's options: privacy variables, a token from `secrets.ts`, and the base URL.
-4. **Log and run**: append a line to `launches.jsonl` (mode 0600), then spawn the CLI with an inherited terminal. amux ignores Ctrl-C while the child runs, so the CLI handles it, and exits with the CLI's exit code.
+1. **Resolve the account** (`store.rs`): `claude@work` is looked up in `accounts.json`. Plain `claude` falls back to the configured default, or the only account.
+2. **Sync the overlay** (`overlay.rs`): link new shared entries, repoint wrong links, prune dangling ones, and unlink entries that have since become private. Real files are never deleted. Real files that should be shared are reported as *stray*, and `amux sync --adopt` can move them.
+3. **Build the environment** (`launch.rs`): copy the current environment and remove variables that would point at another account (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, …). Then set the home variable, `AMUX_ACCOUNT`, and the account's options: privacy variables, a token from `secrets.rs`, and the base URL.
+4. **Log and run**: append a line to `launches.jsonl` (mode 0600), then `exec` the CLI. amux replaces itself with the CLI process, so the CLI owns the terminal, receives Ctrl-C directly, and its exit code is the exit code.
 
 ## Overlay sync rules
 
@@ -43,11 +43,11 @@ On macOS, Claude Code stores the OAuth login in the Keychain under a service nam
 | real file or directory | exists or not | no | report as stray |
 | real file or directory | — | yes | leave it: this is the account's own data |
 
-`syncOverlay` is idempotent and runs on every launch, so it must stay fast and must never delete a real file.
+`sync_overlay` is idempotent and runs on every launch, so it must stay fast and must never delete a real file.
 
 ## Sessions and handoff
 
-`sessions.ts` reads each CLI's session files from the shared home:
+`sessions.rs` reads each CLI's session files from the shared home:
 
 | Format | Location | Parsed from |
 |---|---|---|
@@ -57,11 +57,11 @@ On macOS, Claude Code stores the OAuth login in the Keychain under a service nam
 
 To list sessions, amux reads only the first 256 KB of each file, so listing stays fast on long histories. Injected context, such as `AGENTS.md`, environment blocks and slash-command wrappers, is skipped when picking a title.
 
-`buildHandoff` writes the first user request, then as many of the most recent turns as fit in a character budget (60,000 by default). If the newest turn is too large, its tail is kept rather than dropping the turn.
+`build_handoff` writes the first user request, then as many of the most recent turns as fit in a character budget (60,000 by default). If the newest turn is too large, its tail is kept rather than dropping the turn.
 
 ## Update check
 
-`update.ts` follows the pattern Claude Code and Codex use. On each run it reads `~/.amux/update-check.json` and prints a notice if a newer version is cached. If the cache is more than a day old, it starts a detached `amux __update-check` process that asks the GitHub releases API for the latest tag and rewrites the cache. The command the user typed never waits on the network.
+`update.rs` follows the pattern Claude Code and Codex use. On each run it reads `~/.amux/update-check.json` and prints a notice if a newer version is cached. If the cache is more than a day old, it starts a detached `amux __update-check` process that asks the GitHub releases API for the latest tag and rewrites the cache. The command the user typed never waits on the network.
 
 ## State on disk
 
@@ -69,7 +69,7 @@ To list sessions, amux reads only the first 256 KB of each file, so listing stay
 |---|---|---|
 | `config.json` | `amux account default`, the user | Provider overrides and default accounts |
 | `accounts.json` | `amux account …` | Account list: provider, name, auth type, options. No secrets. |
-| `accounts/<p>/<n>/` | `syncOverlay`, the CLI | The overlay, plus a `token` file on Linux |
+| `accounts/<p>/<n>/` | `sync_overlay`, the CLI | The overlay, plus a `token` file on Linux |
 | `handoffs/*.md` | `amux resume` | Transcripts for cross-CLI handoff (mode 0600) |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
