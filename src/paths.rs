@@ -30,6 +30,12 @@ pub fn handoff_dir() -> PathBuf {
 pub fn launch_log() -> PathBuf {
     AMUX_HOME.join("launches.jsonl")
 }
+pub fn runs_dir() -> PathBuf {
+    AMUX_HOME.join("runs")
+}
+pub fn worktrees_dir() -> PathBuf {
+    AMUX_HOME.join("worktrees")
+}
 
 /// Makes `p` absolute against the current directory and removes `.` and `..` lexically.
 pub fn resolve(p: &Path) -> PathBuf {

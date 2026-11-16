@@ -42,9 +42,14 @@ pub fn write_atomic(p: &Path, data: &[u8]) -> std::io::Result<()> {
     fs::rename(&tmp, p)
 }
 
+/// Opens `p` for appending, creating it with mode 0600.
+pub fn open_append(p: &Path) -> std::io::Result<fs::File> {
+    open_private(p, OpenOptions::new().append(true).create(true))
+}
+
 /// Appends a line to a 0600 file, tightening its mode if it already existed.
 pub fn append_private(p: &Path, line: &str) -> std::io::Result<()> {
-    open_private(p, OpenOptions::new().append(true).create(true))?.write_all(line.as_bytes())?;
+    open_append(p)?.write_all(line.as_bytes())?;
     #[cfg(unix)]
     fs::set_permissions(p, fs::Permissions::from_mode(0o600))?;
     Ok(())
