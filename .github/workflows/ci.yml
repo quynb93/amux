@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust]
   pull_request:
 
 permissions:
@@ -33,3 +33,36 @@ jobs:
           npm install -g --prefix "$prefix" ./quynb-amux-*.tgz
           "$prefix/bin/amux" --version
           "$prefix/bin/amux" help > /dev/null
+
+  rust:
+    name: Rust on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: rs
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      # The same end-to-end suite the TypeScript build passes, run against the Rust binary.
+      - name: End-to-end tests against the Rust binary
+        working-directory: .
+        run: |
+          npm ci
+          npx tsc -p tsconfig.test.json
+          AMUX_BIN="$PWD/rs/target/release/amux" node --test .test-build/test/cli.test.js

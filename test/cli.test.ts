@@ -18,7 +18,9 @@ const sharedHome = path.join(home, ".fake");
 const fakeBin = path.join(home, "bin", "fake-cli");
 
 function amux(...args: string[]) {
-  const r = spawnSync(process.execPath, [CLI, ...args], {
+  // AMUX_BIN runs the suite against another build of amux, e.g. the Rust binary.
+  const [cmd, pre] = process.env.AMUX_BIN ? [process.env.AMUX_BIN, []] : [process.execPath, [CLI]];
+  const r = spawnSync(cmd, [...pre, ...args], {
     encoding: "utf8",
     env: { ...process.env, HOME: home, AMUX_HOME: amuxHome, AMUX_NO_UPDATE_CHECK: "1" },
   });
