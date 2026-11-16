@@ -131,7 +131,7 @@ The PR template has a short checklist. CI must pass before a merge.
    git tag vx.y.z
    git push origin main vx.y.z
    ```
-4. The [release workflow](.github/workflows/release.yml) checks that the tag matches `package.json`, runs the tests, and publishes a GitHub release with that version's changelog section as the notes. Installed copies of amux see the new version within a day, through the update check.
+4. The [release workflow](.github/workflows/release.yml) checks that the tag matches `package.json`, runs the tests, and builds the package with `npm pack`. It then publishes a GitHub release with that version's changelog section as the notes, and attaches the package as `amux.tgz`, which is the file users install. Installed copies of amux see the new version within a day, through the update check.
 
 ## Code of conduct
 

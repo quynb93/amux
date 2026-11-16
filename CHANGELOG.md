@@ -4,6 +4,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-16
+
+### Fixed
+
+- Installing with `npm install -g github:quynb93/amux` failed, because npm could not find `tsc` while building. Each release now includes a prebuilt `amux.tgz`, and the install command is `npm install -g https://github.com/quynb93/amux/releases/latest/download/amux.tgz`. `amux update` prints the matching command.
+
 ## [0.1.0] - 2026-11-16
 
 First public release.

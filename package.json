@@ -1,6 +1,6 @@
 {
   "name": "amux",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run Claude Code, Codex, Gemini CLI and other agent CLIs with many accounts over one shared home: skills, plugins, settings and sessions are shared, only the login differs.",
   "keywords": [
     "claude",

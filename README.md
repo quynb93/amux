@@ -56,8 +56,10 @@ amux needs Node.js 20 or newer, and macOS or Linux.
 Install the latest release from GitHub:
 
 ```sh
-npm install -g github:quynb93/amux
+npm install -g https://github.com/quynb93/amux/releases/latest/download/amux.tgz
 ```
+
+To install a specific version, use its release URL, for example `https://github.com/quynb93/amux/releases/download/v0.1.1/amux.tgz`. Run the same command again to upgrade.
 
 Or build from source:
 

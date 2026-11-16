@@ -26,7 +26,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - name: Smoke test the built CLI
+      - name: Smoke test a global install of the packed release
         run: |
-          node dist/cli.js --version
-          node dist/cli.js help > /dev/null
+          npm pack
+          prefix="$(mktemp -d)"
+          npm install -g --prefix "$prefix" ./amux-*.tgz
+          "$prefix/bin/amux" --version
+          "$prefix/bin/amux" help > /dev/null

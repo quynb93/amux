@@ -133,7 +133,7 @@ export async function updateCmd(): Promise<number> {
     return 0;
   }
   console.log(`Update available: amux ${version()} → ${latest}`);
-  console.log(`  npm install -g github:${r}#v${latest}`);
+  console.log(`  npm install -g https://github.com/${r}/releases/download/v${latest}/amux.tgz`);
   console.log(`  Release notes: ${releasesUrl(r)}`);
   return 0;
 }
