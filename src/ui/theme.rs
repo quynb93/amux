@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every role a theme sets. Names are what `colors` uses.
-pub const ROLES: [&str; 18] = [
+pub const ROLES: [&str; 19] = [
     "text",
     "muted",
     "border",
@@ -47,6 +47,7 @@ pub const ROLES: [&str; 18] = [
     "done",
     "failed",
     "lost",
+    "stopped",
     "success",
     "error",
 ];
@@ -87,6 +88,8 @@ pub struct Theme {
     pub done: Style,
     pub failed: Style,
     pub lost: Style,
+    /// Ended because you stopped it.
+    pub stopped: Style,
     /// Messages after an action that worked, or didn't.
     pub success: Style,
     pub error: Style,
@@ -111,6 +114,7 @@ impl Theme {
             "done" => &mut self.done,
             "failed" => &mut self.failed,
             "lost" => &mut self.lost,
+            "stopped" => &mut self.stopped,
             "success" => &mut self.success,
             "error" => &mut self.error,
             _ => return None,
@@ -156,6 +160,7 @@ impl Theme {
                 ("done", "green"),
                 ("failed", "red"),
                 ("lost", "magenta"),
+                ("stopped", "dim"),
                 ("success", "green"),
                 ("error", "red"),
             ],
@@ -177,6 +182,7 @@ impl Theme {
                 ("done", "#86c98f"),
                 ("failed", "#f07178"),
                 ("lost", "#c792ea"),
+                ("stopped", "#959cb0"),
                 ("success", "#86c98f"),
                 ("error", "#f07178"),
             ],
@@ -198,6 +204,7 @@ impl Theme {
                 ("done", "#1b6e34"),
                 ("failed", "#b42318"),
                 ("lost", "#7c3aad"),
+                ("stopped", "#5c6370"),
                 ("success", "#1b6e34"),
                 ("error", "#b42318"),
             ],
@@ -219,6 +226,7 @@ impl Theme {
                 ("done", "default"),
                 ("failed", "bold"),
                 ("lost", "dim italic"),
+                ("stopped", "dim"),
                 ("success", "bold"),
                 ("error", "bold"),
             ],
@@ -253,6 +261,7 @@ impl Theme {
             done: s,
             failed: s,
             lost: s,
+            stopped: s,
             success: s,
             error: s,
         }
@@ -299,17 +308,30 @@ impl Theme {
     /// The theme the config asks for, with its overrides. Never fails: problems come back
     /// as notes, and the default theme stands in.
     pub fn from_config() -> (Theme, Vec<String>) {
-        let ui = store::load_config()
-            .ok()
-            .and_then(|c| c.extra.get("ui").cloned())
-            .unwrap_or(Value::Null);
+        let (ui, bad_config) = match store::load_config() {
+            Ok(c) => (c.extra.get("ui").cloned().unwrap_or(Value::Null), None),
+            Err(e) => (Value::Null, Some(format!("config.json: {e:#}"))),
+        };
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         let truecolor = std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit");
         let light = truecolor && light_background(std::env::var("COLORFGBG").ok().as_deref());
-        Theme::resolve(&ui, no_color, light)
+        let (theme, mut notes) = Theme::resolve(&ui, no_color, light);
+        notes.extend(bad_config);
+        (theme, notes)
     }
 
     fn resolve(ui: &Value, no_color: bool, light: bool) -> (Theme, Vec<String>) {
+        // Shapes that can't be used are reported, not silently ignored.
+        let mut shape = vec![];
+        if !ui.is_null() && !ui.is_object() {
+            shape.push("\"ui\" in config.json should be an object".to_string());
+        }
+        if ui.get("theme").is_some_and(|t| !t.is_string()) {
+            shape.push("\"ui.theme\" should be a theme name".to_string());
+        }
+        if ui.get("colors").is_some_and(|c| !c.is_object()) {
+            shape.push("\"ui.colors\" should be an object of role: color".to_string());
+        }
         let chosen = ui.get("theme").and_then(Value::as_str);
         let fallback = match (no_color, light) {
             (true, _) => "mono",
@@ -324,6 +346,7 @@ impl Theme {
         if let Some(colors) = ui.get("colors").and_then(Value::as_object) {
             notes.extend(theme.apply(colors));
         }
+        notes.extend(shape);
         (theme, notes)
     }
 
@@ -401,7 +424,7 @@ pub fn parse_style(spec: &str) -> Result<Style, String> {
 fn parse_color(s: &str) -> Result<Color, String> {
     let s = s.to_ascii_lowercase();
     if let Some(hex) = s.strip_prefix('#') {
-        if hex.len() == 6 {
+        if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             if let Ok(n) = u32::from_str_radix(hex, 16) {
                 return Ok(Color::Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8));
             }
@@ -458,6 +481,7 @@ mod tests {
         );
         assert_eq!(parse_style("").unwrap(), Style::new());
         assert!(parse_style("#12345").is_err());
+        assert!(parse_style("#+fffff").is_err());
         assert!(parse_style("red blue").unwrap_err().contains("two colors"));
         assert!(parse_style("on").is_err());
         assert!(parse_style("chartreuse").is_err());
@@ -515,6 +539,10 @@ mod tests {
                 .name,
             "dark"
         );
+        // Unusable shapes are reported.
+        assert_eq!(Theme::resolve(&json!("bad"), false, false).1.len(), 1);
+        let (t, notes) = Theme::resolve(&json!({ "theme": 5, "colors": [1] }), false, false);
+        assert_eq!((t.name.as_str(), notes.len()), ("default", 2), "{notes:?}");
         // An unknown theme falls back to the default, with a note.
         let (t, notes) = Theme::resolve(&json!({ "theme": "nope" }), false, false);
         assert_eq!(t.name, "default");

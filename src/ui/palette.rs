@@ -104,7 +104,7 @@ pub const COMMANDS: &[Command] = &[
         name: "add-account",
         aliases: &["login"],
         arg: Arg::Text,
-        usage: "<provider> <name> [--token]",
+        usage: "<provider> <name> [--token] [--note \"…\"]",
         summary: "Add an account and sign in to it",
         key: "",
     },
@@ -300,18 +300,60 @@ pub fn items(input: &str, ctx: &Ctx) -> Vec<Item> {
             complete: c.name != "new",
         })
         .collect();
-    if out.is_empty() {
-        // Nothing to pick: one line that shows how to call it.
-        out.push(Item {
-            label: format!("/{} {}", c.name, c.usage),
-            usage: String::new(),
-            detail: c.summary.to_string(),
-            key: c.key.to_string(),
-            fill: input.to_string(),
-            complete: true,
-        });
+    // The line that runs what is typed: with no argument, the command's default (the
+    // selected run, the theme list…). It comes first when the argument is empty or free
+    // text, so Enter never picks a choice you didn't move to or type toward.
+    let typed = Item {
+        label: if rest.trim().is_empty() {
+            format!("/{} {}", c.name, c.usage).trim_end().to_string()
+        } else {
+            input.trim().to_string()
+        },
+        usage: String::new(),
+        detail: c.summary.to_string(),
+        key: c.key.to_string(),
+        fill: input.to_string(),
+        complete: true,
+    };
+    if out.is_empty() || rest.trim().is_empty() || c.arg == Arg::Text {
+        out.insert(0, typed);
     }
     out
+}
+
+/// Splits arguments on spaces, keeping "quoted" or 'quoted' text together.
+pub fn split_args(s: &str) -> Result<Vec<String>, String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for ch in s.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => cur.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                started = true;
+            }
+            None if ch.is_whitespace() => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            None => {
+                cur.push(ch);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err("A quote is not closed.".into());
+    }
+    if started {
+        out.push(cur);
+    }
+    Ok(out)
 }
 
 /// Parses a palette line, such as `/stop claude-1` or `/switch-account codex@work`.
@@ -349,7 +391,7 @@ pub fn parse(input: &str) -> Result<Action, String> {
         "filter" => Action::Filter(rest.to_string()),
         "switch-account" => Action::SwitchAccount(one().ok_or_else(usage)?),
         "add-account" => {
-            let args: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+            let args = split_args(rest)?;
             if args.iter().filter(|a| !a.starts_with('-')).count() < 2 {
                 return Err(usage());
             }
@@ -395,26 +437,50 @@ mod tests {
     #[test]
     fn completes_arguments() {
         assert_eq!(labels("/stop co"), ["codex-1"]);
+        // No argument yet: the default comes first, the choices below it.
+        let theme = items("/theme ", &ctx());
+        assert_eq!(
+            (theme[0].fill.as_str(), theme[0].complete),
+            ("/theme ", true)
+        );
+        assert_eq!(parse(&theme[0].fill), Ok(Action::Theme(None)));
+        assert_eq!(theme[1].label, "default");
+        let attach = &items("/attach ", &ctx())[0];
+        assert_eq!(parse(&attach.fill), Ok(Action::Attach(None)));
+        // Free text runs as typed; matching accounts are offered below.
+        let new = items("/new work", &ctx());
+        assert_eq!(
+            parse(&new[0].fill),
+            Ok(Action::New {
+                account: None,
+                prompt: "work".into()
+            })
+        );
+        assert_eq!(new[1].label, "claude@work");
         assert_eq!(labels("/switch-account w")[0], "claude@work");
         assert_eq!(labels("/theme l")[0], "light");
         let pick = &items("/switch-account cod", &ctx())[0];
         assert_eq!(pick.fill, "/switch-account codex@me");
         assert!(pick.complete);
         // new: an account first, then free text.
-        let pick = &items("/new cl", &ctx())[0];
+        let pick = &items("/new cl", &ctx())[1];
         assert_eq!(
             (pick.fill.as_str(), pick.complete),
             ("/new claude@work ", false)
         );
         // Nothing to complete: the usage line.
-        assert_eq!(
-            labels("/add-account x"),
-            ["/add-account <provider> <name> [--token]"]
-        );
+        assert_eq!(labels("/add-account x"), ["/add-account x"]);
         // A command that needs its argument waits for it.
         let add = &items("/add", &ctx())[0];
         assert_eq!((add.fill.as_str(), add.complete), ("/add-account ", false));
         assert!(items("/doctor", &ctx())[0].complete);
+    }
+
+    #[test]
+    fn splits_arguments_with_quotes() {
+        assert_eq!(split_args(" a  'b c' \"d\"e ").unwrap(), ["a", "b c", "de"]);
+        assert_eq!(split_args("x ''").unwrap(), ["x", ""]);
+        assert!(split_args("'x").is_err());
     }
 
     #[test]
@@ -439,6 +505,16 @@ mod tests {
             ]))
         );
         assert!(parse("/add-account claude").is_err());
+        assert_eq!(
+            parse("/add-account claude work --note \"my work one\""),
+            Ok(Action::AddAccount(vec![
+                "claude".into(),
+                "work".into(),
+                "--note".into(),
+                "my work one".into()
+            ]))
+        );
+        assert!(parse("/add-account claude work --note \"open").is_err());
         assert_eq!(
             parse("/new claude@work fix the login bug"),
             Ok(Action::New {

@@ -115,6 +115,7 @@ impl App {
                 (Kind::Idle, "idle"),
                 (Kind::Starting, "starting"),
                 (Kind::Done, "done"),
+                (Kind::Stopped, "stopped"),
                 (Kind::Failed, "failed"),
                 (Kind::Lost, "lost"),
             ];
@@ -407,6 +408,7 @@ fn kind_glyph(k: Kind) -> &'static str {
         Kind::Attention => "◆",
         Kind::Idle => "◌",
         Kind::Done => "✓",
+        Kind::Stopped => "■",
         Kind::Failed => "✗",
         Kind::Lost => "?",
     }
@@ -419,6 +421,7 @@ fn kind_style(t: &Theme, k: Kind) -> Style {
         Kind::Attention => t.waiting,
         Kind::Idle => t.idle,
         Kind::Done => t.done,
+        Kind::Stopped => t.stopped,
         Kind::Failed => t.failed,
         Kind::Lost => t.lost,
     }
@@ -540,8 +543,12 @@ fn palette_line(t: &Theme, it: &Item, w: usize, selected: bool) -> Line<'static>
 }
 
 fn draw_output(f: &mut Frame, area: Rect, t: &Theme, o: &OutputView) {
-    let longest = o.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let r = top(area, (longest + 6).clamp(44, 100), o.lines.len() as u16 + 4);
+    let longest = o.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let w = longest.saturating_add(6).clamp(44, 100) as u16;
+    let h = u16::try_from(o.lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4);
+    let r = top(area, w, h);
     f.render_widget(Clear, r);
     let block = panel(t, t.accent)
         .title(span(format!(" {} ", o.title), t.title))

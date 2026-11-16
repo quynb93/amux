@@ -134,7 +134,12 @@ impl SpawnForm {
 pub fn delete_word(s: &mut String) {
     let trimmed = s.trim_end().len();
     s.truncate(trimmed);
-    let cut = s.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    // After the whitespace character, whatever its width (U+3000, NBSP…).
+    let cut = s
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
     s.truncate(cut);
 }
 
@@ -232,5 +237,11 @@ mod tests {
         assert_eq!(s, "fix ");
         delete_word(&mut s);
         assert_eq!(s, "");
+        let mut s = "/filter a\u{3000}b".to_string();
+        delete_word(&mut s);
+        assert_eq!(s, "/filter a\u{3000}");
+        let mut s = "x\u{a0}yz".to_string();
+        delete_word(&mut s);
+        assert_eq!(s, "x\u{a0}");
     }
 }
