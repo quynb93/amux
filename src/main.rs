@@ -18,6 +18,8 @@ mod store;
 #[cfg(test)]
 mod testutil;
 mod time;
+#[cfg(unix)]
+mod ui;
 mod update;
 mod util;
 
@@ -48,6 +50,7 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux logs <run>                          Print everything a run has output
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
   amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
+  amux ui                                  Watch, attach to, start and stop runs in one screen
 
 Sessions (shared across accounts):
   amux sessions [provider] [--here] [-n <count>]
@@ -112,8 +115,10 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "stop" => commands::runs::stop_cmd(rest),
         #[cfg(unix)]
         "rm" => commands::runs::rm_cmd(rest),
+        #[cfg(unix)]
+        "ui" => ui::ui_cmd(rest),
         #[cfg(not(unix))]
-        "spawn" | "ps" | "attach" | "logs" | "stop" | "rm" => {
+        "spawn" | "ps" | "attach" | "logs" | "stop" | "rm" | "ui" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

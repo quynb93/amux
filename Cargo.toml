@@ -17,6 +17,9 @@ url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# `amux ui`: the TUI, and a terminal emulator for the live preview of a run.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+vt100 = "0.18"
 
 [profile.release]
 lto = true

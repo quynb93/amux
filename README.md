@@ -201,6 +201,8 @@ amux stop claude-1       # SIGTERM; --force for SIGKILL
 amux rm --done           # remove finished runs
 ```
 
+Or see them all at once with **`amux ui`**: a list of runs with their state, and a live view of the selected run's screen. Press Enter to work in a run right there and Ctrl-] to come back to the list. Tab jumps to the next run that is waiting for you. `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it. `?` lists every key. Quitting the UI leaves the runs going.
+
 - **STATE** is `waiting <time>` when the CLI is asking you something: a permission or confirmation prompt, a terminal bell, or a notification it sent to the terminal. Otherwise it is `running` while the CLI prints and `idle <time>` once it has been quiet for a few seconds. Typing into the run clears `waiting`.
 - **Notifications.** When a run starts waiting, or exits, and no terminal is attached to it, amux shows a desktop notification (Notification Center on macOS, `notify-send` on Linux). Set `"notify": false` in `~/.amux/config.json` to turn them off, or `"notifyCommand": ["my-notifier"]` to run your own command. It gets `AMUX_RUN`, `AMUX_EVENT` (`waiting` or `exited`), `AMUX_TITLE` and `AMUX_MESSAGE` in its environment.
 - **`--worktree`** runs `git worktree add` on a new branch (`amux/<run>`, or `--branch <name>`) from `HEAD` (or `--base <ref>`). The run starts in the same subdirectory you spawned from. Worktrees live in `~/.amux/worktrees/`.
@@ -304,6 +306,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux logs <run>` | Print everything the run has output. |
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
+| `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
 | `amux providers` | List providers, shared homes and private entries. |
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
