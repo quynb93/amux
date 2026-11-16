@@ -11,17 +11,27 @@ function fallbackFile(a: Account): string {
 }
 
 export function setToken(a: Account, token: string): void {
+  if (!token) throw new Error(`Empty token for ${accountId(a)}; nothing stored.`);
   if (useKeychain) {
-    // -U updates an existing item. The token is passed in argv only to the
-    // short-lived `security` process.
-    const r = spawnSync("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", accountId(a), "-w", token], {
-      stdio: ["ignore", "ignore", "pipe"],
+    // Pass the command on stdin (`security -i`) rather than argv, so the token
+    // never shows up in `ps`. -U updates an existing item. Interactive mode splits
+    // on whitespace and quotes, so only accept tokens without them.
+    if (/[\s"'\\]/.test(token)) throw new Error("Tokens can't contain spaces, quotes or backslashes.");
+    const r = spawnSync("security", ["-i"], {
+      input: `add-generic-password -U -s "${SERVICE}" -a "${accountId(a)}" -w "${token}"\n`,
+      stdio: ["pipe", "ignore", "pipe"],
     });
-    if (r.status !== 0) throw new Error(`Keychain write failed: ${r.stderr.toString().trim()}`);
+    // `security -i` can exit 0 even when the inner command fails, so read it back.
+    if (r.status !== 0 || getToken(a) !== token) throw new Error(`Keychain write failed: ${r.stderr.toString().trim() || "token not stored"}`);
     return;
   }
   fs.mkdirSync(accountDir(a), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(fallbackFile(a), token, { mode: 0o600 });
+  // Write a fresh 0600 file and rename it over the old one: `mode` only applies on
+  // create, and writing in place would follow a symlink or keep looser permissions.
+  const file = fallbackFile(a);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, token, { mode: 0o600, flag: "wx" });
+  fs.renameSync(tmp, file);
 }
 
 export function getToken(a: Account): string | null {

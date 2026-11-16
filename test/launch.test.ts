@@ -23,6 +23,13 @@ describe("buildEnv", () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   });
 
+  it("drops the provider's inherited token var for a login account", () => {
+    process.env.OPENAI_API_KEY = "personal-key";
+    const env = buildEnv(getProvider("codex"), { ...base, provider: "codex" });
+    assert.equal(env.OPENAI_API_KEY, undefined);
+    delete process.env.OPENAI_API_KEY;
+  });
+
   it("adds the privacy opt-outs and base URL when set", () => {
     const env = buildEnv(getProvider("claude"), { ...base, privacy: true, baseUrl: "https://gw.example.com" });
     assert.equal(env.DISABLE_TELEMETRY, "1");

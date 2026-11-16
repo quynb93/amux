@@ -17,6 +17,7 @@ interface PackageJson {
 
 const CACHE_FILE = path.join(AMUX_HOME, "update-check.json");
 const DAY_MS = 24 * 60 * 60 * 1000;
+const VERSION_RE = /^v?\d+(\.\d+)*(-[\w.]+)?$/;
 
 interface Cache {
   checkedAt: number;
@@ -89,13 +90,25 @@ export async function fetchLatest(): Promise<string | null> {
       headers: { Accept: "application/vnd.github+json", "User-Agent": `amux/${version()}` },
       signal: AbortSignal.timeout(5000),
     });
-    if (res.ok) latest = ((await res.json()) as { tag_name?: string }).tag_name?.replace(/^v/, "");
+    if (res.ok) {
+      const tag = ((await res.json()) as { tag_name?: unknown }).tag_name;
+      // The tag is printed in a copy-paste upgrade command, so accept only a plain version.
+      if (typeof tag === "string" && VERSION_RE.test(tag)) latest = tag.replace(/^v/, "");
+    }
   } catch {
     // Offline or blocked: record the attempt so the next try is tomorrow, not on every run.
   }
-  fs.mkdirSync(AMUX_HOME, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(CACHE_FILE, JSON.stringify({ checkedAt: Date.now(), latest } satisfies Cache) + "\n", { mode: 0o600 });
+  writeCache({ checkedAt: Date.now(), latest: latest ?? readCache()?.latest });
   return latest ?? null;
+}
+
+function writeCache(cache: Cache): void {
+  try {
+    fs.mkdirSync(AMUX_HOME, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache) + "\n", { mode: 0o600 });
+  } catch {
+    // Best-effort.
+  }
 }
 
 /** Called on every run: prints the cached notice and starts a background refresh when the cache is stale. */
@@ -107,6 +120,8 @@ export function checkForUpdates(): void {
     process.stderr.write(`\x1b[33mUpdate available: amux ${version()} → ${cache.latest}\x1b[0m  Run \`amux update\` or see ${releasesUrl(r)}\n`);
   }
   if (!cache || Date.now() - cache.checkedAt > DAY_MS) {
+    // Stamp the attempt first so runs started before the refresh finishes don't each spawn one.
+    writeCache({ checkedAt: Date.now(), latest: cache?.latest });
     const child = spawn(process.execPath, [fileURLToPath(new URL("./cli.js", import.meta.url)), "__update-check"], {
       detached: true,
       stdio: "ignore",

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { prepare } from "../launch.js";
+import { conflictingEnv, prepare } from "../launch.js";
 import { adoptStray, syncOverlay } from "../overlay.js";
 import { tildify } from "../paths.js";
 import { accountId, getProvider, homeEnvValue, loadAccounts, loadProviders, overlayHome, resolveAccount } from "../store.js";
@@ -26,6 +26,8 @@ export function envCmd(argv: string[]): number {
     ...(acct.baseUrl && spec.baseUrlEnv ? [spec.baseUrlEnv] : []),
   ];
   for (const k of keys) console.log(`export ${k}=${shQuote(env[k] ?? "")}`);
+  // Clear vars that would otherwise keep pointing the eval'ing shell at another account.
+  for (const k of conflictingEnv(spec)) if (env[k] === undefined) console.log(`unset ${k}`);
   return 0;
 }
 

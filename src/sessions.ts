@@ -18,13 +18,15 @@ export interface Turn {
 }
 
 const HEAD_BYTES = 256 * 1024;
+/** Reused across files: listing reads the head of every transcript, so skip a fresh zeroed alloc each time. */
+let headBuf: Buffer | undefined;
 
 function readHead(file: string): string {
   const fd = fs.openSync(file, "r");
   try {
-    const buf = Buffer.alloc(HEAD_BYTES);
-    const n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0);
-    return buf.subarray(0, n).toString("utf8");
+    headBuf ??= Buffer.allocUnsafe(HEAD_BYTES);
+    const n = fs.readSync(fd, headBuf, 0, HEAD_BYTES, 0);
+    return headBuf.toString("utf8", 0, n);
   } finally {
     fs.closeSync(fd);
   }
@@ -41,7 +43,8 @@ function* jsonLines(text: string): Generator<any> {
   }
 }
 
-function walk(dir: string, match: (name: string) => boolean, out: string[] = []): string[] {
+/** Collects matching files under `dir`, descending at most `maxDepth` directory levels. */
+function walk(dir: string, match: (name: string) => boolean, maxDepth = Infinity, out: string[] = []): string[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -50,8 +53,9 @@ function walk(dir: string, match: (name: string) => boolean, out: string[] = [])
   }
   for (const e of entries) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) walk(p, match, out);
-    else if (match(e.name)) out.push(p);
+    if (e.isDirectory()) {
+      if (maxDepth > 0) walk(p, match, maxDepth - 1, out);
+    } else if (match(e.name)) out.push(p);
   }
   return out;
 }
@@ -95,8 +99,8 @@ function claudeTurns(text: string): { cwd?: string; turns: Turn[] } {
 }
 
 function listClaude(spec: ProviderSpec): SessionInfo[] {
-  return walk(path.join(spec.sharedHome, "projects"), (n) => n.endsWith(".jsonl")).flatMap((file) => {
-    if (file.includes(`${path.sep}subagents${path.sep}`)) return [];
+  // Sessions sit at projects/<cwd-slug>/<id>.jsonl; deeper dirs hold subagent transcripts and tool output.
+  return walk(path.join(spec.sharedHome, "projects"), (n) => n.endsWith(".jsonl"), 1).flatMap((file) => {
     const { cwd, turns } = claudeTurns(readHead(file));
     const first = turns.find((t) => t.role === "user");
     if (!first) return [];
@@ -130,7 +134,7 @@ function listCodex(spec: ProviderSpec): SessionInfo[] {
   return walk(path.join(spec.sharedHome, "sessions"), (n) => n.startsWith("rollout-") && n.endsWith(".jsonl")).flatMap((file) => {
     const { id, cwd, turns } = codexTurns(readHead(file));
     const first = turns.find((t) => t.role === "user");
-    if (!id || !first) return [];
+    if (typeof id !== "string" || !id || !first) return [];
     return [{ provider: spec.id, id, cwd, title: oneLine(first.text), updatedAt: fs.statSync(file).mtime, file }];
   });
 }
@@ -166,7 +170,7 @@ function listGemini(spec: ProviderSpec): SessionInfo[] {
     try {
       const data = JSON.parse(fs.readFileSync(file, "utf8"));
       const first = geminiTurns(data).find((t) => t.role === "user");
-      if (!data.sessionId || !first) return [];
+      if (typeof data.sessionId !== "string" || !data.sessionId || !first) return [];
       const projectKey = path.basename(path.dirname(path.dirname(file)));
       return [
         {

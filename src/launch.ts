@@ -14,9 +14,17 @@ const CONFLICTING_ENV: Record<string, string[]> = {
   gemini: ["GEMINI_CLI_HOME"],
 };
 
+/**
+ * Inherited vars that buildEnv drops: the provider's home and token vars (for any
+ * provider, built-in or custom) plus the known extras above.
+ */
+export function conflictingEnv(spec: ProviderSpec): string[] {
+  return [...new Set([spec.homeEnv, ...(spec.tokenEnv ? [spec.tokenEnv] : []), ...(CONFLICTING_ENV[spec.id] ?? [])])];
+}
+
 export function buildEnv(spec: ProviderSpec, acct: Account): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const k of CONFLICTING_ENV[spec.id] ?? []) delete env[k];
+  for (const k of conflictingEnv(spec)) delete env[k];
   env[spec.homeEnv] = homeEnvValue(spec, acct);
   env.AMUX_ACCOUNT = accountId(acct);
   if (acct.privacy) Object.assign(env, spec.privacyEnv);

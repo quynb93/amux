@@ -30,9 +30,10 @@ export function syncOverlay(spec: ProviderSpec, overlay: string): SyncReport {
   const shared = spec.sharedHome;
   const report: SyncReport = { linked: [], pruned: [], stray: [] };
 
-  fs.mkdirSync(shared, { recursive: true });
+  // Owner-only when amux creates them: the shared home holds transcripts and settings.
+  fs.mkdirSync(shared, { recursive: true, mode: 0o700 });
   fs.mkdirSync(overlay, { recursive: true, mode: 0o700 });
-  for (const dir of spec.sharedDirs) fs.mkdirSync(path.join(shared, dir), { recursive: true });
+  for (const dir of spec.sharedDirs) fs.mkdirSync(path.join(shared, dir), { recursive: true, mode: 0o700 });
 
   for (const name of fs.readdirSync(shared)) {
     if (isPrivate(spec, name)) continue;

@@ -55,7 +55,9 @@ export async function resumeCmd(argv: string[]): Promise<number> {
   const source = getProvider(session.provider);
   const handoff = buildHandoff(session, readTurns(session, source.sessions));
   fs.mkdirSync(HANDOFF_DIR, { recursive: true, mode: 0o700 });
-  const file = path.join(HANDOFF_DIR, `${session.provider}-${session.id}-to-${acct.provider}.md`);
+  // Session ids come from transcript contents; keep them from escaping the handoff dir.
+  const safe = (s: string) => s.replace(/[^\w.-]/g, "_");
+  const file = path.join(HANDOFF_DIR, `${safe(session.provider)}-${safe(session.id)}-to-${safe(acct.provider)}.md`);
   fs.writeFileSync(file, handoff, { mode: 0o600 });
   console.error(`amux: handing ${session.provider} session ${session.id} to ${accountId(acct)} (${tildify(file)})`);
   const prompt = `Read the handoff file ${file} first. It contains the transcript of a previous ${source.label} session in this directory. Then continue that work.`;

@@ -4,6 +4,20 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Security
+
+- On macOS, `amux account token` passes the token to the Keychain on stdin, so it no longer appears in the process list.
+- Login accounts no longer inherit the provider's token variable (such as `OPENAI_API_KEY`) from your shell, and `amux env` prints `unset` for it.
+- Handoff file names are sanitized, so a crafted session id can't write outside `~/.amux/handoffs`.
+- The Linux token file is replaced atomically with mode 0600, and folders amux creates in the shared home are 0700.
+- Pressing Ctrl-C at the token prompt turns terminal echo back on.
+
+### Fixed
+
+- `amux sessions` and `amux resume` scan less of `~/.claude/projects` and allocate less memory.
+- One session file with a non-text id no longer breaks `amux resume`.
+- Several amux runs starting at once no longer each start an update check, and a failed check no longer hides a known update.
+
 ## [0.1.2] - 2026-11-16
 
 ### Added

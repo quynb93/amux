@@ -60,6 +60,13 @@ export async function readSecret(prompt: string): Promise<string> {
   }
   process.stderr.write(prompt);
   spawnSync("stty", ["-echo"], { stdio: "inherit" });
+  // Ctrl-C would exit before `finally` runs and leave the terminal with echo off.
+  const onInt = () => {
+    spawnSync("stty", ["echo"], { stdio: "inherit" });
+    process.stderr.write("\n");
+    process.exit(130);
+  };
+  process.once("SIGINT", onInt);
   try {
     const value = await new Promise<string>((resolve) => {
       process.stdin.once("data", (d) => resolve(d.toString().trim()));
@@ -67,6 +74,7 @@ export async function readSecret(prompt: string): Promise<string> {
     process.stdin.pause();
     return value;
   } finally {
+    process.off("SIGINT", onInt);
     spawnSync("stty", ["echo"], { stdio: "inherit" });
     process.stderr.write("\n");
   }
