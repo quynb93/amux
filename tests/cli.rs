@@ -530,6 +530,54 @@ fn ui_dump_shows_runs_their_state_and_a_live_preview() {
     let tty = s.amux(&["ui"]);
     assert_eq!(tty.code, 1);
     assert!(tty.err.contains("needs a terminal"), "{}", tty.err);
+    // f shows only waiting runs; Esc shows all again.
+    let only = s
+        .amux(&["ui", "--dump", "--size", "24x120", "--keys", "f"])
+        .out;
+    assert!(
+        only.contains("showing waiting") && only.contains("Runs 1 of 2"),
+        "{only}"
+    );
+    assert!(only.contains("ask") && !only.contains("quick"), "{only}");
+    let all = s
+        .amux(&["ui", "--dump", "--size", "24x120", "--keys", "f\x1b"])
+        .out;
+    assert!(all.contains("quick") && !all.contains("showing"), "{all}");
+
+    // Why ask is waiting: a prompt on its screen, with the screen as evidence.
+    let why = s.amux(&["explain", "ask"]);
+    assert_eq!(why.code, 0, "{}", why.err);
+    assert!(why.out.starts_with("ask: waiting"), "{}", why.out);
+    assert!(
+        why.out.contains("Its screen shows “approve THIS?”"),
+        "{}",
+        why.out
+    );
+    assert!(
+        why.out.contains("hasn't reported its own state"),
+        "{}",
+        why.out
+    );
+    assert!(why.out.contains("│ Approve this? [y/n]"), "{}", why.out);
+    let j: serde_json::Value =
+        serde_json::from_str(&s.amux(&["explain", "ask", "--json"]).out).unwrap();
+    assert_eq!(
+        (j["source"].as_str(), j["reports"].as_bool()),
+        (Some("pattern"), Some(false))
+    );
+    assert!(s.amux(&["explain", "nope"]).err.contains("No run matches"));
+    // In the UI, e shows the same explanation, whole.
+    let ui = s
+        .amux(&[
+            "ui", "--dump", "--size", "40x120", "--select", "ask", "--keys", "e",
+        ])
+        .out;
+    assert!(ui.contains("Why ask is waiting"), "{ui}");
+    assert!(
+        ui.contains("How amux reads this run") && ui.contains("Bottom of its screen"),
+        "{ui}"
+    );
+
     let help = s.amux(&["ui", "--help"]);
     assert_eq!(help.code, 0);
     assert!(help.out.starts_with("amux ui ["), "{}", help.out);
@@ -616,6 +664,18 @@ fn reads_the_state_a_cli_reports_with_osc_7501() {
     };
     assert_eq!(run_json()["status"]["state"], "blocked");
     assert_eq!(run_json()["status"]["kind"], "permission");
+    assert_eq!(run_json()["waiting"]["source"], "report");
+    let why = s.amux(&["explain", "st"]).out;
+    assert!(
+        why.contains(
+            "The CLI said so itself (OSC 7501): it is blocked (permission): “approve Write: a.rs”"
+        ),
+        "{why}"
+    );
+    assert!(
+        why.contains("reports its own state (OSC 7501), so its reports decide"),
+        "{why}"
+    );
     // The host answered the probe. The fake CLI's terminal echoes input, so the answer
     // shows up in its output.
     let log = fs::read_to_string(s.amux_home.join("runs/st/output.log")).unwrap();

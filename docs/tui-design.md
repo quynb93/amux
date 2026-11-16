@@ -24,7 +24,7 @@ target/debug/amux ui
 **Left to do**, in order of value. Each is covered in [Next steps](#next-steps):
 
 1. ~~OSC 7501 program status in the host~~ **Done.** See Next steps.
-2. ~~`/` search~~ **Done**, as the command palette plus `/filter`. Still to do: one-key state filters (`w`/`i`/`d`, after herdr's goto picker).
+2. ~~`/` search and state filters~~ **Done**: the command palette, `/filter`, and `f` / `/show` for waiting, working, idle or ended runs. herdr's `b`/`w`/`i`/`d` keys became one key that steps through the states, because `d` already removes a run here.
 3. A switch key while attached, so you can move to the next waiting run without going back to the list.
 4. Host-pushed state events, instead of polling `run.json` every 500 ms.
 5. Resume for `lost` runs after a reboot, and `amux gc` for stale worktrees and merged branches.
@@ -149,6 +149,8 @@ The spawn dialog (`ui/spawn.rs`) builds the same argument list you would type: `
 | PgUp PgDn, Esc | Scroll the preview back, and back to live |
 | / or : | Command palette (see below) |
 | Esc | Clear the filter, or return the preview to live |
+| f | Show only waiting, working, idle or ended runs (steps through them) |
+| e | Why the run shows its state (`amux explain`) |
 | ? | Help |
 | q, Ctrl-C | Quit (runs keep going) |
 
@@ -241,7 +243,7 @@ ratatui's `default-features = false` already drops the termion and termwiz backe
 
    Also, if an attached terminal speaks OSC 7501 itself, as Rex and Orca do, the CLI gets two replies.
    
-   Still to do: `amux explain <run>` (which signal decided), and notifying when a reported turn ends (`working` → `done`) while nobody is attached.
+   `amux explain <run>` (and `e` in the UI) says which signal decided, from `waiting.source`, which the host now records. It also lists what amux watches for in that run, and shows the bottom of its screen as evidence, like herdr's `agent explain`. Still to do: notifying when a reported turn ends (`working` → `done`) while nobody is attached.
 2. **Search and filters.** `/` fuzzy match over run id, account, branch and title. `w`, `i`, `d` to show only waiting, idle or done runs.
 3. **Switch while attached.** A `ctrl+alt` chord, or Ctrl-] followed by n or p within 500 ms, to move to the next waiting run without seeing the list.
 4. **Host-pushed state.** A `SUBSCRIBE` frame that makes the host send framed state changes (waiting, exit) on a separate connection kind. The list could then stop polling. This needs a framed host-to-client stream, which is why it is its own protocol version.

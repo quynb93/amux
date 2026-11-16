@@ -12,6 +12,8 @@ pub enum Arg {
     Account,
     /// A theme name; lists the themes when left out.
     Theme,
+    /// A run state to show; the next one when left out.
+    State,
     /// Free text, optional.
     Text,
 }
@@ -133,6 +135,22 @@ pub const COMMANDS: &[Command] = &[
         key: "",
     },
     Command {
+        name: "explain",
+        aliases: &["why"],
+        arg: Arg::Run,
+        usage: "[run]",
+        summary: "Why a run shows its state, with the evidence",
+        key: "e",
+    },
+    Command {
+        name: "show",
+        aliases: &["state", "only"],
+        arg: Arg::State,
+        usage: "[waiting|working|idle|ended|all]",
+        summary: "Show only runs in one state",
+        key: "f",
+    },
+    Command {
         name: "help",
         aliases: &["keys", "?"],
         arg: Arg::None,
@@ -149,6 +167,9 @@ pub const COMMANDS: &[Command] = &[
         key: "q",
     },
 ];
+
+/// The states `/show` takes.
+pub const STATES: [&str; 5] = ["waiting", "working", "idle", "ended", "all"];
 
 /// What the palette can complete from.
 #[derive(Default)]
@@ -190,6 +211,8 @@ pub enum Action {
     AddAccount(Vec<String>),
     Accounts,
     Theme(Option<String>),
+    Explain(Option<String>),
+    Show(Option<String>),
     Doctor,
     Help,
     Quit,
@@ -251,7 +274,7 @@ pub fn items(input: &str, ctx: &Ctx) -> Vec<Item> {
         return found
             .into_iter()
             .map(|(_, _, c)| {
-                let complete = matches!(c.arg, Arg::None | Arg::Run | Arg::Theme)
+                let complete = matches!(c.arg, Arg::None | Arg::Run | Arg::Theme | Arg::State)
                     || (c.arg == Arg::Text && c.name != "add-account");
                 Item {
                     label: format!("/{}", c.name),
@@ -271,10 +294,12 @@ pub fn items(input: &str, ctx: &Ctx) -> Vec<Item> {
     let Some(c) = find(word) else {
         return vec![];
     };
+    let states: Vec<String> = STATES.iter().map(|s| s.to_string()).collect();
     let choices: &[String] = match c.arg {
         Arg::Run => &ctx.runs,
         Arg::Account => &ctx.accounts,
         Arg::Theme => &ctx.themes,
+        Arg::State => &states,
         // `new` takes an account first.
         Arg::Text if c.name == "new" && !rest.contains(' ') => &ctx.accounts,
         _ => &[],
@@ -399,6 +424,8 @@ pub fn parse(input: &str) -> Result<Action, String> {
         }
         "accounts" => Action::Accounts,
         "theme" => Action::Theme(one()),
+        "explain" => Action::Explain(one()),
+        "show" => Action::Show(one()),
         "doctor" => Action::Doctor,
         "help" => Action::Help,
         "quit" => Action::Quit,
@@ -538,6 +565,9 @@ mod tests {
         );
         assert_eq!(parse("/filter  login "), Ok(Action::Filter("login".into())));
         assert_eq!(parse("/theme"), Ok(Action::Theme(None)));
+        assert_eq!(parse("/why r1"), Ok(Action::Explain(Some("r1".into()))));
+        assert_eq!(parse("/show idle"), Ok(Action::Show(Some("idle".into()))));
+        assert_eq!(labels("/show w")[0], "waiting");
         assert_eq!(parse("/q"), Ok(Action::Quit));
         assert!(parse("/bogus").unwrap_err().contains("No command"));
         assert!(parse("/").is_err());

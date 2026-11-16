@@ -17,6 +17,29 @@ const MAX_OSC: usize = 4096;
 
 use super::program::{self, Osc, Report};
 
+/// What showed that the CLI is waiting, for `amux explain`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The CLI's own OSC 7501 report.
+    Report,
+    /// Text matching the provider's `waitingPatterns`.
+    Pattern,
+    Bell,
+    /// An OSC 9, 777 or 99 notification.
+    Notification,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Report => "report",
+            Source::Pattern => "pattern",
+            Source::Bell => "bell",
+            Source::Notification => "notification",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Change {
     /// The CLI started waiting; the reason is the prompt text or notification message.
@@ -47,6 +70,8 @@ pub struct Detector {
     osc: Vec<u8>,
     mode: Mode,
     waiting: bool,
+    /// What showed the current wait.
+    source: Source,
     /// The OSC being read grew past MAX_OSC.
     osc_overflow: bool,
     /// The CLI has sent an OSC 7501 report, so its reports decide the state.
@@ -73,6 +98,7 @@ impl Detector {
             osc: vec![],
             mode: Mode::Ground,
             waiting: false,
+            source: Source::Pattern,
             osc_overflow: false,
             reports: false,
             record: None,
@@ -105,11 +131,15 @@ impl Detector {
 
     pub fn feed(&mut self, chunk: &[u8]) -> Option<Change> {
         let mut signal: Option<String> = None;
+        let mut src = Source::Pattern;
         for &b in chunk {
             match self.mode {
                 Mode::Ground => match b {
                     0x1b => self.mode = Mode::Esc,
-                    0x07 => signal = Some("terminal bell".into()),
+                    0x07 => {
+                        signal = Some("terminal bell".into());
+                        src = Source::Bell;
+                    }
                     b'\r' | b'\n' | b'\t' => self.push(b' '),
                     0x00..=0x1f | 0x7f => {}
                     _ => self.push(b),
@@ -134,7 +164,9 @@ impl Detector {
                 }
                 Mode::Osc => match b {
                     0x07 => {
-                        signal = self.osc_end().or(signal);
+                        if let Some(m) = self.osc_end() {
+                            (signal, src) = (Some(m), Source::Notification);
+                        }
                         self.mode = Mode::Ground;
                     }
                     0x1b => self.mode = Mode::OscEsc,
@@ -143,7 +175,9 @@ impl Detector {
                 },
                 Mode::OscEsc => {
                     if b == b'\\' {
-                        signal = self.osc_end().or(signal);
+                        if let Some(m) = self.osc_end() {
+                            (signal, src) = (Some(m), Source::Notification);
+                        }
                     }
                     self.mode = Mode::Ground;
                 }
@@ -152,11 +186,15 @@ impl Detector {
         if self.reports {
             return self.reported(chunk.len());
         }
-        let signal = signal.or_else(|| self.matched());
-        if let Some(reason) = signal {
+        let signal = match signal {
+            Some(s) => Some((s, src)),
+            None => self.matched().map(|p| (p, Source::Pattern)),
+        };
+        if let Some((reason, src)) = signal {
             self.since_signal = 0;
             if !self.waiting {
                 self.waiting = true;
+                self.source = src;
                 return Some(Change::Waiting(reason));
             }
             return None;
@@ -168,6 +206,11 @@ impl Detector {
             return Some(Change::Cleared);
         }
         None
+    }
+
+    /// What showed the current (or last) wait.
+    pub fn source(&self) -> Source {
+        self.source
     }
 
     /// Whether the CLI sent the OSC 7501 probe since the last call: the host answers it.
@@ -209,6 +252,7 @@ impl Detector {
         if state == Some("blocked") {
             let reason = self.record.as_ref().map(Report::reason).unwrap_or_default();
             self.pattern_wait = false;
+            self.source = Source::Report;
             return (!std::mem::replace(&mut self.waiting, true))
                 .then_some(Change::Waiting(reason));
         }
@@ -226,6 +270,7 @@ impl Detector {
             Some(p) => {
                 self.since_signal = 0;
                 self.pattern_wait = true;
+                self.source = Source::Pattern;
                 (!std::mem::replace(&mut self.waiting, true)).then_some(Change::Waiting(p))
             }
             None if self.waiting => {
@@ -352,6 +397,22 @@ mod tests {
         assert_eq!(d.feed(b" 1. Yes"), None);
         assert_eq!(d.answered(), Some(Change::Cleared));
         assert_eq!(d.feed(b"working"), None);
+    }
+
+    #[test]
+    fn records_what_showed_the_wait() {
+        let mut d = det();
+        d.feed(b"Do you want to go?");
+        assert_eq!(d.source(), Source::Pattern);
+        d.answered();
+        d.feed(b"\x07");
+        assert_eq!(d.source(), Source::Bell);
+        d.answered();
+        d.feed(b"\x1b]9;hey\x07");
+        assert_eq!(d.source(), Source::Notification);
+        d.answered();
+        d.feed(b"\x1b]7501;state=blocked\x07");
+        assert_eq!(d.source(), Source::Report);
     }
 
     #[test]

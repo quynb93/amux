@@ -197,6 +197,7 @@ amux ps
 
 amux attach codex-1      # work with it as usual; Ctrl-] detaches and leaves it running
 amux logs review         # everything the run printed
+amux explain codex-1     # why it shows "waiting": which signal decided, and its screen
 amux stop claude-1       # SIGTERM; --force for SIGKILL
 amux rm --done           # remove finished runs
 ```
@@ -212,6 +213,8 @@ Press **`/`** for the command palette. Type part of a command and its argument c
 | `/clean` | Remove every finished run |
 | `/logs [run]` | Read a run's output in your pager |
 | `/filter [text]` | Show only runs whose name, account, branch or folder matches. Esc shows all again |
+| `/show [waiting\|working\|idle\|ended\|all]` | Show only runs in one state (`f` steps through them) |
+| `/explain [run]` | Why a run shows its state (`e`), the same as `amux explain` |
 | `/switch-account <provider@name>` | Make an account the default for its CLI and for new runs |
 | `/add-account <provider> <name> [--token]` | Add an account and sign in, right from the UI |
 | `/accounts`, `/doctor` | Show `amux account list` or `amux doctor` |
@@ -335,6 +338,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux resume <id> [--as <cli>@<name>]` | Resume a session under any account, or hand it to another CLI. |
 | `amux spawn [--name <run>] [--worktree] [--branch <b>] [--base <ref>] [--attach] <cli>[@name] [args…]` | Start the CLI in the background, optionally in its own git worktree. |
 | `amux ps` | List runs: state, working or idle, directory and branch. |
+| `amux explain <run> [--json]` | Why a run shows its state: the signal that decided (the CLI's own report, a prompt, a bell, a notification, or output timing), what amux watches for, and the bottom of its screen. |
 | `amux attach <run>` | Connect this terminal to a run. Ctrl-] detaches. |
 | `amux logs <run>` | Print everything the run has output. |
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |

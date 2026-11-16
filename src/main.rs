@@ -1,5 +1,7 @@
 mod commands {
     pub mod account;
+    #[cfg(unix)]
+    pub mod explain;
     pub mod maintenance;
     #[cfg(unix)]
     pub mod runs;
@@ -46,6 +48,7 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux spawn [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
   amux ps                                  List runs and whether each is working or idle
+  amux explain <run> [--json]              Why a run shows its state, with the evidence
   amux attach <run>                        Connect this terminal to a run (Ctrl-] detaches)
   amux logs <run>                          Print everything a run has output
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
@@ -117,8 +120,10 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "rm" => commands::runs::rm_cmd(rest),
         #[cfg(unix)]
         "ui" => ui::ui_cmd(rest),
+        #[cfg(unix)]
+        "explain" => commands::explain::explain_cmd(rest),
         #[cfg(not(unix))]
-        "spawn" | "ps" | "attach" | "logs" | "stop" | "rm" | "ui" => {
+        "spawn" | "ps" | "attach" | "logs" | "stop" | "rm" | "ui" | "explain" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

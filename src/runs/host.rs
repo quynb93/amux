@@ -161,6 +161,7 @@ impl Hub {
                 self.run.waiting = Some(Waiting {
                     reason,
                     since: time::now_ms(),
+                    source: Some(self.detector.source().as_str().into()),
                 });
             }
             Some(Change::Cleared) => self.run.waiting = None,
