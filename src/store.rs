@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// ~/.amux/config.json. Unknown keys are kept when amux rewrites the file.
 #[derive(Serialize, Deserialize, Default)]
@@ -81,7 +82,8 @@ struct AccountsFile {
     extra: Map<String, Value>,
 }
 
-fn read_json<T: DeserializeOwned + Default>(file: &Path) -> Result<T> {
+/// Reads a JSON file; a missing file gives `T::default()`.
+pub(crate) fn read_json<T: DeserializeOwned + Default>(file: &Path) -> Result<T> {
     match std::fs::read(file) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| anyhow!("Cannot parse {}: {e}", file.display())),
@@ -90,7 +92,8 @@ fn read_json<T: DeserializeOwned + Default>(file: &Path) -> Result<T> {
     }
 }
 
-fn write_json<T: Serialize>(file: &Path, data: &T) -> Result<()> {
+/// Writes pretty JSON atomically with mode 0600, creating the parent dir.
+pub(crate) fn write_json<T: Serialize>(file: &Path, data: &T) -> Result<()> {
     if let Some(dir) = file.parent() {
         fsx::mkdir_private(dir)?;
     }
@@ -107,7 +110,8 @@ pub fn save_config(cfg: &Config) -> Result<()> {
     write_json(&paths::config_file(), cfg)
 }
 
-fn falsy(v: Option<&Value>) -> bool {
+/// JavaScript-style falsiness for config and transcript fields: missing, null, false, "" or 0.
+pub(crate) fn falsy(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) | Some(Value::Bool(false)) => true,
         Some(Value::String(s)) => s.is_empty(),
@@ -210,14 +214,25 @@ pub fn load_providers_from(cfg: &Config) -> Result<Vec<ProviderSpec>> {
         .collect()
 }
 
-pub fn load_providers() -> Result<Vec<ProviderSpec>> {
-    load_providers_from(&load_config()?)
+/// The providers, loaded from config.json once per process: amux never changes them
+/// while it runs, and a launch or resume looks them up several times.
+pub fn load_providers() -> Result<&'static [ProviderSpec]> {
+    static PROVIDERS: OnceLock<std::result::Result<Vec<ProviderSpec>, String>> = OnceLock::new();
+    PROVIDERS
+        .get_or_init(|| {
+            load_config()
+                .and_then(|c| load_providers_from(&c))
+                .map_err(|e| format!("{e:#}"))
+        })
+        .as_deref()
+        .map_err(|e| anyhow!("{e}"))
 }
 
 pub fn get_provider(id: &str) -> Result<ProviderSpec> {
     load_providers()?
-        .into_iter()
+        .iter()
         .find(|p| p.id == id)
+        .cloned()
         .ok_or_else(|| anyhow!("Unknown provider \"{id}\". Run `amux providers` to see the list."))
 }
 

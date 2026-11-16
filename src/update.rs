@@ -2,7 +2,8 @@
 //! network. Each run prints a one-line notice from a cached result and refreshes
 //! that cache in a detached background process at most once a day.
 
-use crate::{fsx, paths, time};
+use crate::store::{read_json, write_json};
+use crate::{paths, time};
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::process::{Command, Stdio};
@@ -71,10 +72,12 @@ pub fn is_version_tag(tag: &str) -> bool {
     core_ok && pre_ok
 }
 
+fn cache_file() -> std::path::PathBuf {
+    paths::AMUX_HOME.join("update-check.json")
+}
+
 fn read_cache() -> Option<Cache> {
-    let mut cache: Cache =
-        serde_json::from_slice(&std::fs::read(paths::AMUX_HOME.join("update-check.json")).ok()?)
-            .ok()?;
+    let mut cache: Cache = read_json::<Option<Cache>>(&cache_file()).ok()??;
     // The cached version is printed to the terminal, so hold it to the same rule as a fresh one.
     cache.latest = cache.latest.filter(|v| is_version_tag(v));
     Some(cache)
@@ -82,13 +85,7 @@ fn read_cache() -> Option<Cache> {
 
 fn write_cache(cache: &Cache) {
     // Best-effort. Atomic, so a concurrent run never reads a truncated cache.
-    let _ = fsx::mkdir_private(&paths::AMUX_HOME);
-    if let Ok(text) = serde_json::to_string(cache) {
-        let _ = fsx::write_atomic(
-            &paths::AMUX_HOME.join("update-check.json"),
-            format!("{text}\n").as_bytes(),
-        );
-    }
+    let _ = write_json(&cache_file(), cache);
 }
 
 fn disabled() -> bool {
@@ -149,11 +146,24 @@ pub fn check_for_updates() {
         // never reaps. So start it through a short-lived intermediate (`--detach`) that exits
         // right away, leaving the refresh to be reparented and reaped by init.
         if cfg!(unix) {
-            let _ = background_cmd().map(|mut c| c.arg("--detach").status());
+            let _ = background_cmd().map(|mut c| c.arg(DETACH).status());
         } else {
             spawn_refresh();
         }
     }
+}
+
+const DETACH: &str = "--detach";
+
+/// `amux __update-check [--detach]`: the background refresh, or (with --detach) the
+/// short-lived step that starts it and exits.
+pub fn internal_cmd(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some(DETACH) {
+        spawn_refresh();
+    } else {
+        fetch_latest();
+    }
+    0
 }
 
 /// `amux __update-check` with no terminal and its own process group.
@@ -174,7 +184,7 @@ fn background_cmd() -> Option<Command> {
 }
 
 /// Starts the background refresh without waiting for it.
-pub fn spawn_refresh() {
+fn spawn_refresh() {
     let _ = background_cmd().map(|mut c| c.spawn());
 }
 

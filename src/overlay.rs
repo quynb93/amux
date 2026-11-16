@@ -71,15 +71,15 @@ pub fn sync_overlay(spec: &ProviderSpec, overlay: &Path) -> Result<SyncReport> {
         let Ok(st) = fs::symlink_metadata(&link) else {
             continue;
         };
-        let is_link = st.file_type().is_symlink();
-        if is_link && is_private(spec, &name) && fs::read_link(&link)? == shared.join(&name) {
-            // Linked before the entry became private (e.g. a provider spec update): give the account its own copy.
-            fs::remove_file(&link)?;
-            report.pruned.push(name);
-        } else if is_link && !link.exists() {
-            fs::remove_file(&link)?;
-            report.pruned.push(name);
-        } else if !is_link && !is_private(spec, &name) && !shared.join(&name).exists() {
+        let private = is_private(spec, &name);
+        if st.file_type().is_symlink() {
+            // Prune dangling links, and links made before the entry became private (e.g. after
+            // a provider spec update), so the account gets its own copy.
+            if (private && fs::read_link(&link)? == shared.join(&name)) || !link.exists() {
+                fs::remove_file(&link)?;
+                report.pruned.push(name);
+            }
+        } else if !private && !shared.join(&name).exists() {
             report.stray.push(name);
         }
     }

@@ -48,6 +48,8 @@ An entry whose `id` matches a built-in is merged into it, so you only list the f
 | `promptArgs` | no | Arguments that start an interactive session with a first prompt. `{prompt}` is replaced. This is needed to hand sessions *to* this CLI. |
 | `tokenEnv` | no | Variable that holds a token, used by accounts added with `--token`. |
 | `baseUrlEnv` | no | Variable that sets the API endpoint, used by `amux account baseurl`. |
+| `tokenHint` | no | Shown when amux asks for a token, e.g. how to create one. |
+| `conflictingEnv` | no | Variables removed from the environment at launch, so one inherited from your shell can't override the account. The home variable and `tokenEnv` are always removed. |
 | `privacyEnv` | no | Variables to set when an account has privacy mode on. Use only opt-outs that the CLI documents. |
 | `sessions` | no | Session file format: `"claude"`, `"codex"` or `"gemini"`. Leave this out if amux can't read this CLI's sessions; `amux sessions` then skips it. |
 

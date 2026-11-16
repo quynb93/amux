@@ -42,6 +42,13 @@ pub struct ProviderSpec {
     pub prompt_args: Option<Vec<String>>,
     /// Env var used when an account authenticates with a stored token.
     pub token_env: Option<String>,
+    /// Shown when asking for a token, e.g. how to create one.
+    #[serde(default)]
+    pub token_hint: Option<String>,
+    /// Inherited env vars dropped at launch, besides homeEnv and tokenEnv, because they
+    /// would point the CLI at another account.
+    #[serde(default)]
+    pub conflicting_env: Vec<String>,
     /// Env var that points the CLI at another API endpoint (a gateway or relay). It only
     /// redirects where requests go; it never changes organization-managed policy.
     pub base_url_env: Option<String>,
@@ -93,6 +100,8 @@ pub fn builtin() -> Vec<Value> {
             "resumeArgs": ["--resume", "{id}"],
             "promptArgs": ["{prompt}"],
             "tokenEnv": "CLAUDE_CODE_OAUTH_TOKEN",
+            "tokenHint": "create one with `claude setup-token`",
+            "conflictingEnv": ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"],
             "baseUrlEnv": "ANTHROPIC_BASE_URL",
             // Documented user opt-outs. CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC also turns
             // off auto-update and /bug. Managed (enterprise) settings still take precedence.
@@ -117,6 +126,7 @@ pub fn builtin() -> Vec<Value> {
             "resumeArgs": ["resume", "{id}"],
             "promptArgs": ["{prompt}"],
             "tokenEnv": "OPENAI_API_KEY",
+            "conflictingEnv": ["CODEX_HOME"],
             "baseUrlEnv": "OPENAI_BASE_URL",
             "sessions": "codex"
         }),
@@ -133,6 +143,7 @@ pub fn builtin() -> Vec<Value> {
             "resumeArgs": ["--resume", "{id}"],
             "promptArgs": ["-i", "{prompt}"],
             "tokenEnv": "GEMINI_API_KEY",
+            "conflictingEnv": ["GEMINI_CLI_HOME"],
             "sessions": "gemini"
         }),
     ]

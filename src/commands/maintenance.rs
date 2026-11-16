@@ -1,24 +1,15 @@
-use crate::launch::{conflicting_env, prepare};
+use crate::launch::prepare;
 use crate::overlay::{adopt_stray, sync_overlay};
 use crate::paths::tildify;
 use crate::store::{
     get_provider, home_env_value, load_accounts, load_providers, overlay_home, resolve_account,
-    Auth,
 };
 use crate::util::{need, parse_args, sh_quote, table, Kind};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 pub fn providers_cmd() -> Result<i32> {
-    let mut rows = vec![[
-        "PROVIDER",
-        "NAME",
-        "SHARED HOME",
-        "HOME ENV",
-        "PRIVATE PER ACCOUNT",
-    ]
-    .map(String::from)
-    .to_vec()];
+    let mut rows = vec![];
     for p in load_providers()? {
         rows.push(vec![
             p.id.clone(),
@@ -28,29 +19,26 @@ pub fn providers_cmd() -> Result<i32> {
             p.private_entries.join(", "),
         ]);
     }
-    println!("{}", table(&rows));
+    let header = [
+        "PROVIDER",
+        "NAME",
+        "SHARED HOME",
+        "HOME ENV",
+        "PRIVATE PER ACCOUNT",
+    ];
+    println!("{}", table(&header, &rows));
     Ok(0)
 }
 
 pub fn env_cmd(argv: &[String]) -> Result<i32> {
     let acct = resolve_account(need(argv.first(), "amux env <provider>@<name>")?)?;
-    let (spec, env) = prepare(&acct)?;
-    let mut keys = vec![spec.home_env.clone(), "AMUX_ACCOUNT".to_string()];
-    if acct.privacy() {
-        keys.extend(spec.privacy_vars().into_iter().map(|(k, _)| k));
-    }
-    if acct.auth == Auth::Token {
-        keys.extend(spec.token_env.clone());
-    }
-    if acct.base_url.is_some() {
-        keys.extend(spec.base_url_env.clone());
-    }
-    for k in &keys {
-        println!("export {k}={}", sh_quote(env.get(k).unwrap_or("")));
+    let (_, env) = prepare(&acct)?;
+    for (k, v) in &env.set {
+        println!("export {k}={}", sh_quote(v));
     }
     // Clear vars that would otherwise keep pointing the eval'ing shell at another account.
-    for k in conflicting_env(&spec) {
-        if env.get(&k).is_none() {
+    for k in &env.remove {
+        if env.get(k).is_none() {
             println!("unset {k}");
         }
     }
@@ -122,7 +110,7 @@ pub fn doctor_cmd() -> Result<i32> {
         }
     };
     let providers = load_providers()?;
-    for p in &providers {
+    for p in providers {
         let found = which(&p.bin);
         let at = found
             .as_ref()

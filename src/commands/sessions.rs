@@ -2,19 +2,22 @@ use crate::fsx;
 use crate::launch::{fill_args, run};
 use crate::paths::{handoff_dir, tildify};
 use crate::sessions::{build_handoff, list_sessions, read_turns, SessionInfo};
-use crate::store::{get_provider, load_providers, resolve_account};
+use crate::store::{get_provider, load_providers, resolve_account, valid_name};
 use crate::time;
 use crate::util::{ago, need, parse_args, table, Kind};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
-fn all_sessions(provider_filter: Option<&str>) -> Result<Vec<SessionInfo>> {
+fn all_sessions(
+    provider_filter: Option<&str>,
+    id_prefix: Option<&str>,
+) -> Result<Vec<SessionInfo>> {
     let mut out = vec![];
     for spec in load_providers()? {
         if provider_filter.is_some_and(|f| f != spec.id) {
             continue;
         }
-        out.extend(list_sessions(&spec));
+        out.extend(list_sessions(spec, id_prefix));
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     Ok(out)
@@ -29,7 +32,7 @@ pub fn sessions_cmd(argv: &[String]) -> Result<i32> {
             ("limit", Kind::Value),
         ],
     );
-    let mut list = all_sessions(a.pos.first().map(String::as_str))?;
+    let mut list = all_sessions(a.pos.first().map(String::as_str), None)?;
     if a.has("here") {
         let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
         list.retain(|s| s.cwd.as_deref() == Some(cwd.as_str()));
@@ -40,9 +43,7 @@ pub fn sessions_cmd(argv: &[String]) -> Result<i32> {
         _ => bail!("-n must be a positive whole number."),
     };
     let now = time::now_ms();
-    let mut rows = vec![["PROVIDER", "SESSION", "UPDATED", "DIR", "FIRST PROMPT"]
-        .map(String::from)
-        .to_vec()];
+    let mut rows = vec![];
     for s in list.iter().take(limit) {
         rows.push(vec![
             s.provider.clone(),
@@ -57,8 +58,11 @@ pub fn sessions_cmd(argv: &[String]) -> Result<i32> {
     }
     println!(
         "{}",
-        if rows.len() > 1 {
-            table(&rows)
+        if !rows.is_empty() {
+            table(
+                &["PROVIDER", "SESSION", "UPDATED", "DIR", "FIRST PROMPT"],
+                &rows,
+            )
         } else {
             "No sessions found.".into()
         }
@@ -70,7 +74,7 @@ pub fn sessions_cmd(argv: &[String]) -> Result<i32> {
 }
 
 fn find_session(prefix: &str) -> Result<SessionInfo> {
-    let mut matches: Vec<SessionInfo> = all_sessions(None)?
+    let mut matches: Vec<SessionInfo> = all_sessions(None, Some(prefix))?
         .into_iter()
         .filter(|s| s.id.starts_with(prefix))
         .collect();
@@ -118,7 +122,7 @@ pub fn resume_cmd(argv: &[String]) -> Result<i32> {
         };
         // The id comes from a file name or transcript contents and becomes a CLI argument,
         // so an id like "--some-flag" must not be passed through as an option.
-        if session.id.starts_with('-') || safe(&session.id) != session.id {
+        if !valid_name(&session.id) {
             bail!(
                 "Session id \"{}\" has unexpected characters; not resuming it.",
                 session.id

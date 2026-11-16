@@ -11,23 +11,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Env vars that would point the CLI at another account if inherited from the shell.
-fn known_conflicts(id: &str) -> &'static [&'static str] {
-    match id {
-        "claude" => &["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"],
-        "codex" => &["CODEX_HOME"],
-        "gemini" => &["GEMINI_CLI_HOME"],
-        _ => &[],
-    }
-}
-
-/// Inherited vars that launches drop: the provider's home and token vars (for any
-/// provider, built-in or custom) plus the known extras above.
-pub fn conflicting_env(spec: &ProviderSpec) -> Vec<String> {
+/// Inherited vars that launches drop, because they would point the CLI at another
+/// account: the provider's home and token vars plus its `conflictingEnv`.
+fn conflicting_env(spec: &ProviderSpec) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let all = std::iter::once(spec.home_env.as_str())
         .chain(spec.token_env.as_deref())
-        .chain(known_conflicts(&spec.id).iter().copied());
+        .chain(spec.conflicting_env.iter().map(String::as_str));
     for k in all {
         if !out.iter().any(|o| o == k) {
             out.push(k.to_string());
@@ -72,12 +62,11 @@ pub fn build_env(spec: &ProviderSpec, acct: &Account) -> Result<EnvPlan> {
     if acct.privacy() {
         set.extend(spec.privacy_vars());
     }
-    if let Some(url) = &acct.base_url {
-        let Some(var) = &spec.base_url_env else {
-            bail!("Provider \"{}\" has no base-URL env var configured; set \"baseUrlEnv\" in ~/.amux/config.json.", spec.id)
-        };
-        set.push((var.clone(), url.clone()));
-    }
+    let base_url = match (&acct.base_url, &spec.base_url_env) {
+        (None, _) => None,
+        (Some(url), Some(var)) => Some((var.clone(), url.clone())),
+        (Some(_), None) => bail!("Provider \"{}\" has no base-URL env var configured; set \"baseUrlEnv\" in ~/.amux/config.json.", spec.id),
+    };
     if acct.auth == Auth::Token {
         let Some(var) = &spec.token_env else {
             bail!(
@@ -93,6 +82,7 @@ pub fn build_env(spec: &ProviderSpec, acct: &Account) -> Result<EnvPlan> {
         })?;
         set.push((var.clone(), token));
     }
+    set.extend(base_url);
     Ok(EnvPlan {
         remove: conflicting_env(spec),
         set,
@@ -258,18 +248,13 @@ mod tests {
 #[cfg(test)]
 mod env_tests {
     use super::*;
-    use crate::store::load_providers_from;
 
     fn acct(provider: &str) -> Account {
         serde_json::from_value(serde_json::json!({"provider": provider, "name": "work", "auth": "login", "createdAt": "x"})).unwrap()
     }
 
     fn spec(id: &str) -> ProviderSpec {
-        load_providers_from(&Default::default())
-            .unwrap()
-            .into_iter()
-            .find(|p| p.id == id)
-            .unwrap()
+        crate::testutil::builtin_spec(id)
     }
 
     #[test]

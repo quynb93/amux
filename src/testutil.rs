@@ -54,8 +54,19 @@ pub fn spec(id: &str, shared_home: &Path) -> ProviderSpec {
         resume_args: None,
         prompt_args: None,
         token_env: None,
+        token_hint: None,
+        conflicting_env: vec![],
         base_url_env: None,
         privacy_env: None,
         sessions: None,
     }
+}
+
+/// A built-in provider, as loaded with an empty config.
+pub fn builtin_spec(id: &str) -> ProviderSpec {
+    crate::store::load_providers_from(&Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == id)
+        .unwrap()
 }

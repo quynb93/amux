@@ -4,6 +4,32 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-16
+
+0.2.0 was never published to npm, and its tag missed the fixes below. Use 0.2.1.
+
+### Security
+
+- Account names and provider ids in `accounts.json` and `config.json` are checked before amux uses them as folder names, so a hand-edited name like `../..` can't point `amux account rm --purge` outside `~/.amux`.
+- `amux resume` refuses session ids that could be read as a CLI option, such as `--some-flag`.
+- `amux sync --adopt` never replaces a file that already exists in the shared home, including a broken symlink.
+- The cached update version is validated before it is printed.
+
+### Fixed
+
+- The background update check no longer lingers as a zombie process under the CLI amux launches, and Ctrl-C doesn't reach it.
+- A rejected or cancelled token no longer leaves a token account behind.
+- `amux account status` no longer hangs when the CLI leaves a helper process running.
+- Entries that become private after a provider update are unlinked from the shared home, so the account gets its own copy.
+- The npm launcher passes SIGTERM and SIGHUP on to amux.
+- Release: the npm package is published again.
+
+### Changed
+
+- Provider specs can set `tokenHint` and `conflictingEnv` in `config.json`. See docs/providers.md.
+- `amux resume <id>` opens only the Claude transcripts whose file name matches the id.
+- amux reads `config.json` once per run.
+
 ## [0.2.0] - 2026-11-16
 
 amux is now a single native binary written in Rust. Commands, flags, output and the files in `~/.amux` are unchanged, so existing accounts keep working.

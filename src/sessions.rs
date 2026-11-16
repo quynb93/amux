@@ -1,6 +1,7 @@
 //! Reads each CLI's session files for listing, and builds cross-CLI handoffs.
 
 use crate::providers::ProviderSpec;
+use crate::store::falsy;
 use crate::time;
 use crate::util::one_line;
 use serde_json::Value;
@@ -111,15 +112,6 @@ fn text_of(content: Option<&Value>) -> String {
     }
 }
 
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
-        _ => true,
-    }
-}
-
 fn mtime_ms(file: &Path) -> i64 {
     fs::metadata(file)
         .and_then(|m| m.modified())
@@ -144,7 +136,7 @@ fn claude_turns(text: &str, first_only: bool) -> (Option<String>, Vec<Turn>) {
         if cwd.is_none() {
             cwd = rec.get("cwd").and_then(Value::as_str).map(str::to_string);
         }
-        if truthy(rec.get("isSidechain")) || truthy(rec.get("isMeta")) {
+        if !falsy(rec.get("isSidechain")) || !falsy(rec.get("isMeta")) {
             continue;
         }
         let kind = rec.get("type").and_then(Value::as_str);
@@ -172,12 +164,13 @@ fn claude_turns(text: &str, first_only: bool) -> (Option<String>, Vec<Turn>) {
     (cwd, turns)
 }
 
-fn list_claude(spec: &ProviderSpec) -> Vec<SessionInfo> {
+fn list_claude(spec: &ProviderSpec, id_prefix: Option<&str>) -> Vec<SessionInfo> {
     // Sessions sit at projects/<cwd-slug>/<id>.jsonl; deeper dirs hold subagent transcripts and tool output.
     let mut files = vec![];
     walk(
         &spec.shared_home.join("projects"),
-        &|n| n.ends_with(".jsonl"),
+        // The id is the file name, so a prefix lookup can skip other files unread.
+        &|n| n.ends_with(".jsonl") && id_prefix.is_none_or(|p| n.starts_with(p)),
         1,
         &mut files,
     );
@@ -204,13 +197,13 @@ fn list_claude(spec: &ProviderSpec) -> Vec<SessionInfo> {
 // ---- Codex: <home>/sessions/YYYY/MM/DD/rollout-*.jsonl
 
 /// With `first_only`, stops once the session id and the first user prompt are known (for listing).
-fn codex_turns(text: &str, first_only: bool) -> (Option<Value>, Option<String>, Vec<Turn>) {
-    let mut id: Option<Value> = None;
+fn codex_turns(text: &str, first_only: bool) -> (Option<String>, Option<String>, Vec<Turn>) {
+    let mut id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut turns: Vec<Turn> = vec![];
     let empty = Value::Object(Default::default());
     for rec in json_lines(text) {
-        if first_only && id.as_ref().is_some_and(|v| !v.is_null()) && first_user(&turns).is_some() {
+        if first_only && id.is_some() && first_user(&turns).is_some() {
             break;
         }
         let p = rec
@@ -219,12 +212,11 @@ fn codex_turns(text: &str, first_only: bool) -> (Option<Value>, Option<String>, 
             .unwrap_or(&empty);
         let kind = rec.get("type").and_then(Value::as_str);
         if kind == Some("session_meta") {
-            if id.as_ref().is_none_or(Value::is_null) {
-                id = p
-                    .get("id")
-                    .filter(|v| !v.is_null())
-                    .or_else(|| p.get("session_id"))
-                    .cloned();
+            if id.is_none() {
+                id = ["id", "session_id"]
+                    .iter()
+                    .find_map(|k| p.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()))
+                    .map(str::to_string);
             }
             if cwd.is_none() {
                 cwd = p.get("cwd").and_then(Value::as_str).map(str::to_string);
@@ -272,12 +264,7 @@ fn list_codex(spec: &ProviderSpec) -> Vec<SessionInfo> {
         .filter_map(|file| {
             let (id, cwd, title) = scan_head(&file, &mut buf, |text| {
                 let (id, cwd, turns) = codex_turns(text, true);
-                let id = id
-                    .as_ref()
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())?
-                    .to_string();
-                Some((id, cwd, one_line(&first_user(&turns)?.text, 80)))
+                Some((id?, cwd, one_line(&first_user(&turns)?.text, 80)))
             })?;
             Some(SessionInfo {
                 provider: spec.id.clone(),
@@ -378,9 +365,11 @@ fn list_gemini(spec: &ProviderSpec) -> Vec<SessionInfo> {
         .collect()
 }
 
-pub fn list_sessions(spec: &ProviderSpec) -> Vec<SessionInfo> {
+/// Lists a provider's sessions. With `id_prefix`, providers that name files by session id
+/// skip the others without reading them; callers still filter the result by id.
+pub fn list_sessions(spec: &ProviderSpec, id_prefix: Option<&str>) -> Vec<SessionInfo> {
     match spec.sessions.as_deref() {
-        Some("claude") => list_claude(spec),
+        Some("claude") => list_claude(spec, id_prefix),
         Some("codex") => list_codex(spec),
         Some("gemini") => list_gemini(spec),
         _ => vec![],
@@ -491,7 +480,7 @@ mod tests {
             &home.path().join("projects/-work-app/subagents/x.jsonl"),
             &jsonl(&[json!({"type": "user", "message": {"role": "user", "content": "sub"}})]),
         );
-        let list = list_sessions(&session_spec("claude", home.path()));
+        let list = list_sessions(&session_spec("claude", home.path()), None);
         assert_eq!(list.len(), 1);
         let s = &list[0];
         assert_eq!(s.id, "11111111-aaaa");
@@ -517,7 +506,7 @@ mod tests {
                 json!({"type": "user", "cwd": "/p", "message": {"role": "user", "content": "The real ask"}}),
             ]),
         );
-        let list = list_sessions(&session_spec("claude", home.path()));
+        let list = list_sessions(&session_spec("claude", home.path()), None);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].title, "The real ask");
     }
@@ -544,7 +533,7 @@ mod tests {
                 json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "hi"}}),
             ]),
         );
-        let list = list_sessions(&session_spec("codex", home.path()));
+        let list = list_sessions(&session_spec("codex", home.path()), None);
         assert_eq!(list.len(), 1);
         let s = &list[0];
         assert_eq!(
@@ -573,7 +562,7 @@ mod tests {
             })
             .to_string(),
         );
-        let list = list_sessions(&session_spec("gemini", home.path()));
+        let list = list_sessions(&session_spec("gemini", home.path()), None);
         assert_eq!(list.len(), 1);
         let s = &list[0];
         assert_eq!(

@@ -159,4 +159,4 @@ jobs:
             exit 0
           fi
           # Publish the same tarball the GitHub release carries.
-          npm publish dist/amux.tgz --provenance --access public
+          npm publish ./dist/amux.tgz --provenance --access public

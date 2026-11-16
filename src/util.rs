@@ -72,18 +72,20 @@ fn width(s: &str) -> usize {
     s.chars().count()
 }
 
-/// Left-aligned columns; the last column is not padded.
-pub fn table(rows: &[Vec<String>]) -> String {
-    let cols = rows[0].len();
-    let widths: Vec<usize> = (0..cols)
-        .map(|i| rows.iter().map(|r| width(&r[i])).max().unwrap_or(0))
+/// A header row plus rows in left-aligned columns; the last column is not padded.
+pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
+    let header: Vec<String> = header.iter().map(|h| h.to_string()).collect();
+    let all: Vec<&Vec<String>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|i| all.iter().map(|r| width(&r[i])).max().unwrap_or(0))
         .collect();
-    rows.iter()
+    all.iter()
         .map(|r| {
+            let last = r.len() - 1;
             r.iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    if i == r.len() - 1 {
+                    if i == last {
                         c.clone()
                     } else {
                         format!("{c}{}", " ".repeat(widths[i] - width(c)))
@@ -217,7 +219,7 @@ mod tests {
     #[test]
     fn formats_tables_times_and_quotes() {
         assert_eq!(
-            table(&[s(&["A", "BB", "C"]), s(&["aaa", "b", "c"])]),
+            table(&["A", "BB", "C"], &[s(&["aaa", "b", "c"])]),
             "A    BB  C\naaa  b   c"
         );
         assert_eq!(ago(0, 30_000), "1m ago");

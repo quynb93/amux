@@ -58,14 +58,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
     let rest = argv.get(1..).unwrap_or_default();
     match cmd {
         // Internal: the background refresh started by check_for_updates().
-        Some("__update-check") => {
-            if rest.first().map(String::as_str) == Some("--detach") {
-                update::spawn_refresh();
-            } else {
-                update::fetch_latest();
-            }
-            return Ok(0);
-        }
+        Some("__update-check") => return Ok(update::internal_cmd(rest)),
         Some("--version" | "-v" | "version") => {
             println!("{}", update::version());
             return Ok(0);

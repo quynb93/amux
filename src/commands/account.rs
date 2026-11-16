@@ -93,11 +93,11 @@ fn add(argv: &[String]) -> Result<i32> {
     // Store the token before saving the account, so a rejected or aborted token
     // doesn't leave a token account behind with nothing to launch it with.
     if acct.auth == Auth::Token {
-        let hint = if provider_id == "claude" {
-            " (create one with `claude setup-token`)"
-        } else {
-            ""
-        };
+        let hint = spec
+            .token_hint
+            .as_ref()
+            .map(|h| format!(" ({h})"))
+            .unwrap_or_default();
         let token = read_secret(&format!(
             "Paste {} for {}{hint}: ",
             spec.token_env.as_deref().unwrap_or(""),
@@ -133,11 +133,7 @@ fn list() -> Result<i32> {
     }
     let cfg = load_config()?;
     let providers = load_providers()?;
-    let mut rows = vec![[
-        "ACCOUNT", "AUTH", "PRIVACY", "BASE URL", "DEFAULT", "HOME", "NOTE",
-    ]
-    .map(String::from)
-    .to_vec()];
+    let mut rows = vec![];
     for a in &accounts {
         let spec = providers.iter().find(|p| p.id == a.provider);
         rows.push(vec![
@@ -159,7 +155,10 @@ fn list() -> Result<i32> {
             a.note.clone().unwrap_or_default(),
         ]);
     }
-    println!("{}", table(&rows));
+    let header = [
+        "ACCOUNT", "AUTH", "PRIVACY", "BASE URL", "DEFAULT", "HOME", "NOTE",
+    ];
+    println!("{}", table(&header, &rows));
     Ok(0)
 }
 
@@ -324,13 +323,12 @@ pub fn account_cmd(argv: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::load_providers_from;
+    use crate::testutil::builtin_spec;
 
     #[test]
     fn validates_base_urls() {
-        let specs = load_providers_from(&Default::default()).unwrap();
-        let claude = specs.iter().find(|p| p.id == "claude").unwrap();
-        let gemini = specs.iter().find(|p| p.id == "gemini").unwrap();
+        let claude = &builtin_spec("claude");
+        let gemini = &builtin_spec("gemini");
         assert_eq!(
             validate_base_url("https://gw.example.com/", claude).unwrap(),
             "https://gw.example.com"
