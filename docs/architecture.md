@@ -2,6 +2,32 @@
 
 amux is a launcher. It never talks to a model API and never edits a CLI's files. Its job is to prepare a directory and an environment so that a normal, unmodified CLI runs as a particular account.
 
+## Code layout
+
+The code is in layers. Each layer uses only the ones below it, so the CLI and the UI are two faces of the same core:
+
+```
+main.rs          argument dispatch; `<machine>:<run>` is forwarded over SSH
+commands/        the CLI: parse arguments, call the core, print       ─┐
+ui/              amux ui: draw, keys, mouse, views; calls the core     ─┤ faces
+serve.rs         the phone web app; every action runs an amux command ─┘
+remote.rs        other machines: SSH, forwarding, the socket pipe
+plugins.rs       `amux <plugin>` and ~/.amux/hooks
+work/            what runs do to code and to the machine:
+                   slots (machine limits), verify (tests or push), github (PR, CI),
+                   review (diff and line comments). Nothing here prints.
+runs/            a run's life: host (pty + socket), client (connect, send input),
+                   state (classify: working, waiting, idle…), detect, program (OSC 7501),
+                   screen, attach, notify
+git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   foundations
+```
+
+Remote runs reuse everything: `runs::client::connect("gpu:x")` returns a socket that `remote.rs` bridges to `amux __pipe x` over SSH. Previews, typing and attaching work on them unchanged. `serve.rs` keeps to the CLI's commands on purpose, so the phone can't do anything the CLI can't.
+
+`runs/` and `work/` never import from `commands/` or `ui/`. Something that both faces need, such as classifying a run's state or typing into it, belongs in `runs/` or `work/`, not in one of the faces.
+
+In `ui/`, `mod.rs` holds the app state, the event loop and reloading. `keys.rs`, `typing.rs` (working in a run's pane, the mouse) and `actions.rs` (what commands do) add to the same `App`. `draw.rs` and `views.rs` (the board and the tiles), `review.rs`, `palette.rs` and `spawn.rs` draw. `input.rs` turns keys, pastes and mouse events back into terminal bytes.
+
 ## The overlay model
 
 ```
@@ -102,7 +128,13 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `accounts/<p>/<n>/` | `sync_overlay`, the CLI | The overlay, plus a `token` file on Linux |
 | `handoffs/*.md` | `amux resume` | Transcripts for cross-CLI handoff (mode 0600) |
 | `runs/<id>/` | `amux spawn`, the run host | `run.json`, `output.log` (mode 0600) and the attach socket |
+| `runs/<id>/review.json`, `pr.json` | `amux comment`, `amux ui`, `amux pr`, `amux checks` | Review comments on the run's lines until they are sent, and its pull request and CI state as last seen |
+| `runs/<id>/verify.json`, `verify.log` | `amux verify` | How the last test run or push for that run went, and the test output. Kept apart from `run.json`, which the host alone writes while the run is alive. |
 | `worktrees/` | `amux spawn --worktree` | Git worktrees for runs |
+| `slots/<class>/` | `amux slot`, the run host | `<n>.lock` per slot, held with `flock(2)` by whoever runs in it (the content says who), and `queue/<pid>` per waiter, served oldest first. See `slots.rs`. |
+| `machines.json` | `amux machine` | Other machines: name, SSH destination, amux path |
+| `plugins/`, `hooks/` | you | Plugins (`amux <name>`) and event hooks (`on-<event>`) |
+| `serve-token` | `amux serve` | The phone app's token (mode 0600) |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
 

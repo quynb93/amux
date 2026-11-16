@@ -16,6 +16,8 @@ pub enum Arg {
     State,
     /// Free text, optional.
     Text,
+    /// A plugin's name, then its arguments.
+    Plugin,
 }
 
 pub struct Command {
@@ -143,6 +145,62 @@ pub const COMMANDS: &[Command] = &[
         key: "e",
     },
     Command {
+        name: "plugin",
+        aliases: &["plugins", "run-plugin"],
+        arg: Arg::Plugin,
+        usage: "<name> [args]",
+        summary: "Run a plugin on the selected run (amux plugin list)",
+        key: "",
+    },
+    Command {
+        name: "layout",
+        aliases: &[],
+        arg: Arg::Text,
+        usage: "[width <n> | side left|right | tiles <n> | reset | save]",
+        summary: "List width and side, how many tiles; save keeps it in config.json",
+        key: "",
+    },
+    Command {
+        name: "view",
+        aliases: &["board", "tiles", "layout"],
+        arg: Arg::None,
+        usage: "[list|board|tiles]",
+        summary: "See runs as a list, a board by state (b), or live tiles (t)",
+        key: "b",
+    },
+    Command {
+        name: "review",
+        aliases: &["comment", "comments"],
+        arg: Arg::Run,
+        usage: "[run]",
+        summary: "Read a run's changes and comment on lines; S sends the comments to it",
+        key: "c",
+    },
+    Command {
+        name: "diff",
+        aliases: &["changes"],
+        arg: Arg::Run,
+        usage: "[run]",
+        summary: "What a run changed since its worktree started, in your pager",
+        key: "",
+    },
+    Command {
+        name: "send",
+        aliases: &["prompt", "say"],
+        arg: Arg::None,
+        usage: "<text>",
+        summary: "Type a prompt into the selected run and press Enter",
+        key: "",
+    },
+    Command {
+        name: "verify",
+        aliases: &["test", "push"],
+        arg: Arg::Run,
+        usage: "[run]",
+        summary: "Run a finished run's tests here, or push its branch for CI",
+        key: "v",
+    },
+    Command {
         name: "show",
         aliases: &["state", "only"],
         arg: Arg::State,
@@ -177,6 +235,7 @@ pub struct Ctx {
     pub runs: Vec<String>,
     pub accounts: Vec<String>,
     pub themes: Vec<String>,
+    pub plugins: Vec<String>,
 }
 
 /// One line in the palette's list.
@@ -212,6 +271,13 @@ pub enum Action {
     Accounts,
     Theme(Option<String>),
     Explain(Option<String>),
+    Verify(Option<String>),
+    Diff(Option<String>),
+    Review(Option<String>),
+    View(Option<String>),
+    Plugin(Vec<String>),
+    Layout(Vec<String>),
+    Send(String),
     Show(Option<String>),
     Doctor,
     Help,
@@ -300,6 +366,7 @@ pub fn items(input: &str, ctx: &Ctx) -> Vec<Item> {
         Arg::Account => &ctx.accounts,
         Arg::Theme => &ctx.themes,
         Arg::State => &states,
+        Arg::Plugin if !rest.contains(' ') => &ctx.plugins,
         // `new` takes an account first.
         Arg::Text if c.name == "new" && !rest.contains(' ') => &ctx.accounts,
         _ => &[],
@@ -425,6 +492,20 @@ pub fn parse(input: &str) -> Result<Action, String> {
         "accounts" => Action::Accounts,
         "theme" => Action::Theme(one()),
         "explain" => Action::Explain(one()),
+        "verify" => Action::Verify(one()),
+        "diff" => Action::Diff(one()),
+        "review" => Action::Review(one()),
+        "view" => Action::View(one()),
+        "layout" => Action::Layout(split_args(rest)?),
+        "plugin" => {
+            let args = split_args(rest)?;
+            if args.is_empty() {
+                return Err(usage());
+            }
+            Action::Plugin(args)
+        }
+        "send" if !rest.trim().is_empty() => Action::Send(rest.trim().to_string()),
+        "send" => return Err(usage()),
         "show" => Action::Show(one()),
         "doctor" => Action::Doctor,
         "help" => Action::Help,
@@ -442,6 +523,7 @@ mod tests {
             runs: vec!["claude-1".into(), "codex-1".into(), "review".into()],
             accounts: vec!["claude@work".into(), "codex@me".into()],
             themes: vec!["default".into(), "dark".into(), "light".into()],
+            plugins: vec!["pr-summary".into()],
         }
     }
 

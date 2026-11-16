@@ -28,6 +28,14 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
   - [Accounts and sign-in](#accounts-and-sign-in)
   - [Sessions and handoff](#sessions-and-handoff)
   - [Parallel runs](#parallel-runs)
+  - [Driving runs from scripts and agents](#driving-runs-from-scripts-and-agents)
+  - [Reviewing a run's changes](#reviewing-a-runs-changes)
+  - [Pull requests and CI](#pull-requests-and-ci)
+  - [Other machines](#other-machines)
+  - [On your phone](#on-your-phone)
+  - [Plugins and hooks](#plugins-and-hooks)
+  - [Agents that run agents](#agents-that-run-agents)
+  - [Sharing the machine](#sharing-the-machine)
   - [Privacy mode](#privacy-mode)
   - [Gateways and custom endpoints](#gateways-and-custom-endpoints)
   - [Shell integration](#shell-integration)
@@ -202,7 +210,18 @@ amux stop claude-1       # SIGTERM; --force for SIGKILL
 amux rm --done           # remove finished runs
 ```
 
-Or see them all at once with **`amux ui`**: a list of runs with their state, and a live view of the selected run's screen. Press Enter to work in a run right there and Ctrl-] to come back to the list. Tab jumps to the next run that is waiting for you. `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it. `?` lists every key. Quitting the UI leaves the runs going.
+Or see them all at once with **`amux ui`**: a list of runs with their state, and a live view of the selected run's screen.
+
+- **Type right into a run.** Press Enter, click its screen, or just start typing a word: keys go to the agent in its pane, as in a terminal. The pane gets the accent border, and the run is resized to fit it. Pasting works too.
+- **While typing**, Ctrl-] goes back to the list. Ctrl-B then a key runs one command (Ctrl-B s stops the run, Ctrl-B n starts one, Ctrl-B ? lists them), and Alt-↑/↓ switches to the run above or below.
+- **Mouse.** Click a run to select it, and click its screen to type into it. The wheel moves through the list or scrolls the screen back. A CLI that asks for mouse reports gets them while you type into it. To select text with the mouse, hold Shift (Option in iTerm2 and Terminal.app).
+- **Layout.** `/layout width 40`, `/layout side right`, and `/layout tiles 6` (up to six live screens) change the layout. `/layout save` keeps it, with the current view, in `~/.amux/config.json`:
+
+  ```json
+  { "ui": { "layout": { "view": "tiles", "listWidth": 40, "listSide": "left", "maxTiles": 6 } } }
+  ```
+- **Views.** **`b`** shows a board with a column per state: needs you, working, idle and done. Each run is a card, and ←→ and ↑↓ move between cards. **`t`** shows tiles: up to four live runs side by side, each a terminal you can click into and type into. `b` or `t` again goes back to the list, and `/view` switches too.
+- **In the list**, letters are shortcuts: `a` gives the run the whole terminal, Tab jumps to the next run that is waiting for you, `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it. `?` lists every key. Quitting the UI leaves the runs going.
 
 Press **`/`** for the command palette. Type part of a command and its argument completes from your runs, accounts or themes:
 
@@ -246,6 +265,132 @@ A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `def
 - amux's own flags go before the account. Everything after the account is passed to the CLI unchanged.
 - The CLI sees `AMUX_RUN=<run>` in its environment. Runs survive closing the terminal, but not a reboot: `amux ps` then shows them as `lost`.
 - macOS and Linux only.
+
+### Driving runs from scripts and agents
+
+Runs can be steered without attaching, so a script, or an agent, can start helpers and pick up their results:
+
+```sh
+amux spawn --worktree --name tests claude@work -p "add tests for the parser"
+amux send tests "also cover empty input"        # types it in and presses Enter
+amux send tests --wait "now run them"           # …and waits for the turn to end
+amux wait tests --until waiting --timeout 600   # or: idle (default), exited. 124 on timeout
+amux events --text                              # every change as it happens (JSON lines without --text)
+amux diff tests --stat                          # what it changed since its worktree started
+amux ps --json                                  # every run's state, branch and last verify
+```
+
+- `events` prints a line when a run starts or is removed, changes state (with the reason it waits), or gets a verify result or new PR checks. A script or a coordinating agent can follow it instead of polling `ps`.
+- `send` reads the text from stdin with `-`. Multi-line text goes in as one bracketed paste when the CLI accepts it (Claude Code and Codex do). Otherwise newlines become spaces, so they can't submit early. Escape sequences and other control characters are removed.
+- `diff` covers committed and uncommitted changes, and lists new files git doesn't track yet. In `amux ui`, `/diff` opens it in your pager.
+- `amux verify <run> --send-failures` hands the output of a failed test run to the run's agent to fix. In `amux ui`, after a failed test run, `v` then ⏎ (or `f`) does the same.
+- In `amux ui`, `/send <text>` types into the selected run.
+
+### Reviewing a run's changes
+
+Read what a run changed and comment on lines, like a pull request review. The comments then go to the agent together, as one message:
+
+- In `amux ui`, press **`c`**: the run's diff opens, with new untracked files shown as added. Move with `j`/`k`, the wheel or a click, and `n`/`N` jump between files. **⏎** writes a comment on the line under the cursor (a removed line too), `x` deletes one, and **`S`** sends every pending comment to the agent. Each comment shows under its line, then as sent.
+- From the CLI:
+
+```sh
+amux comment tests src/parser.rs:42 "this panics on empty input"
+amux comments tests            # pending and sent comments, with the code they're on
+amux comments tests --send     # one message: file:line, the line, and your note, for each
+```
+
+Comments are kept in `runs/<id>/review.json` until sent, so a review can be written over time.
+
+### Pull requests and CI
+
+With the [GitHub CLI](https://cli.github.com) signed in, a run's branch can go all the way to a pull request. CI failures can then go back to the agent that wrote the code:
+
+```sh
+amux pr tests --draft             # pushes amux/tests (never forced) and opens a PR, or finds the open one
+amux checks tests                 # ✓/✗ per check; exits 1 if any failed
+amux checks tests --send-failures # the failed steps' logs go to the agent, with a request to fix and push
+```
+
+In `amux ui`, the run list shows the PR and its checks (`PR #7 checks ✓`, `PR #7 ✗ 2 failing`), refreshed every minute while checks are running. In the `v` choice, `r` opens the PR and `k` sends failing CI to the agent. amux stores no GitHub token; `gh` keeps its own sign-in.
+
+### Other machines
+
+Runs can live on a server, a VM or a cloud box as well, wherever SSH reaches and amux is installed:
+
+```sh
+amux machine add gpu me@gpu.example.com      # checks ssh and amux there
+amux spawn --on gpu:~/src/app --worktree claude@work -p "train the model"
+amux ps                                       # local runs, then gpu:claude-1 and the rest
+amux attach gpu:claude-1                      # every run command takes <machine>:<run>
+amux send gpu:claude-1 "use the bigger batch"
+```
+
+- `amux ui` shows every machine's runs in the list, the board and the tiles. Their screens are live, and you can type into them, attach, stop, verify and send, the same as local runs. On another machine, `c` opens the run's diff in your pager.
+- amux keeps one SSH connection per machine open for ten minutes and reuses it (OpenSSH ControlMaster), so it is quick. It stores no keys: SSH uses your own config, agent and known hosts. Background checks never wait for a password, so set up key or agent login.
+- `--amux <path>` on `machine add` points at amux there if it isn't on its PATH.
+
+### On your phone
+
+`amux serve` is a remote control for everything amux does, in a web app for a phone or another laptop's browser. Add it to the home screen to use it like an app.
+
+- **Runs:** every run on every machine, grouped by **space** (its repo) or on a **board** by state, with a filter. Changes arrive the moment they happen. It buzzes when a run starts waiting, and shows a notification where the browser allows it.
+- **A run:**
+  - **Screen:** its live screen, a box to reply, and buttons for Yes, No, ⏎, Esc, ↑/↓, 1–3, Tab and Ctrl-C.
+  - **Changes:** its diff. Tap a line to comment, then send the comments to the agent as one message.
+  - **Ship:** run the tests (in a test slot) or push for CI, open a PR (or a draft), see the CI checks, send test or CI failures to the agent, stop or remove the run.
+- **New:** start a run with an account, a machine, a folder (recent ones are suggested), its own worktree and branch, a name and a prompt.
+- **Monitor:** the machine's load and free memory, every slot with who holds it and who waits, and each machine's runs.
+
+```sh
+amux serve                                    # prints http://127.0.0.1:7878/?t=<token>
+amux serve --listen 100.101.102.103:7878      # your Tailscale address, to reach it from the phone
+```
+
+- The link holds a secret token. Opening it once stores the token in a cookie (HttpOnly, SameSite=Strict) and takes it out of the address bar. `--new-token` replaces it.
+- It listens on this machine only unless you say otherwise. It has no TLS, so reach it through something private: Tailscale, a VPN or an SSH tunnel.
+- Every action runs the same command the CLI has (`ps --json`, `peek`, `send`, `spawn`, `verify`, `pr`, `comment`…), so runs on other machines work too, and the app can do nothing the CLI can't.
+- **From another laptop without Tailscale:** run `ssh -N -L 7878:127.0.0.1:7878 you@your-mac`, then open the link. Or skip the browser: `ssh you@your-mac` and run `amux ui`.
+
+### Plugins and hooks
+
+```sh
+amux plugin new pr-summary         # a script in ~/.amux/plugins to edit
+amux pr-summary claude-1           # plugins run as amux <name>
+amux plugin list
+```
+
+- **Plugins** are any executable in `~/.amux/plugins/`, or named `amux-<name>` on PATH, the way git does it. They get `AMUX_BIN` (amux itself) and `AMUX_HOME`. In `amux ui`, `/plugin <name>` runs one on the selected run, with `AMUX_RUN` set, and shows what it printed. A line `# amux: <what it does>` describes it.
+- **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify` or `on-checks`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
+- amux runs a plugin or hook only if it belongs to you and no one else can write to it.
+
+### Agents that run agents
+
+`amux skill --install` puts an `amux` skill in the shared home of Claude Code, Codex and Gemini CLI, so every account's agent knows how to start helpers in worktrees, steer and wait for them, review their diffs, share the machine with `amux slot`, verify and open PRs. `amux skill` prints it, for an `AGENTS.md`.
+
+### Sharing the machine
+
+Four agents in four worktrees can each start the full test suite, or a dev server, at the same moment. `amux slot` makes heavy commands take turns, across every run and terminal on the machine:
+
+```sh
+amux slot -- npm test                       # waits for a free "test" slot, then runs it
+amux slot --class dev -- npm run dev        # dev servers have their own slots
+amux slot --timeout 100 -- 'cd web && pnpm test'   # one argument runs through sh -c
+amux slots                                  # who holds each slot, who waits, load and memory
+```
+
+- The class is guessed from the command (`test`, `build` or `dev`) unless you pass `--class`. Any other name works too, such as `--class gpu`.
+- A command also waits while the machine is busy (one-minute load per CPU above `maxLoad`) or short of memory (below `minFreeMemMB`), as long as some other slotted work is running. A machine busy with something else never blocks everything.
+- Waiters go first come, first served. A slot is a lock the kernel releases when its process ends, so a crash or `kill -9` never leaves one stuck. Processes the command leaves running, such as a dev server's workers, keep the slot until they end.
+- With `--timeout <secs>` or `--no-wait`, amux exits **75** when no slot came free and runs nothing. That is the signal for an agent to stop and push the branch so CI runs the tests, or to ask you.
+- **Agents.** `amux slots --hook` prints a Claude Code `PreToolUse` hook for the shared `settings.json`. It turns away an unwrapped `npm test`, `cargo build`, `npm run dev` and the like, and tells the agent the exact `amux slot` command to run instead. It also prints a paragraph for `AGENTS.md`, for Codex and other CLIs.
+- **Checking finished work.** `amux verify <run>` says how to check what a run did, and which way is better right now. `--test` runs the project's tests in the run's folder, waiting for a `test` slot. `--push` pushes the run's branch (never forced) so CI runs them instead, which costs this machine nothing. The test command is guessed from `package.json`, `Cargo.toml`, `go.mod`, a `Makefile` with a `test:` target and the like, or set with `"verify": { "test": "<command>" }` in `config.json`. In `amux ui`, press **`v`** (or `/verify`). When the test slots are full or the machine is busy, ⏎ picks the push. The list shows how it went: `tests running`, `tests passed`, `pushed`…
+- **Runs.** Set `"runs"` to cap how many runs are alive at once. An extra `amux spawn` then returns right away as `queued` and starts by itself when another run ends, or when the machine has room again. `amux stop` cancels a queued run.
+
+```json
+{ "limits": { "test": 2, "build": 2, "dev": 1, "runs": 4, "maxLoad": 1.5, "minFreeMemMB": 2048 } }
+```
+
+The defaults are a quarter of the CPUs for `test` and `build`, 2 for `dev`, no limit on runs, `maxLoad` 1.5 and `minFreeMemMB` 1024. `0` means no limit.
 
 ### Privacy mode
 

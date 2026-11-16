@@ -10,6 +10,7 @@ use super::screen;
 use super::{
     load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, WATCH,
 };
+use crate::work::slots;
 use crate::{fsx, time};
 use anyhow::{anyhow, Result};
 use std::fs::{self, File};
@@ -103,7 +104,6 @@ struct Client {
 }
 
 /// Shared between the output pump and the clients.
-#[derive(Default)]
 struct Hub {
     clients: Vec<Client>,
     /// The CLI's screen, kept current, so a new client gets exactly what is on it.
@@ -112,6 +112,18 @@ struct Hub {
     notifier: Notifier,
     /// The host's copy of run.json, which it alone writes while the run is alive.
     run: Run,
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Hub {
+            clients: Vec::new(),
+            screen: screen::new_parser(24, 80, 0),
+            detector: Detector::default(),
+            notifier: Notifier::default(),
+            run: Run::default(),
+        }
+    }
 }
 
 impl Hub {
@@ -151,6 +163,7 @@ impl Hub {
         match change {
             None => return,
             Some(Change::Waiting(reason)) => {
+                crate::plugins::hook("waiting", &self.run.id, &reason);
                 if !self.attached() {
                     let msg = format!("Waiting for you: {reason}");
                     self.notifier
@@ -168,8 +181,43 @@ impl Hub {
     }
 }
 
+/// Waits for a `runs` slot when `"limits"` caps how many runs are alive, or the machine is
+/// too busy to start one more. The run shows as queued meanwhile. The slot is held until
+/// the host exits, which is when the CLI has.
+fn wait_for_slot(run: &mut Run) -> Result<slots::Slot> {
+    let me = slots::Holder {
+        pid: std::process::id(),
+        run: Some(run.id.clone()),
+        cmd: format!("{} {}", run.account, run.args.join(" ")),
+        cwd: Some(crate::paths::tildify(std::path::Path::new(&run.cwd))),
+        since: time::now_ms(),
+    };
+    let limit = slots::Limits::from_config().of(slots::RUNS);
+    let wait = slots::Wait {
+        timeout: None,
+        pressure: true,
+    };
+    let slot = slots::acquire(slots::RUNS, &me, &wait, |b| {
+        // Re-read: `amux stop` may have recorded something in between.
+        if let Ok(mut r) = load(&run.id) {
+            r.host_pid = Some(std::process::id());
+            r.queued = Some(Waiting {
+                reason: b.describe(slots::RUNS, limit),
+                since: run.queued.as_ref().map_or_else(time::now_ms, |q| q.since),
+                source: Some("slots".into()),
+            });
+            *run = r;
+            let _ = save(run);
+        }
+    })?
+    .ok_or_else(|| anyhow!("gave up waiting for a run slot"))?;
+    Ok(slot)
+}
+
 fn host(id: &str) -> Result<i32> {
     let mut run = load(id)?;
+    let _slot = wait_for_slot(&mut run)?;
+    run.queued = None;
     let dir = run_dir(id);
     // Bind by relative name: Unix socket paths are limited to about 100 bytes, and
     // AMUX_HOME can be longer than that. The CLI gets its own cwd below.
@@ -245,15 +293,17 @@ fn host(id: &str) -> Result<i32> {
     // keep the terminal open, so don't wait for that.
     let _ = done_rx.recv_timeout(Duration::from_millis(500));
     let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
+    // The final screen, for previews and `amux peek` after the run has ended. Saved before
+    // run.json says it ended, so no reader falls back to replaying the log in between.
+    let _ = fsx::write_atomic(&dir.join("screen.ans"), &screen::snapshot(&h.screen));
     h.run.exit_code = Some(code);
     h.run.ended_at = Some(time::now_ms());
     h.run.waiting = None;
     let record = h.detector.exited();
     h.set_status(record);
     save(&h.run)?;
-    // The final screen, for previews and `amux peek` after the run has ended.
-    let _ = fsx::write_atomic(&dir.join("screen.ans"), &screen::snapshot(&h.screen));
     let _ = fs::remove_file("sock");
+    crate::plugins::hook("exited", &h.run.id, &code.to_string());
     if !h.attached() {
         let msg = format!("Exited with code {code}");
         h.notifier.send(&h.run.id, "exited", &h.title(), &msg);
@@ -313,9 +363,11 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         // A client that can't keep up (write timeout) or has gone is dropped.
         h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
         let change = h.detector.feed(chunk);
-        h.apply(change);
+        // The CLI's own report first, so no reader sees "waiting" without the report that
+        // caused it (each saves run.json).
         let record = h.detector.take_record();
         h.set_status(record);
+        h.apply(change);
         // Tell the CLI that this terminal understands OSC 7501, so it reports its state.
         // Only live output gets here, never a replay, so each probe is answered once.
         let probed = h.detector.take_probe();
@@ -394,10 +446,9 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
                         let (rows, cols) = (rows.max(1), cols.max(1));
                         set_size(master.as_raw_fd(), rows, cols);
                         record_size(rows, cols);
-                        let nz = |n: u16| {
-                            std::num::NonZeroU16::new(n).unwrap_or(std::num::NonZeroU16::MIN)
-                        };
-                        lock(&hub).screen.set_size(nz(rows), nz(cols));
+                        lock(&hub)
+                            .screen
+                            .set_size(screen::nz(rows), screen::nz(cols));
                         // Also when the size didn't change, so the CLI redraws for the
                         // client that just attached.
                         unsafe { libc::killpg(pid as libc::pid_t, libc::SIGWINCH) };

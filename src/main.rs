@@ -1,20 +1,40 @@
 mod commands {
     pub mod account;
     #[cfg(unix)]
+    pub mod control;
+    #[cfg(unix)]
     pub mod explain;
+    #[cfg(unix)]
+    pub mod github;
     pub mod maintenance;
+    #[cfg(unix)]
+    pub mod plugin;
+    #[cfg(unix)]
+    pub mod review;
     #[cfg(unix)]
     pub mod runs;
     pub mod sessions;
+    pub mod skill;
+    #[cfg(unix)]
+    pub mod slot;
+    #[cfg(unix)]
+    pub mod verify;
 }
 mod fsx;
+mod git;
 mod launch;
 mod overlay;
 mod paths;
+#[cfg(unix)]
+mod plugins;
 mod providers;
+#[cfg(unix)]
+mod remote;
 #[cfg(unix)]
 mod runs;
 mod secrets;
+#[cfg(unix)]
+mod serve;
 mod sessions;
 mod store;
 #[cfg(test)]
@@ -24,6 +44,8 @@ mod time;
 mod ui;
 mod update;
 mod util;
+#[cfg(unix)]
+mod work;
 
 use anyhow::{bail, Result};
 use commands::{account, maintenance, sessions as session_cmds};
@@ -45,16 +67,37 @@ Accounts:
   amux account rm <provider>@<name> [--purge]
 
 Parallel runs (each CLI in the background, in its own terminal):
-  amux spawn [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
+  amux spawn [--on <machine>[:<dir>]] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
-  amux ps                                  List runs and whether each is working or idle
+      --on starts it on another machine; then name it <machine>:<run> anywhere a run goes.
+  amux ps [--json]                         List runs and whether each is working or idle
   amux explain <run> [--json]              Why a run shows its state, with the evidence
   amux attach <run>                        Connect this terminal to a run (Ctrl-] detaches)
   amux logs <run>                          Print everything a run has output
   amux peek <run>                          Print what is on a run's screen now
+  amux send <run> [--wait] <text...> | -   Type a prompt into a run and press Enter
+  amux wait <run>... [--until waiting|idle|exited] [--timeout <secs>]
+      Block until the runs need you, finish their turn (default) or exit; 124 on timeout
+  amux events [<run>...] [--text]          Stream state, verify and PR changes as JSON lines
+  amux diff <run> [--stat]                 What a run changed since its worktree started
+  amux pr <run> [--draft] [--base <b>]     Push a run's branch and open its pull request (gh)
+  amux checks <run> [--send-failures]      Its PR's CI checks; failures can go to the agent
+  amux comment <run> <file>:<line> <note>  A review comment on a line the run changed
+  amux comments <run> [--send | --rm <n> | --clear]
+      List a run's review comments, or send the pending ones to its agent as one message
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
   amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
   amux ui                                  Watch, attach to, start and stop runs in one screen
+  amux verify <run> [--test [--command <cmd>] | --push | --send-failures]
+      Check a finished run's work: run its tests here (waiting for a test slot),
+      or push its branch so CI runs them. With neither, says which is better now.
+
+Sharing the machine (tests, builds and dev servers from many worktrees):
+  amux slot [--class test|build|dev|<name>] [--timeout <secs>] [--no-wait] -- <command...>
+      Run a heavy command when a slot of its class is free and the machine isn't overloaded.
+      Exits 75 if no slot came free in time: try later, or push and let CI run it.
+  amux slots [--hook]                      Show slots, who holds them and who waits;
+                                           --hook prints a Claude Code hook that enforces them
 
 Sessions (shared across accounts):
   amux sessions [provider] [--here] [-n <count>]
@@ -67,6 +110,11 @@ Maintenance:
   amux env <provider>@<name>               Print exports, e.g. eval \"$(amux env claude@work)\"
   amux sync [<provider>@<name>] [--adopt]  Refresh overlay links; --adopt moves stray files to the shared home
   amux doctor                              Check binaries, shared homes and overlays
+  amux machine add <name> <user@host> | list | rm <name> | check <name>
+                                           Machines reached over SSH, with amux installed
+  amux serve [--listen <host:port>]        amux on your phone: runs, screens, replies (web app)
+  amux skill [--install]                   The agent skill for running other agents with amux
+  amux plugin list | new <name> | run <name>   Plugins (`amux <name>`) and hooks (~/.amux/hooks)
   amux update                              Check for a newer amux release
   amux --version
 
@@ -81,6 +129,12 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         Some("__update-check") => return Ok(update::internal_cmd(rest)),
         #[cfg(unix)]
         Some("__run-host") => return Ok(runs::host::main(rest)),
+        // Internal: carries a remote run's socket over SSH (remote.rs).
+        #[cfg(unix)]
+        Some("__pipe") => return Ok(remote::pipe_main(rest)),
+        // Internal: the Claude Code hook that `amux slots --hook` prints.
+        #[cfg(unix)]
+        Some("__slot-hook") => return Ok(commands::slot::hook_main()),
         Some("--version" | "-v" | "version") => {
             println!("{}", update::version());
             return Ok(0);
@@ -95,6 +149,11 @@ fn main_inner(argv: &[String]) -> Result<i32> {
 
     update::check_for_updates();
     let cmd = cmd.unwrap_or_default();
+    // `amux <cmd> <machine>:<run>`: the same command, on that machine.
+    #[cfg(unix)]
+    if let Some(r) = remote::forward(cmd, rest) {
+        return r;
+    }
     match cmd {
         "account" | "accounts" => account::account_cmd(rest),
         "run" => {
@@ -107,6 +166,13 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "env" => maintenance::env_cmd(rest),
         "sync" => maintenance::sync_cmd(rest),
         "doctor" => maintenance::doctor_cmd(),
+        "skill" => commands::skill::skill_cmd(rest),
+        #[cfg(unix)]
+        "machine" | "machines" => remote::machine_cmd(rest),
+        #[cfg(unix)]
+        "serve" => serve::serve_cmd(rest),
+        #[cfg(unix)]
+        "plugin" | "plugins" => commands::plugin::plugin_cmd(rest),
         #[cfg(unix)]
         "spawn" => commands::runs::spawn_cmd(rest),
         #[cfg(unix)]
@@ -125,8 +191,32 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "ui" => ui::ui_cmd(rest),
         #[cfg(unix)]
         "explain" => commands::explain::explain_cmd(rest),
+        #[cfg(unix)]
+        "slot" => commands::slot::slot_cmd(rest),
+        #[cfg(unix)]
+        "slots" => commands::slot::slots_cmd(rest),
+        #[cfg(unix)]
+        "verify" => commands::verify::verify_cmd(rest),
+        #[cfg(unix)]
+        "send" => commands::control::send_cmd(rest),
+        #[cfg(unix)]
+        "wait" => commands::control::wait_cmd(rest),
+        #[cfg(unix)]
+        "events" => commands::control::events_cmd(rest),
+        #[cfg(unix)]
+        "diff" => commands::control::diff_cmd(rest),
+        #[cfg(unix)]
+        "pr" => commands::github::pr_cmd(rest),
+        #[cfg(unix)]
+        "checks" => commands::github::checks_cmd(rest),
+        #[cfg(unix)]
+        "comment" => commands::review::comment_cmd(rest),
+        #[cfg(unix)]
+        "comments" => commands::review::comments_cmd(rest),
         #[cfg(not(unix))]
-        "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" => {
+        "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
+        | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
+        | "comment" | "comments" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {
@@ -134,6 +224,11 @@ fn main_inner(argv: &[String]) -> Result<i32> {
             let provider = cmd.split('@').next().unwrap_or_default();
             if store::load_providers()?.iter().any(|p| p.id == provider) {
                 return launch::run(&store::resolve_account(cmd)?, rest, None);
+            }
+            #[cfg(unix)]
+            if let Some(p) = plugins::find(cmd) {
+                let run = std::env::var("AMUX_RUN").ok();
+                return plugins::run(&p, rest, run.as_deref());
             }
             bail!("Unknown command \"{cmd}\". See `amux help`.")
         }
