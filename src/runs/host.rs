@@ -363,9 +363,11 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         // A client that can't keep up (write timeout) or has gone is dropped.
         h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
         let change = h.detector.feed(chunk);
-        h.apply(change);
+        // The CLI's own report first, so no reader sees "waiting" without the report that
+        // caused it (each saves run.json).
         let record = h.detector.take_record();
         h.set_status(record);
+        h.apply(change);
         // Tell the CLI that this terminal understands OSC 7501, so it reports its state.
         // Only live output gets here, never a replay, so each probe is answered once.
         let probed = h.detector.take_probe();
