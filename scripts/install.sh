@@ -45,7 +45,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 archive="amux-$target.tar.gz"
-echo "Downloading $archive…"
+echo "Downloading ${archive}..."
 fetch "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
 fetch "$base/$archive.sha256" "$tmp/$archive.sha256" || fail "checksum download failed"
 
