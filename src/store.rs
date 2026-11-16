@@ -276,3 +276,56 @@ pub fn home_env_value(spec: &ProviderSpec, a: &Account) -> PathBuf {
 pub fn ensure_amux_home() -> Result<()> {
     Ok(fsx::mkdir_private(&paths::AMUX_HOME)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cfg(v: Value) -> Config {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn has_the_builtins_with_expanded_homes() {
+        let p = load_providers_from(&Config::default()).unwrap();
+        assert_eq!(
+            p.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["claude", "codex", "gemini"]
+        );
+        assert_eq!(p[0].shared_home, paths::HOME.join(".claude"));
+    }
+
+    #[test]
+    fn merges_overrides_and_adds_custom_providers() {
+        let p = load_providers_from(&cfg(json!({"providers": [
+            {"id": "claude", "sharedHome": "~/.claude-work"},
+            {"id": "my", "bin": "mycli", "sharedHome": "~/.my", "homeEnv": "MY_HOME"}
+        ]})))
+        .unwrap();
+        assert_eq!(p[0].shared_home, paths::HOME.join(".claude-work"));
+        assert_eq!(p[0].home_env, "CLAUDE_CONFIG_DIR", "keeps built-in fields");
+        let my = p.iter().find(|s| s.id == "my").unwrap();
+        assert_eq!(my.label, "my");
+        assert_eq!(my.home_env_points, HomeEnvPoints::Home);
+        assert!(my.private_entries.is_empty());
+    }
+
+    #[test]
+    fn rejects_incomplete_providers() {
+        let err = load_providers_from(&cfg(json!({"providers": [{"id": "broken", "bin": "x"}]})))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("missing: sharedHome, homeEnv"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_account_fields() {
+        let a: Account = serde_json::from_value(json!({"provider": "claude", "name": "w", "auth": "login", "createdAt": "x", "future": 1})).unwrap();
+        let back = serde_json::to_value(&a).unwrap();
+        assert_eq!(back["future"], 1);
+        assert!(back.get("privacy").is_none());
+    }
+}

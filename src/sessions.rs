@@ -431,3 +431,159 @@ pub fn build_handoff(s: &SessionInfo, turns: &[Turn], budget: usize) -> String {
     out.extend(body);
     out.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{jsonl, spec, write, TempDir};
+    use serde_json::json;
+
+    fn session_spec(format: &str, home: &Path) -> ProviderSpec {
+        let mut s = spec(format, home);
+        s.sessions = Some(format.into());
+        s
+    }
+
+    fn turn(role: Role, text: &str) -> Turn {
+        Turn {
+            role,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn lists_claude_sessions_skipping_wrappers_meta_and_subagents() {
+        let home = TempDir::new();
+        write(
+            &home.path().join("projects/-work-app/11111111-aaaa.jsonl"),
+            &jsonl(&[
+                json!({"type": "user", "cwd": "/work/app", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}}),
+                json!({"type": "user", "cwd": "/work/app", "message": {"role": "user", "content": "Fix the login bug"}}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking at auth.ts"}, {"type": "tool_use", "name": "Read"}]}}),
+                json!({"type": "user", "isMeta": true, "message": {"role": "user", "content": "meta"}}),
+            ]),
+        );
+        write(
+            &home.path().join("projects/-work-app/subagents/x.jsonl"),
+            &jsonl(&[json!({"type": "user", "message": {"role": "user", "content": "sub"}})]),
+        );
+        let list = list_sessions(&session_spec("claude", home.path()));
+        assert_eq!(list.len(), 1);
+        let s = &list[0];
+        assert_eq!(s.id, "11111111-aaaa");
+        assert_eq!(s.cwd.as_deref(), Some("/work/app"));
+        assert_eq!(s.title, "Fix the login bug");
+        assert_eq!(
+            read_turns(s, Some("claude")).unwrap(),
+            [
+                turn(Role::User, "Fix the login bug"),
+                turn(Role::Assistant, "Looking at auth.ts")
+            ]
+        );
+    }
+
+    #[test]
+    fn lists_codex_sessions_dropping_injected_context_and_duplicates() {
+        let home = TempDir::new();
+        let prompt = json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Add tests"}]}});
+        write(
+            &home.path().join("sessions/2026/01/02/rollout-x.jsonl"),
+            &jsonl(&[
+                json!({"type": "session_meta", "payload": {"id": "codex-1", "cwd": "/work/api"}}),
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md\nrules"}]}}),
+                prompt.clone(),
+                prompt,
+                json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]}}),
+            ]),
+        );
+        // A session whose id is not a string is skipped instead of breaking the list.
+        write(
+            &home.path().join("sessions/2026/01/03/rollout-y.jsonl"),
+            &jsonl(&[
+                json!({"type": "session_meta", "payload": {"id": 123}}),
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "hi"}}),
+            ]),
+        );
+        let list = list_sessions(&session_spec("codex", home.path()));
+        assert_eq!(list.len(), 1);
+        let s = &list[0];
+        assert_eq!(
+            (s.id.as_str(), s.cwd.as_deref(), s.title.as_str()),
+            ("codex-1", Some("/work/api"), "Add tests")
+        );
+        assert_eq!(
+            read_turns(s, Some("codex")).unwrap(),
+            [turn(Role::User, "Add tests"), turn(Role::Assistant, "Done")]
+        );
+    }
+
+    #[test]
+    fn lists_gemini_sessions_with_their_project_dir() {
+        let home = TempDir::new();
+        write(
+            &home.path().join("projects.json"),
+            &json!({"projects": {"/work/web": "web"}}).to_string(),
+        );
+        write(
+            &home.path().join("tmp/web/chats/session-1.json"),
+            &json!({
+                "sessionId": "gem-1",
+                "lastUpdated": "2026-03-04T05:06:07.000Z",
+                "messages": [{"type": "user", "content": "Style the page"}, {"type": "gemini", "content": "Sure"}]
+            })
+            .to_string(),
+        );
+        let list = list_sessions(&session_spec("gemini", home.path()));
+        assert_eq!(list.len(), 1);
+        let s = &list[0];
+        assert_eq!(
+            (s.id.as_str(), s.cwd.as_deref(), s.title.as_str()),
+            ("gem-1", Some("/work/web"), "Style the page")
+        );
+        assert_eq!(time::iso(s.updated_at), "2026-03-04T05:06:07.000Z");
+    }
+
+    fn info() -> SessionInfo {
+        SessionInfo {
+            provider: "codex".into(),
+            id: "codex-1".into(),
+            cwd: Some("/work/api".into()),
+            title: "t".into(),
+            updated_at: 0,
+            file: "/f.jsonl".into(),
+        }
+    }
+
+    #[test]
+    fn handoff_keeps_the_first_prompt_and_recent_turns() {
+        let mut turns = vec![turn(Role::User, "ORIGINAL REQUEST")];
+        for i in 0..50 {
+            turns.push(turn(
+                if i % 2 == 1 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &format!("turn {i} {}", "x".repeat(200)),
+            ));
+        }
+        let out = build_handoff(&info(), &turns, 2_000);
+        assert!(out.contains("ORIGINAL REQUEST"));
+        assert!(out.contains("earlier turns omitted"));
+        assert!(out.contains("turn 49 "));
+        assert!(!out.contains("turn 0 "));
+    }
+
+    #[test]
+    fn handoff_keeps_the_tail_of_an_oversized_turn() {
+        let out = build_handoff(
+            &info(),
+            &[
+                turn(Role::User, "ask"),
+                turn(Role::Assistant, &("a".repeat(10_000) + "THE END")),
+            ],
+            3_000,
+        );
+        assert!(out.contains("THE END"));
+    }
+}

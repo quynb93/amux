@@ -11,6 +11,8 @@ mod providers;
 mod secrets;
 mod sessions;
 mod store;
+#[cfg(test)]
+mod testutil;
 mod time;
 mod update;
 mod util;

@@ -158,14 +158,18 @@ pub fn check_for_updates() {
     }
 }
 
-/// The command that upgrades this copy of amux, based on where it is installed:
-/// Homebrew keeps formulae under a Cellar directory; everything else gets the release package.
+/// The command that upgrades this copy of amux, based on where its binary lives:
+/// Homebrew keeps formulae under a Cellar directory, npm under node_modules, and
+/// anything else came from the install script (or a manual download).
 pub fn upgrade_command(install_path: &str, latest: &str) -> String {
     let p = install_path.replace('\\', "/");
     if p.contains("/Cellar/amux/") {
-        return "brew upgrade amux".into();
+        "brew upgrade amux".into()
+    } else if p.contains("/node_modules/") {
+        format!("npm install -g @quynb/amux@{latest}")
+    } else {
+        format!("curl -fsSL https://github.com/{REPO}/releases/latest/download/install.sh | sh")
     }
-    format!("npm install -g https://github.com/{REPO}/releases/download/v{latest}/amux.tgz")
 }
 
 /// `amux update`: checks now and prints how to upgrade.
@@ -226,20 +230,28 @@ mod tests {
 
     #[test]
     fn picks_the_upgrade_command() {
+        let brew = "brew upgrade amux";
         assert_eq!(
-            upgrade_command("/opt/homebrew/Cellar/amux/0.1.1/bin/amux", "0.2.0"),
-            "brew upgrade amux"
+            upgrade_command("/opt/homebrew/Cellar/amux/0.2.0/bin/amux", "0.3.0"),
+            brew
         );
         assert_eq!(
             upgrade_command(
-                "/home/linuxbrew/.linuxbrew/Cellar/amux/0.1.1/bin/amux",
-                "0.2.0"
+                "/home/linuxbrew/.linuxbrew/Cellar/amux/0.2.0/bin/amux",
+                "0.3.0"
             ),
-            "brew upgrade amux"
+            brew
         );
         assert_eq!(
-            upgrade_command("/usr/local/lib/node_modules/@quynb/amux/bin/amux", "0.2.0"),
-            "npm install -g https://github.com/quynb93/amux/releases/download/v0.2.0/amux.tgz"
+            upgrade_command(
+                "/usr/local/lib/node_modules/@quynb/amux/native/x86_64-apple-darwin/amux",
+                "0.3.0"
+            ),
+            "npm install -g @quynb/amux@0.3.0"
+        );
+        assert_eq!(
+            upgrade_command("/home/me/.local/bin/amux", "0.3.0"),
+            "curl -fsSL https://github.com/quynb93/amux/releases/latest/download/install.sh | sh"
         );
     }
 }

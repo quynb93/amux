@@ -1,67 +1,131 @@
 name: Release
 
-# Push a tag like v0.2.0 to publish a GitHub release. The tag must match
-# "version" in package.json, and CHANGELOG.md must have a "## [0.2.0]" section.
+# Push a tag like v0.2.0 to publish a release. The tag must match "version" in
+# Cargo.toml and npm/package.json, and CHANGELOG.md must have a "## [0.2.0]" section.
+# Run it by hand (workflow_dispatch) to build and package everything without publishing.
 #
 # Optional repo secrets turn on more channels; without them those steps are skipped:
 #   TAP_DEPLOY_KEY  SSH deploy key with write access to quynb93/homebrew-tap
-#   NPM_TOKEN       npm automation token that can publish @quynb/amux
+#   NPM_TOKEN       npm token that can publish @quynb/amux
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write # create the GitHub release
-  id-token: write # npm provenance
+  contents: read
 
 jobs:
-  release:
+  check:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check versions and changelog
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          npm_version="$(node -p 'require("./npm/package.json").version')"
+          [ "$version" = "$npm_version" ] || { echo "::error::Cargo.toml ($version) and npm/package.json ($npm_version) disagree"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version"; exit 1
+          fi
+          grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for [$version]"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  build:
+    needs: check
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          bin="target/${{ matrix.target }}/release/amux"
+          file "$bin"
+          # The x86_64 macOS build can't run on the arm64 runner without Rosetta.
+          if [ "${{ matrix.target }}" != x86_64-apple-darwin ]; then "$bin" --version; fi
+          archive="amux-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" amux
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amux-${{ matrix.target }}
+          path: amux-${{ matrix.target }}.tar.gz*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm provenance
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
           registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
-      - name: Check the tag matches package.json
+      # The npm package carries every platform's binary, so installing it runs no scripts.
+      - name: Build the npm package
         run: |
-          pkg="v$(node -p 'require("./package.json").version')"
-          if [ "$pkg" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
-            exit 1
-          fi
-
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+          for archive in dist/amux-*.tar.gz; do
+            target="$(basename "$archive" .tar.gz)"; target="${target#amux-}"
+            mkdir -p "npm/native/$target"
+            tar -xzf "$archive" -C "npm/native/$target"
+            chmod 755 "npm/native/$target/amux"
+          done
+          cp README.md LICENSE npm/
+          (cd npm && npm pack)
+          mv npm/quynb-amux-*.tgz dist/amux.tgz
+          cp scripts/install.sh dist/install.sh
+          prefix="$(mktemp -d)"
+          npm install -g --prefix "$prefix" ./dist/amux.tgz
+          "$prefix/bin/amux" --version
+          ls -l dist
 
       - name: Extract release notes from CHANGELOG.md
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$(node -p 'require("./npm/package.json").version')"
           awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { found = 1; next }
             found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then
-            echo "::error::CHANGELOG.md has no section for [$version]"
-            exit 1
-          fi
+          cat notes.md
 
-      # Users install this prebuilt package, so nothing has to compile on their machine.
-      - name: Build the package
-        run: |
-          npm pack
-          mv quynb-amux-*.tgz amux.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist
 
       - name: Create the GitHub release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" amux.tgz --title "amux $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "amux $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
 
       - name: Update the Homebrew tap
+        if: github.ref_type == 'tag'
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
@@ -69,32 +133,24 @@ jobs:
             echo "::notice::TAP_DEPLOY_KEY is not set; skipping the Homebrew tap update"
             exit 0
           fi
-          version="${GITHUB_REF_NAME#v}"
-          sha="$(sha256sum amux.tgz | cut -d' ' -f1)"
           key="$RUNNER_TEMP/tap_key"
           trap 'rm -f "$key"' EXIT
           (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           git clone --depth 1 git@github.com:quynb93/homebrew-tap.git "$RUNNER_TEMP/tap"
+          sh scripts/homebrew-formula.sh "$GITHUB_REF_NAME" dist > "$RUNNER_TEMP/tap/Formula/amux.rb"
           cd "$RUNNER_TEMP/tap"
-          sed -i -E \
-            -e "s#^(  url \").*(\")#\1https://github.com/quynb93/amux/releases/download/v${version}/amux.tgz\2#" \
-            -e "s#^(  sha256 \").*(\")#\1${sha}\2#" \
-            Formula/amux.rb
-          if ! grep -qF "releases/download/v${version}/amux.tgz" Formula/amux.rb || ! grep -qF "\"${sha}\"" Formula/amux.rb; then
-            echo "::error::Formula/amux.rb has no url or sha256 line in the expected format"
-            exit 1
-          fi
           if git diff --quiet; then
-            echo "::notice::The Homebrew formula is already at ${version}"
+            echo "::notice::The Homebrew formula is already at $GITHUB_REF_NAME"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "amux ${version}"
+          git commit -am "amux ${GITHUB_REF_NAME#v}"
           git push
 
       - name: Publish to npm
+        if: github.ref_type == 'tag'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -102,5 +158,5 @@ jobs:
             echo "::notice::NPM_TOKEN is not set; skipping npm publish"
             exit 0
           fi
-          # Publish the same tarball the GitHub release and Homebrew use, instead of rebuilding it.
-          npm publish amux.tgz --provenance --access public
+          # Publish the same tarball the GitHub release carries.
+          npm publish dist/amux.tgz --provenance --access public

@@ -1,0 +1,17 @@
+{
+  "name": "@quynb/amux",
+  "version": "0.2.0",
+  "description": "Run Claude Code, Codex and Gemini CLI with many accounts over one shared home",
+  "license": "MIT",
+  "author": "quynb93",
+  "homepage": "https://github.com/quynb93/amux#readme",
+  "repository": "github:quynb93/amux",
+  "bugs": "https://github.com/quynb93/amux/issues",
+  "keywords": ["claude", "claude-code", "codex", "gemini", "cli", "accounts", "ai"],
+  "bin": { "amux": "bin/amux.js" },
+  "files": ["bin", "native"],
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "engines": { "node": ">=18" },
+  "publishConfig": { "access": "public", "provenance": true }
+}

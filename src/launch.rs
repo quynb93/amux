@@ -249,3 +249,71 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+    use crate::store::load_providers_from;
+
+    fn acct(provider: &str) -> Account {
+        serde_json::from_value(serde_json::json!({"provider": provider, "name": "work", "auth": "login", "createdAt": "x"})).unwrap()
+    }
+
+    fn spec(id: &str) -> ProviderSpec {
+        load_providers_from(&Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn points_at_the_overlay_and_drops_inherited_account_vars() {
+        let env = build_env(&spec("claude"), &acct("claude")).unwrap();
+        assert!(env
+            .get("CLAUDE_CONFIG_DIR")
+            .unwrap()
+            .ends_with("/accounts/claude/work/.claude"));
+        assert_eq!(env.get("AMUX_ACCOUNT"), Some("claude@work"));
+        assert_eq!(
+            env.get("DISABLE_TELEMETRY"),
+            None,
+            "privacy is off by default"
+        );
+        assert!(env.remove.contains(&"CLAUDE_CODE_OAUTH_TOKEN".to_string()));
+        let codex = build_env(&spec("codex"), &acct("codex")).unwrap();
+        assert!(
+            codex.remove.contains(&"OPENAI_API_KEY".to_string()),
+            "login accounts don't inherit the shell's key"
+        );
+    }
+
+    #[test]
+    fn adds_privacy_and_base_url() {
+        let mut a = acct("claude");
+        a.privacy = Some(true);
+        a.base_url = Some("https://gw.example.com".into());
+        let env = build_env(&spec("claude"), &a).unwrap();
+        assert_eq!(env.get("DISABLE_TELEMETRY"), Some("1"));
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL"),
+            Some("https://gw.example.com")
+        );
+    }
+
+    #[test]
+    fn gemini_points_at_the_parent_and_has_no_base_url() {
+        let env = build_env(&spec("gemini"), &acct("gemini")).unwrap();
+        assert!(env
+            .get("GEMINI_CLI_HOME")
+            .unwrap()
+            .ends_with("/accounts/gemini/work"));
+        let mut a = acct("gemini");
+        a.base_url = Some("https://x.example.com".into());
+        assert!(build_env(&spec("gemini"), &a)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("no base-URL env var"));
+    }
+}
