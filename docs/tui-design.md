@@ -110,7 +110,7 @@ These are the same signals as `amux ps`, so the two never disagree. Rows keep th
 `ui/preview.rs`. A preview is an ordinary host client:
 
 1. It connects to `runs/<id>/sock` and sends `WATCH [1]` as its first bytes. When the path is longer than the socket limit, it connects through a short symlink in a fresh mode-0700 folder under `/tmp`. Unlike `amux attach`, the UI never changes its working directory, because the background `amux spawn` commands inherit it.
-2. The host replays its 256 KB buffer, then streams live output. A reader thread feeds both into a `vt100::Parser` sized to the run's terminal, which it reads from the host's `size` file, falling back to `run.json`.
+2. The host sends a snapshot of its current screen, then streams live output. A reader thread feeds both into a `vt100::Parser` sized to the run's terminal, which it reads from the host's `size` file, falling back to `run.json`.
 3. Replay starts at a line boundary, so it can begin in the middle of a full-screen redraw. To repair that, the preview sends a `RESIZE` with the run's *current* size: nothing moves, and the CLI redraws (SIGWINCH). This is skipped for hosts from before 0.5, which don't publish `size`. That way the preview can never resize a run to a guessed size.
 4. Drawing crops the emulator's screen to the pane, keeping the bottom of the content (or the cursor) in view, since that is where CLIs ask questions. The run is **not** resized to the pane. Shrinking an agent to a 60-column box would make it reflow, and you would attach to a squashed transcript.
 5. A finished run's preview is the tail of its log through the same emulator.
@@ -175,7 +175,7 @@ There is no prefix key: the list has the keyboard, and the CLI has it only while
 
 | Cost | Per run | Notes |
 |---|---|---|
-| Host process | 1 small process, 3 threads, ≤256 KB buffer | Unchanged by the UI |
+| Host process | 1 small process, 3 threads, one emulated screen | Unchanged by the UI |
 | List refresh | 1 small JSON read and 1 `stat` every 500 ms | 20 runs: 40 syscalls per tick |
 | Sockets and parsers | 0, except the ≤4 previewed runs | Hidden runs cost the UI nothing |
 | Drawing | Only on change; the list is a scrolling `ListState` | Two rows per run |

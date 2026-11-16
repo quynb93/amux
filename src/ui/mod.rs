@@ -107,10 +107,35 @@ pub fn ui_cmd(argv: &[String]) -> Result<i32> {
     if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
         bail!("amux ui needs a terminal. Use `amux ps` in scripts.");
     }
+    app.guard = true;
     let mut term = ratatui::try_init()?;
     let r = app.run(&mut term);
     ratatui::restore();
     r.map(|_| 0)
+}
+
+/// Keys that do something in the list.
+fn is_shortcut(c: char) -> bool {
+    c.is_ascii_digit()
+        || matches!(
+            c,
+            'q' | 'j'
+                | 'k'
+                | 'g'
+                | 'G'
+                | 'a'
+                | 'n'
+                | 's'
+                | 'S'
+                | 'd'
+                | 'D'
+                | 'x'
+                | 'f'
+                | 'e'
+                | '/'
+                | ':'
+                | '?'
+        )
 }
 
 fn parse_dims(s: &str) -> Option<(u16, u16)> {
@@ -249,7 +274,19 @@ struct App {
     deferred: Option<OutputView>,
     quit: bool,
     started: Instant,
+    /// Guards against text typed into the list by mistake (see `key_normal`). Off for
+    /// `--dump`, where keys come all at once.
+    guard: bool,
+    /// Until then, letters are taken as typing, not shortcuts.
+    typing_until: Option<Instant>,
+    /// When the open confirmation appeared.
+    confirm_at: Instant,
 }
+
+/// How long letters count as typing after one that isn't a shortcut.
+const TYPING: Duration = Duration::from_millis(1200);
+/// Keys this soon after a confirmation opens were typed before you could read it.
+const CONFIRM_GUARD: Duration = Duration::from_millis(500);
 
 impl App {
     fn new(theme: Theme) -> Self {
@@ -277,6 +314,9 @@ impl App {
             deferred: None,
             quit: false,
             started: Instant::now(),
+            guard: false,
+            typing_until: None,
+            confirm_at: Instant::now(),
         }
     }
 
@@ -572,6 +612,14 @@ impl App {
             self.quit = true;
             return;
         }
+        let was_confirm = matches!(self.mode, Mode::Confirm(_));
+        self.key_mode(k);
+        if !was_confirm && matches!(self.mode, Mode::Confirm(_)) {
+            self.confirm_at = Instant::now();
+        }
+    }
+
+    fn key_mode(&mut self, k: KeyEvent) {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Normal => self.key_normal(k),
             Mode::Help => {}
@@ -591,6 +639,10 @@ impl App {
                 }
                 self.mode = Mode::Output(o);
             }
+            // Typed ahead, before the question could be read: neither yes nor no.
+            Mode::Confirm(c) if self.guard && self.confirm_at.elapsed() < CONFIRM_GUARD => {
+                self.mode = Mode::Confirm(c);
+            }
             Mode::Confirm(c) => match k.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     let what = c.question();
@@ -608,6 +660,26 @@ impl App {
 
     fn key_normal(&mut self, k: KeyEvent) {
         let cur = self.current().map(|r| (r.run.id.clone(), r.kind));
+        // Letters in the list are shortcuts, so text meant for a run would open dialogs
+        // and panels (and "sky" would stop it). A letter that isn't a shortcut starts a
+        // short typing window: until it ends, letters only repeat how to type into the run.
+        if let KeyCode::Char(c) = k.code {
+            let plain = !k
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            let typing = self.typing_until.is_some_and(|t| Instant::now() < t);
+            if plain && self.guard && (typing || !is_shortcut(c)) {
+                self.typing_until = Some(Instant::now() + TYPING);
+                let hint = match &cur {
+                    Some((id, kind)) if kind.is_live() => {
+                        format!("Letters here are shortcuts. Press ⏎ to type into {id}; Ctrl-] comes back.")
+                    }
+                    _ => "Letters here are shortcuts; ? lists them.".to_string(),
+                };
+                self.say(hint, false);
+                return;
+            }
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
@@ -1048,6 +1120,10 @@ impl App {
     /// One frame rendered off screen, as text. Waits briefly for the selected run's
     /// preview to receive the host's replay.
     fn dump(&mut self, rows: u16, cols: u16, ansi: bool) -> Vec<String> {
+        // Previews connect while drawing, so draw once to start them, then let the hosts'
+        // screens arrive before the frame that is printed.
+        let Ok(mut warm) = Terminal::new(TestBackend::new(cols, rows));
+        let Ok(_) = warm.draw(|f| self.draw(f));
         let deadline = Instant::now() + Duration::from_millis(1500);
         let mut quiet_since = Instant::now();
         while self.previews.any_live() && Instant::now() < deadline {

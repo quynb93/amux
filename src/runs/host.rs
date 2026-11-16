@@ -6,12 +6,12 @@
 use super::detect::{Change, Detector};
 use super::notify::Notifier;
 use super::program::{Report, PROBE_REPLY};
+use super::screen;
 use super::{
     load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, WATCH,
 };
 use crate::{fsx, time};
 use anyhow::{anyhow, Result};
-use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -23,8 +23,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// Output kept in memory and replayed to a client when it attaches.
-const RECENT: usize = 256 * 1024;
 const LOG_ROTATE: u64 = 4 * 1024 * 1024;
 
 pub fn main(args: &[String]) -> i32 {
@@ -108,8 +106,8 @@ struct Client {
 #[derive(Default)]
 struct Hub {
     clients: Vec<Client>,
-    recent: VecDeque<u8>,
-    trimmed: bool,
+    /// The CLI's screen, kept current, so a new client gets exactly what is on it.
+    screen: screen::Parser,
     detector: Detector,
     notifier: Notifier,
     /// The host's copy of run.json, which it alone writes while the run is alive.
@@ -218,6 +216,7 @@ fn host(id: &str) -> Result<i32> {
         detector: Detector::new(&run.waiting_patterns),
         notifier: Notifier::from_config(),
         run: run.clone(),
+        screen: screen::new_parser(run.rows.max(1), run.cols.max(1), 0),
         ..Default::default()
     }));
     let (done_tx, done_rx) = mpsc::channel::<()>();
@@ -252,6 +251,8 @@ fn host(id: &str) -> Result<i32> {
     let record = h.detector.exited();
     h.set_status(record);
     save(&h.run)?;
+    // The final screen, for previews and `amux peek` after the run has ended.
+    let _ = fsx::write_atomic(&dir.join("screen.ans"), &screen::snapshot(&h.screen));
     let _ = fs::remove_file("sock");
     if !h.attached() {
         let msg = format!("Exited with code {code}");
@@ -308,12 +309,7 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         let chunk = &buf[..n];
         log.write(chunk);
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
-        h.recent.extend(chunk);
-        if h.recent.len() > RECENT {
-            let over = h.recent.len() - RECENT;
-            h.recent.drain(..over);
-            h.trimmed = true;
-        }
+        h.screen.process(chunk);
         // A client that can't keep up (write timeout) or has gone is dropped.
         h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
         let change = h.detector.feed(chunk);
@@ -327,19 +323,6 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         if probed {
             let _ = (&*master).write_all(PROBE_REPLY);
         }
-    }
-}
-
-/// What a new client sees first: the recent output, starting at a line boundary when
-/// older output was dropped, so it doesn't begin in the middle of an escape sequence.
-fn replay(h: &Hub) -> Vec<u8> {
-    let data: Vec<u8> = h.recent.iter().copied().collect();
-    if !h.trimmed {
-        return data;
-    }
-    match data.iter().position(|&b| b == b'\n') {
-        Some(i) => data[i + 1..].to_vec(),
-        None => vec![],
     }
 }
 
@@ -372,6 +355,10 @@ fn watch_frame(d: &[u8]) -> Option<bool> {
     }
 }
 
+fn lock(hub: &Mutex<Hub>) -> std::sync::MutexGuard<'_, Hub> {
+    hub.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let Ok(mut out) = stream.try_clone() else {
@@ -380,7 +367,8 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
     let watching = Arc::new(AtomicBool::new(leading_watch(&stream)));
     {
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
-        if out.write_all(&replay(&h)).is_err() {
+        // The current screen first, then live output from the same point on.
+        if out.write_all(&screen::snapshot(&h.screen)).is_err() {
             return;
         }
         h.clients.push(Client {
@@ -397,14 +385,19 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
                     if (&*master).write_all(&data).is_err() {
                         break;
                     }
-                    let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut h = lock(&hub);
                     let change = h.detector.answered();
                     h.apply(change);
                 }
                 RESIZE => {
                     if let Some((rows, cols)) = parse_size(&data) {
-                        set_size(master.as_raw_fd(), rows.max(1), cols.max(1));
-                        record_size(rows.max(1), cols.max(1));
+                        let (rows, cols) = (rows.max(1), cols.max(1));
+                        set_size(master.as_raw_fd(), rows, cols);
+                        record_size(rows, cols);
+                        let nz = |n: u16| {
+                            std::num::NonZeroU16::new(n).unwrap_or(std::num::NonZeroU16::MIN)
+                        };
+                        lock(&hub).screen.set_size(nz(rows), nz(cols));
                         // Also when the size didn't change, so the CLI redraws for the
                         // client that just attached.
                         unsafe { libc::killpg(pid as libc::pid_t, libc::SIGWINCH) };
@@ -422,12 +415,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replays_from_a_line_boundary_once_trimmed() {
-        let mut h = Hub::default();
-        h.recent.extend(b"\x1b[3partial\nline two\n");
-        assert_eq!(replay(&h), b"\x1b[3partial\nline two\n");
-        h.trimmed = true;
-        assert_eq!(replay(&h), b"line two\n");
+    fn new_clients_get_the_current_screen_not_a_slice_of_output() {
+        let mut h = Hub {
+            screen: screen::new_parser(4, 20, 0),
+            ..Default::default()
+        };
+        h.screen.process(b"one\r\ntwo\r\n\x1b[2A\r\x1b[Kuno");
+        let mut client = screen::new_parser(4, 20, 0);
+        client.process(&screen::snapshot(&h.screen));
+        assert_eq!(screen::text(&client), ["uno", "two"]);
     }
 
     #[test]

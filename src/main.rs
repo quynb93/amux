@@ -51,6 +51,7 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux explain <run> [--json]              Why a run shows its state, with the evidence
   amux attach <run>                        Connect this terminal to a run (Ctrl-] detaches)
   amux logs <run>                          Print everything a run has output
+  amux peek <run>                          Print what is on a run's screen now
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
   amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
   amux ui                                  Watch, attach to, start and stop runs in one screen
@@ -115,6 +116,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "logs" => commands::runs::logs_cmd(rest),
         #[cfg(unix)]
+        "peek" => commands::runs::peek_cmd(rest),
+        #[cfg(unix)]
         "stop" => commands::runs::stop_cmd(rest),
         #[cfg(unix)]
         "rm" => commands::runs::rm_cmd(rest),
@@ -123,7 +126,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "explain" => commands::explain::explain_cmd(rest),
         #[cfg(not(unix))]
-        "spawn" | "ps" | "attach" | "logs" | "stop" | "rm" | "ui" | "explain" => {
+        "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {
