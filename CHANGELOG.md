@@ -8,6 +8,8 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 - `amux ui`: one screen for all your runs. A list with live state (working, waiting, idle, done), a live preview of the selected run's screen, Enter to attach in place (Ctrl-] comes back to the list), Tab to jump to the next run that needs you, and keys to start (`n`), stop (`s`) and remove (`d`) runs. Quitting the UI leaves every run going.
 
+- Runs read the state a CLI reports about itself with OSC 7501 (the Program Status Protocol). Codex sends it, and Claude Code 2.1.295 and later sends it once asked, which the run host now does. `amux ps` and `amux ui` then show the CLI's own state: `waiting` with its message (such as "approve Write: a.rs"), `running`, `idle` when the turn is done, or `error`. This replaces guessing from prompt text and output timing for those CLIs. The state is saved in `run.json` as `status`.
+
 ### Changed
 
 - The run host takes a new `WATCH` message from clients that only show a run's screen, such as the preview in `amux ui`. They don't count as attached, so the desktop notification still goes out. Older hosts ignore the message.

@@ -10,6 +10,7 @@ pub mod attach;
 pub mod detect;
 pub mod host;
 pub mod notify;
+pub mod program;
 
 use crate::store::{read_json, write_json};
 use crate::{fsx, paths, time};
@@ -52,6 +53,24 @@ pub struct Run {
     /// Set by the host while the CLI is waiting for you.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Waiting>,
+    /// What the CLI last reported about itself with OSC 7501, if it reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProgramStatus>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramStatus {
+    /// idle, working, blocked, done or error.
+    pub state: String,
+    /// For blocked: permission, question or auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// What the CLI is doing or asking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// When it entered this state.
+    pub since: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

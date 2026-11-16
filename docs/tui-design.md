@@ -23,7 +23,7 @@ target/debug/amux ui
 
 **Left to do**, in order of value. Each is covered in [Next steps](#next-steps):
 
-1. OSC 7501 program status in the host, so state is reported by the agent, not guessed.
+1. ~~OSC 7501 program status in the host~~ **Done.** See Next steps.
 2. `/` search and state filters (`b`/`w`/`i`/`d`, after herdr's goto picker).
 3. A switch key while attached, so you can move to the next waiting run without going back to the list.
 4. Host-pushed state events, instead of polling `run.json` every 500 ms.
@@ -206,7 +206,25 @@ ratatui's `default-features = false` already drops the termion and termwiz backe
 
 ## 5. Next steps
 
-1. **OSC 7501 in the host.** Answer the `ESC ] 7501 ; ?` probe from the pump, and parse `state=…:kind=…:msg=<b64>` reports into `Run.waiting`, plus a new optional `Run.status` for working, idle and done. Claude Code and Codex already emit these when the probe is answered. Keep `waitingPatterns` as the fallback. Caveat from Orca: once the probe is answered, Claude stops putting its spinner in the window title.
+1. **OSC 7501 in the host. Done.** Before building it, a second research pass compared how herdr, Orca and Rex learn agent state:
+   - **herdr** dropped hook-based state for Claude and Codex in 0.6.7, because of stuck states (#198, #349) and prompts that fire no hook (#249). Its hooks now only record the session ID.
+   - **Orca** installs about 15 hook events into the user's config and fights a long tail of bugs: `CLAUDE_CONFIG_DIR`, duplicate hooks, trust prompts, missed cancel events.
+   - **Codex** sends OSC 7501 on any terminal without being asked (verified in `codex-rs/tui/src/terminal_program_status.rs`). Claude Code 2.1.295+ sends it once the probe is answered (its changelog, and Orca's live testing).
+
+   So the host now:
+   - answers the probe;
+   - parses root-record reports into `Run.waiting` (blocked) and a new optional `Run.status` (state, kind, message, since);
+   - lets those reports decide once the first one arrives;
+   - keeps `waitingPatterns`, bells and OSC 9 as the fallback for CLIs that don't report;
+   - applies the spec's lifetimes: drop `working` and `blocked` on exit or OSC 133 A, keep `done` and `error`.
+
+   `amux ps` and `amux ui` show the reported state, and the preview frame shows the CLI's message while it works. Two things are unverified, because they need a real Claude Code:
+   - Once the probe is answered, Claude stops putting its spinner in the window title (Orca's finding). amux doesn't use the title for state.
+   - Claude follows the probe with `CSI c`, a request for the terminal's identity (DA1). When no terminal is attached, nobody answers that request. This was already true before this change.
+
+   Also, if an attached terminal speaks OSC 7501 itself, as Rex and Orca do, the CLI gets two replies.
+   
+   Still to do: `amux explain <run>` (which signal decided), and notifying when a reported turn ends (`working` → `done`) while nobody is attached.
 2. **Search and filters.** `/` fuzzy match over run id, account, branch and title. `w`, `i`, `d` to show only waiting, idle or done runs.
 3. **Switch while attached.** A `ctrl+alt` chord, or Ctrl-] followed by n or p within 500 ms, to move to the next waiting run without seeing the list.
 4. **Host-pushed state.** A `SUBSCRIBE` frame that makes the host send framed state changes (waiting, exit) on a separate connection kind. The list could then stop polling. This needs a framed host-to-client stream, which is why it is its own protocol version.

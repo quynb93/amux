@@ -187,8 +187,13 @@ impl App {
         self.rows = runs::list()
             .into_iter()
             .map(|run| {
-                let (kind, label) =
-                    classify(&run.state(), run.waiting.as_ref(), last_output(&run), now);
+                let (kind, label) = classify(
+                    &run.state(),
+                    run.waiting.as_ref(),
+                    run.status.as_ref(),
+                    last_output(&run),
+                    now,
+                );
                 Row { run, kind, label }
             })
             .collect();

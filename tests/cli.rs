@@ -40,6 +40,10 @@ impl Sandbox {
              for k in FAKE_HOME FAKE_BASE_URL FAKE_TELEMETRY AMUX_ACCOUNT FAKE_TOKEN AMUX_RUN; do eval \"v=\\${$k-<unset>}\"; echo \"ENV $k=$v\"; done\n\
              [ -t 0 ] && echo TTY yes\n\
              [ -n \"$FAKE_ASK\" ] && echo \"Approve this? [y/n]\"\n\
+             [ -n \"$FAKE_7501\" ] && st() { printf '\\033]7501;state=%s\\033\\\\' \"$1\"; } \\
+               && printf '\\033]7501;?\\033\\\\' && sleep 0.3 \\
+               && st \"blocked:kind=permission:msg=$(printf 'approve Write: a.rs' | base64)\" && read a \\
+               && st \"working:msg=$(printf 'writing a.rs' | base64)\" && read b && st done && read c && exit 3\n\
              [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = ask ] && echo \"Approve this? [y/n]\"; [ \"$l\" = quit ] && exit 7; done\n\
              exit 0\n",
         );
@@ -558,4 +562,73 @@ fn a_watching_client_does_not_silence_notifications() {
     });
     let _ = fs::remove_file(&link);
     s.amux(&["stop", "w"]);
+}
+
+#[test]
+fn reads_the_state_a_cli_reports_with_osc_7501() {
+    use std::io::Write;
+    let s = Sandbox::new("osc7501");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let r = s.amux_with(
+        &["spawn", "--name", "st", "fake"],
+        &[("FAKE_7501", "1")],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+
+    // The CLI reports it is blocked on a permission: waiting, with its own message.
+    wait_ps(&s, "st", "waiting");
+    let notes = s.home.join("notes");
+    eventually("a notification", || {
+        fs::read_to_string(&notes).is_ok_and(|t| !t.is_empty())
+    });
+    assert_eq!(
+        fs::read_to_string(&notes).unwrap(),
+        "waiting st Waiting for you: approve Write: a.rs\n"
+    );
+    let run_json = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/st/run.json")).unwrap())
+            .unwrap()
+    };
+    assert_eq!(run_json()["status"]["state"], "blocked");
+    assert_eq!(run_json()["status"]["kind"], "permission");
+    // The host answered the probe. The fake CLI's terminal echoes input, so the answer
+    // shows up in its output.
+    let log = fs::read_to_string(s.amux_home.join("runs/st/output.log")).unwrap();
+    assert!(
+        log.contains(
+            "7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth"
+        ),
+        "{log}"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(["attach", "st"])
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // Approved: it reports working, and that ends the wait.
+    stdin.write_all(b"y\n").unwrap();
+    wait_ps(&s, "st", "running");
+    assert_eq!(run_json()["status"]["message"], "writing a.rs");
+    assert!(run_json().get("waiting").is_none());
+    let ui = s
+        .amux(&["ui", "--dump", "--size", "20x120", "--select", "st"])
+        .out;
+    assert!(ui.contains("working: writing a.rs"), "{ui}");
+    // The turn is done: idle, however recently it printed.
+    stdin.write_all(b"n\n").unwrap();
+    wait_ps(&s, "st", "idle");
+    stdin.write_all(b"q\n").unwrap();
+    drop(stdin);
+    assert_eq!(child.wait_with_output().unwrap().status.code(), Some(3));
+    wait_ps(&s, "st", "exited 3");
+    // done outlives the process; working and blocked would not.
+    assert_eq!(run_json()["status"]["state"], "done");
 }

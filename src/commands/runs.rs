@@ -278,6 +278,19 @@ fn state_label(run: &Run, now: i64) -> String {
             let t = run.waiting.as_ref().map_or(now, |w| w.since);
             format!("waiting {}", since(t, now).trim_end_matches(" ago"))
         }
+        // The CLI reports its own state (OSC 7501): believe it over output timing.
+        State::Running if run.status.is_some() => {
+            let s = run.status.as_ref().expect("checked above");
+            let age = since(s.since, now);
+            let age = age.trim_end_matches(" ago");
+            match s.state.as_str() {
+                "working" => "running".into(),
+                "error" => format!("error {age}"),
+                "blocked" => format!("waiting {age}"),
+                // idle, and done (the turn finished): either way it waits for your next prompt.
+                _ => format!("idle {age}"),
+            }
+        }
         State::Running => match last_output(run) {
             // Output in the last few seconds means the CLI is working; quiet usually
             // means it is waiting for you.
