@@ -4,6 +4,8 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-16
+
 ### Added
 
 - Homebrew install for macOS and Linux: `brew install quynb93/tap/amux`. Each release updates the formula.
