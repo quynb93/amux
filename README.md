@@ -71,9 +71,9 @@ npm install -g @quynb/amux
 npm install -g https://github.com/quynb93/amux/releases/latest/download/amux.tgz
 ```
 
-To install a specific version, use its release URL, for example `https://github.com/quynb93/amux/releases/download/v0.1.1/amux.tgz`.
+To install a specific version, use its release URL, for example `https://github.com/quynb93/amux/releases/download/v0.1.2/amux.tgz`.
 
-To upgrade, run `brew upgrade amux`, or run the same npm command again. `amux update` tells you the right command for your install.
+To upgrade, run `brew upgrade amux`, or run the same npm command again. `amux update` tells you the right command for your install. If you are upgrading from 0.1.0 or 0.1.1, which were packaged as `amux` rather than `@quynb/amux`, run `npm uninstall -g amux` first.
 
 **From source:**
 

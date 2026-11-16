@@ -72,8 +72,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           sha="$(sha256sum amux.tgz | cut -d' ' -f1)"
           key="$RUNNER_TEMP/tap_key"
-          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
-          chmod 600 "$key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           git clone --depth 1 git@github.com:quynb93/homebrew-tap.git "$RUNNER_TEMP/tap"
           cd "$RUNNER_TEMP/tap"
@@ -81,11 +81,18 @@ jobs:
             -e "s#^(  url \").*(\")#\1https://github.com/quynb93/amux/releases/download/v${version}/amux.tgz\2#" \
             -e "s#^(  sha256 \").*(\")#\1${sha}\2#" \
             Formula/amux.rb
+          if ! grep -qF "releases/download/v${version}/amux.tgz" Formula/amux.rb || ! grep -qF "\"${sha}\"" Formula/amux.rb; then
+            echo "::error::Formula/amux.rb has no url or sha256 line in the expected format"
+            exit 1
+          fi
+          if git diff --quiet; then
+            echo "::notice::The Homebrew formula is already at ${version}"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "amux ${version}"
           git push
-          rm -f "$key"
 
       - name: Publish to npm
         env:
@@ -95,4 +102,5 @@ jobs:
             echo "::notice::NPM_TOKEN is not set; skipping npm publish"
             exit 0
           fi
-          npm publish --provenance --access public
+          # Publish the same tarball the GitHub release and Homebrew use, instead of rebuilding it.
+          npm publish amux.tgz --provenance --access public
