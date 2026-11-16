@@ -51,7 +51,7 @@ $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the
 
 ## Install
 
-amux runs on macOS and Linux. On Windows, use it inside [WSL](https://learn.microsoft.com/windows/wsl/); native Windows support is [planned](https://github.com/quynb93/amux/issues?q=is%3Aissue+Windows+support).
+amux runs on macOS and Linux. On Windows, use it inside [WSL](https://learn.microsoft.com/windows/wsl/); native Windows support is [planned](https://github.com/quynb93/amux/issues/1).
 
 **Homebrew** (macOS and Linux):
 
@@ -317,7 +317,7 @@ If you already keep one directory per account, for example `~/.claude-work` and 
 
 **Permission denied running `amux` after a rebuild.** Use `npm run build`, which restores the executable bit, rather than running `tsc` on its own.
 
-**Windows.** amux relies on symlinks and POSIX permissions and has not been tested on Windows. WSL should work.
+**Windows.** amux relies on symlinks and POSIX permissions and has not been tested on Windows. WSL works, and native support is tracked in [#1](https://github.com/quynb93/amux/issues/1).
 
 ## Responsible use
 
