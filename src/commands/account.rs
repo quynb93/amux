@@ -5,18 +5,12 @@ use crate::providers::{seed_overlay, ProviderSpec};
 use crate::secrets::{delete_token, set_token};
 use crate::store::{
     account_dir, ensure_amux_home, get_provider, load_accounts, load_config, load_providers,
-    overlay_home, resolve_account, save_accounts, save_config, Account, Auth,
+    overlay_home, resolve_account, save_accounts, save_config, valid_name, Account, Auth,
 };
 use crate::time;
 use crate::util::{need, parse_args, read_secret, table, Kind};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{Map, Value};
-
-fn valid_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
 
 /// Validates a gateway URL for `spec` and normalizes it (no trailing slash).
 pub fn validate_base_url(url: &str, spec: &ProviderSpec) -> Result<String> {
@@ -96,10 +90,8 @@ fn add(argv: &[String]) -> Result<i32> {
     let home = overlay_home(&spec, &acct);
     sync_overlay(&spec, &home)?;
     seed_overlay(&spec, &home);
-    accounts.push(acct.clone());
-    save_accounts(accounts)?;
-    println!("Created {} → {}", acct.id(), tildify(&home));
-
+    // Store the token before saving the account, so a rejected or aborted token
+    // doesn't leave a token account behind with nothing to launch it with.
     if acct.auth == Auth::Token {
         let hint = if provider_id == "claude" {
             " (create one with `claude setup-token`)"
@@ -112,6 +104,12 @@ fn add(argv: &[String]) -> Result<i32> {
             acct.id()
         ))?;
         set_token(&acct, &token)?;
+    }
+    accounts.push(acct.clone());
+    save_accounts(accounts)?;
+    println!("Created {} → {}", acct.id(), tildify(&home));
+
+    if acct.auth == Auth::Token {
         println!("Stored token for {}.", acct.id());
     } else if !a.has("no-login") {
         if let Some(args) = &spec.login_args {

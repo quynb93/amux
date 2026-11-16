@@ -59,7 +59,11 @@ fn main_inner(argv: &[String]) -> Result<i32> {
     match cmd {
         // Internal: the background refresh started by check_for_updates().
         Some("__update-check") => {
-            update::fetch_latest();
+            if rest.first().map(String::as_str) == Some("--detach") {
+                update::spawn_refresh();
+            } else {
+                update::fetch_latest();
+            }
             return Ok(0);
         }
         Some("--version" | "-v" | "version") => {

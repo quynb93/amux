@@ -34,14 +34,25 @@ pub struct Turn {
 }
 
 const HEAD_BYTES: u64 = 256 * 1024;
+/// Most transcripts have their metadata and first prompt in the first few KB.
+const FIRST_READ_BYTES: u64 = 32 * 1024;
 
-/// The first 256 KB of a transcript: enough for the metadata and first prompt.
-fn read_head(file: &Path, buf: &mut Vec<u8>) -> String {
-    buf.clear();
-    if let Ok(f) = fs::File::open(file) {
-        let _ = f.take(HEAD_BYTES).read_to_end(buf);
+/// Runs `parse` on the start of a transcript: the first 32 KB, then the first 256 KB if
+/// that wasn't enough. A record cut off at the end is skipped, and records are in order,
+/// so whatever is found in the shorter read is what the longer one would find first.
+fn scan_head<T>(file: &Path, buf: &mut Vec<u8>, parse: impl Fn(&str) -> Option<T>) -> Option<T> {
+    for limit in [FIRST_READ_BYTES, HEAD_BYTES] {
+        buf.clear();
+        let f = fs::File::open(file).ok()?;
+        let _ = f.take(limit).read_to_end(buf);
+        if let Some(found) = parse(&String::from_utf8_lossy(buf)) {
+            return Some(found);
+        }
+        if (buf.len() as u64) < limit {
+            break;
+        }
     }
-    String::from_utf8_lossy(buf).into_owned()
+    None
 }
 
 fn json_lines(text: &str) -> impl Iterator<Item = Value> + '_ {
@@ -122,10 +133,14 @@ fn first_user(turns: &[Turn]) -> Option<&Turn> {
 
 // ---- Claude Code: <home>/projects/<cwd-slug>/<session-id>.jsonl
 
-fn claude_turns(text: &str) -> (Option<String>, Vec<Turn>) {
+/// With `first_only`, stops once the cwd and the first user prompt are known (for listing).
+fn claude_turns(text: &str, first_only: bool) -> (Option<String>, Vec<Turn>) {
     let mut cwd: Option<String> = None;
     let mut turns = vec![];
     for rec in json_lines(text) {
+        if first_only && cwd.is_some() && first_user(&turns).is_some() {
+            break;
+        }
         if cwd.is_none() {
             cwd = rec.get("cwd").and_then(Value::as_str).map(str::to_string);
         }
@@ -170,13 +185,15 @@ fn list_claude(spec: &ProviderSpec) -> Vec<SessionInfo> {
     files
         .into_iter()
         .filter_map(|file| {
-            let (cwd, turns) = claude_turns(&read_head(&file, &mut buf));
-            let first = first_user(&turns)?;
+            let (cwd, title) = scan_head(&file, &mut buf, |text| {
+                let (cwd, turns) = claude_turns(text, true);
+                Some((cwd, one_line(&first_user(&turns)?.text, 80)))
+            })?;
             Some(SessionInfo {
                 provider: spec.id.clone(),
                 id: file.file_stem()?.to_string_lossy().into_owned(),
                 cwd,
-                title: one_line(&first.text, 80),
+                title,
                 updated_at: mtime_ms(&file),
                 file,
             })
@@ -186,12 +203,16 @@ fn list_claude(spec: &ProviderSpec) -> Vec<SessionInfo> {
 
 // ---- Codex: <home>/sessions/YYYY/MM/DD/rollout-*.jsonl
 
-fn codex_turns(text: &str) -> (Option<Value>, Option<String>, Vec<Turn>) {
+/// With `first_only`, stops once the session id and the first user prompt are known (for listing).
+fn codex_turns(text: &str, first_only: bool) -> (Option<Value>, Option<String>, Vec<Turn>) {
     let mut id: Option<Value> = None;
     let mut cwd: Option<String> = None;
     let mut turns: Vec<Turn> = vec![];
     let empty = Value::Object(Default::default());
     for rec in json_lines(text) {
+        if first_only && id.as_ref().is_some_and(|v| !v.is_null()) && first_user(&turns).is_some() {
+            break;
+        }
         let p = rec
             .get("payload")
             .filter(|v| !v.is_null())
@@ -249,18 +270,20 @@ fn list_codex(spec: &ProviderSpec) -> Vec<SessionInfo> {
     files
         .into_iter()
         .filter_map(|file| {
-            let (id, cwd, turns) = codex_turns(&read_head(&file, &mut buf));
-            let id = id
-                .as_ref()
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?
-                .to_string();
-            let first = first_user(&turns)?;
+            let (id, cwd, title) = scan_head(&file, &mut buf, |text| {
+                let (id, cwd, turns) = codex_turns(text, true);
+                let id = id
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())?
+                    .to_string();
+                Some((id, cwd, one_line(&first_user(&turns)?.text, 80)))
+            })?;
             Some(SessionInfo {
                 provider: spec.id.clone(),
                 id,
                 cwd,
-                title: one_line(&first.text, 80),
+                title,
                 updated_at: mtime_ms(&file),
                 file,
             })
@@ -365,11 +388,12 @@ pub fn list_sessions(spec: &ProviderSpec) -> Vec<SessionInfo> {
 }
 
 pub fn read_turns(s: &SessionInfo, format: Option<&str>) -> anyhow::Result<Vec<Turn>> {
-    let text = fs::read_to_string(&s.file)?;
+    // Lossy, so one bad byte in a long transcript doesn't make the whole session unreadable.
+    let text = String::from_utf8_lossy(&fs::read(&s.file)?).into_owned();
     Ok(match format {
         Some("gemini") => gemini_turns(&serde_json::from_str(&text)?),
-        Some("codex") => codex_turns(&text).2,
-        _ => claude_turns(&text).1,
+        Some("codex") => codex_turns(&text, false).2,
+        _ => claude_turns(&text, false).1,
     })
 }
 
@@ -480,6 +504,22 @@ mod tests {
                 turn(Role::Assistant, "Looking at auth.ts")
             ]
         );
+    }
+
+    #[test]
+    fn finds_a_first_prompt_past_the_first_read() {
+        let home = TempDir::new();
+        let filler = "x".repeat(40 * 1024);
+        write(
+            &home.path().join("projects/-p/late.jsonl"),
+            &jsonl(&[
+                json!({"type": "user", "cwd": "/p", "message": {"role": "user", "content": format!("<context>{filler}</context>")}}),
+                json!({"type": "user", "cwd": "/p", "message": {"role": "user", "content": "The real ask"}}),
+            ]),
+        );
+        let list = list_sessions(&session_spec("claude", home.path()));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "The real ask");
     }
 
     #[test]

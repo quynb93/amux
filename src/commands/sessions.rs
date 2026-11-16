@@ -116,6 +116,14 @@ pub fn resume_cmd(argv: &[String]) -> Result<i32> {
         let Some(resume) = &target.resume_args else {
             bail!("{} has no resume command configured.", target.label)
         };
+        // The id comes from a file name or transcript contents and becomes a CLI argument,
+        // so an id like "--some-flag" must not be passed through as an option.
+        if session.id.starts_with('-') || safe(&session.id) != session.id {
+            bail!(
+                "Session id \"{}\" has unexpected characters; not resuming it.",
+                session.id
+            );
+        }
         eprintln!(
             "amux: resuming {} session {} as {} in {}",
             session.provider,

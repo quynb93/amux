@@ -72,14 +72,19 @@ pub fn is_version_tag(tag: &str) -> bool {
 }
 
 fn read_cache() -> Option<Cache> {
-    serde_json::from_slice(&std::fs::read(paths::AMUX_HOME.join("update-check.json")).ok()?).ok()
+    let mut cache: Cache =
+        serde_json::from_slice(&std::fs::read(paths::AMUX_HOME.join("update-check.json")).ok()?)
+            .ok()?;
+    // The cached version is printed to the terminal, so hold it to the same rule as a fresh one.
+    cache.latest = cache.latest.filter(|v| is_version_tag(v));
+    Some(cache)
 }
 
 fn write_cache(cache: &Cache) {
-    // Best-effort.
+    // Best-effort. Atomic, so a concurrent run never reads a truncated cache.
     let _ = fsx::mkdir_private(&paths::AMUX_HOME);
     if let Ok(text) = serde_json::to_string(cache) {
-        let _ = fsx::write_private(
+        let _ = fsx::write_atomic(
             &paths::AMUX_HOME.join("update-check.json"),
             format!("{text}\n").as_bytes(),
         );
@@ -140,22 +145,37 @@ pub fn check_for_updates() {
             checked_at: time::now_ms(),
             latest: cache.and_then(|c| c.latest),
         });
-        if let Ok(exe) = std::env::current_exe() {
-            let mut cmd = Command::new(exe);
-            cmd.arg("__update-check")
-                .env("AMUX_NO_UPDATE_CHECK", "1")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                // Its own process group, so Ctrl-C in the terminal doesn't reach it.
-                cmd.process_group(0);
-            }
-            let _ = cmd.spawn();
+        // amux usually execs the CLI next, and the CLI would inherit the refresh as a child it
+        // never reaps. So start it through a short-lived intermediate (`--detach`) that exits
+        // right away, leaving the refresh to be reparented and reaped by init.
+        if cfg!(unix) {
+            let _ = background_cmd().map(|mut c| c.arg("--detach").status());
+        } else {
+            spawn_refresh();
         }
     }
+}
+
+/// `amux __update-check` with no terminal and its own process group.
+fn background_cmd() -> Option<Command> {
+    let mut cmd = Command::new(std::env::current_exe().ok()?);
+    cmd.arg("__update-check")
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group, so Ctrl-C in the terminal doesn't reach it.
+        cmd.process_group(0);
+    }
+    Some(cmd)
+}
+
+/// Starts the background refresh without waiting for it.
+pub fn spawn_refresh() {
+    let _ = background_cmd().map(|mut c| c.spawn());
 }
 
 /// The command that upgrades this copy of amux, based on where its binary lives:

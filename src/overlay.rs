@@ -97,11 +97,27 @@ pub fn adopt_stray(
     for name in names {
         let src = overlay.join(name);
         let dest = spec.shared_home.join(name);
-        if dest.exists() {
+        // symlink_metadata, so a dangling link in the shared home also counts as taken.
+        if fs::symlink_metadata(&dest).is_ok() {
             conflicts.push(name.clone());
             continue;
         }
-        fs::rename(&src, &dest)?;
+        if fs::symlink_metadata(&src)?.is_dir() {
+            // rename never replaces a non-empty directory.
+            fs::rename(&src, &dest)?;
+        } else {
+            // rename would silently replace a file the CLI created in the shared home since
+            // the check above; a hard link fails instead if the name is taken.
+            match fs::hard_link(&src, &dest) {
+                Ok(()) => fs::remove_file(&src)?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    conflicts.push(name.clone());
+                    continue;
+                }
+                // No hard links on this filesystem (or across devices): fall back to rename.
+                Err(_) => fs::rename(&src, &dest)?,
+            }
+        }
         fsx::symlink(&dest, &src)?;
         adopted.push(name.clone());
     }
@@ -241,6 +257,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(f.overlay.join("settings.json")).unwrap(),
             "conflict"
+        );
+    }
+
+    #[test]
+    fn adopts_stray_dirs_and_treats_dangling_shared_links_as_taken() {
+        let f = fx();
+        write(&f.overlay.join("cache/a.txt"), "a");
+        write(&f.overlay.join("old.txt"), "mine");
+        fsx::symlink(Path::new("/nonexistent"), &f.shared.join("old.txt")).unwrap();
+        let (adopted, conflicts) =
+            adopt_stray(&f.spec, &f.overlay, &["cache".into(), "old.txt".into()]).unwrap();
+        assert_eq!(adopted, ["cache"]);
+        assert_eq!(conflicts, ["old.txt"]);
+        assert_eq!(
+            fs::read_to_string(f.shared.join("cache/a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(link_of(&f, "cache"), f.shared.join("cache"));
+        assert_eq!(
+            fs::read_to_string(f.overlay.join("old.txt")).unwrap(),
+            "mine"
         );
     }
 }

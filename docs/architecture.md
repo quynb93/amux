@@ -55,7 +55,7 @@ On macOS, Claude Code stores the OAuth login in the Keychain under a service nam
 | `codex` | `sessions/YYYY/MM/DD/rollout-*.jsonl` | `session_meta` and `response_item` messages, with duplicate prompts collapsed |
 | `gemini` | `tmp/<project>/chats/session-*.json` | `messages`, with the cwd recovered from `projects.json` |
 
-To list sessions, amux reads only the first 256 KB of each file, so listing stays fast on long histories. Injected context, such as `AGENTS.md`, environment blocks and slash-command wrappers, is skipped when picking a title.
+To list sessions, amux reads the first 32 KB of each JSONL transcript (256 KB if the first prompt isn't there yet) and stops parsing once it has the id, directory and first prompt, so listing stays fast on long histories. Gemini sessions are single JSON documents, so they are read whole. Injected context, such as `AGENTS.md`, environment blocks and slash-command wrappers, is skipped when picking a title.
 
 `build_handoff` writes the first user request, then as many of the most recent turns as fit in a character budget (60,000 by default). If the newest turn is too large, its tail is kept rather than dropping the turn.
 

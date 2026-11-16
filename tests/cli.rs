@@ -230,3 +230,36 @@ fn reports_an_unparseable_config() {
     assert_eq!(r.code, 1);
     assert!(r.err.contains("Cannot parse"), "{}", r.err);
 }
+
+#[test]
+fn rejects_account_entries_that_escape_the_accounts_dir() {
+    let s = Sandbox::new("traversal");
+    write(
+        &s.amux_home.join("accounts.json"),
+        r#"{"accounts": [{"provider": "fake", "name": "../../victim", "auth": "login"}]}"#,
+    );
+    let victim = s.amux_home.join("victim");
+    fs::create_dir_all(&victim).unwrap();
+    let r = s.amux(&["account", "rm", "fake@../../victim", "--purge"]);
+    assert_eq!(r.code, 1);
+    assert!(r.err.contains("Invalid account"), "{}", r.err);
+    assert!(victim.exists());
+}
+
+#[test]
+fn keeps_unknown_top_level_keys_in_accounts_json() {
+    let s = Sandbox::new("extra");
+    write(
+        &s.amux_home.join("accounts.json"),
+        r#"{"accounts": [], "future": {"x": 1}}"#,
+    );
+    assert_eq!(
+        s.amux(&["account", "add", "fake", "a", "--no-login"]).code,
+        0
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("accounts.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["future"]["x"], 1);
+    assert_eq!(saved["accounts"][0]["name"], "a");
+}

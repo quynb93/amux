@@ -2,7 +2,7 @@
 // Runs the prebuilt amux binary for this platform. The release workflow puts one
 // binary per platform under native/<target>/amux; nothing is downloaded at install.
 "use strict";
-const { spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -27,15 +27,28 @@ try {
   try {
     fs.chmodSync(bin, 0o755);
   } catch {
-    // Reported by spawnSync below if it still can't run.
+    // Reported by spawn below if it still can't run.
   }
 }
 
-// The binary owns the terminal; don't let Ctrl-C kill this wrapper out from under it.
-for (const sig of ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"]) process.on(sig, () => {});
-const r = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
-if (r.error) {
-  console.error(`amux: cannot run ${bin}: ${r.error.message}`);
-  process.exit(1);
+const child = spawn(bin, process.argv.slice(2), { stdio: "inherit" });
+// The binary owns the terminal. Ctrl-C and Ctrl-\ already reach it through the
+// foreground process group, so this wrapper just ignores them. A SIGTERM or SIGHUP
+// sent to the wrapper alone (kill, timeout, a process manager) is passed on.
+for (const sig of ["SIGINT", "SIGQUIT"]) process.on(sig, () => {});
+for (const sig of ["SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    try {
+      child.kill(sig);
+    } catch {
+      // Already gone.
+    }
+  });
 }
-process.exit(r.status ?? 128 + ((r.signal && os.constants.signals[r.signal]) || 1));
+child.on("error", (err) => {
+  console.error(`amux: cannot run ${bin}: ${err.message}`);
+  process.exit(1);
+});
+child.on("exit", (code, signal) => {
+  process.exit(code ?? 128 + ((signal && os.constants.signals[signal]) || 1));
+});

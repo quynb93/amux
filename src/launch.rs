@@ -164,15 +164,18 @@ pub fn capture(acct: &Account, args: &[String]) -> Result<(i32, String)> {
         .stderr(Stdio::piped());
     env.apply(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| not_found(&spec, e))?;
-    let read_all = |mut r: Box<dyn Read + Send>| {
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, String)>();
+    let read_all = |i: usize, mut r: Box<dyn Read + Send>| {
+        let tx = tx.clone();
         std::thread::spawn(move || {
             let mut s = Vec::new();
             let _ = r.read_to_end(&mut s);
-            String::from_utf8_lossy(&s).into_owned()
-        })
+            let _ = tx.send((i, String::from_utf8_lossy(&s).into_owned()));
+        });
     };
-    let out = read_all(Box::new(child.stdout.take().expect("piped")));
-    let err = read_all(Box::new(child.stderr.take().expect("piped")));
+    read_all(0, Box::new(child.stdout.take().expect("piped")));
+    read_all(1, Box::new(child.stderr.take().expect("piped")));
+    drop(tx);
     let deadline = Instant::now() + Duration::from_secs(20);
     let code = loop {
         if let Some(st) = child.try_wait()? {
@@ -185,12 +188,14 @@ pub fn capture(acct: &Account, args: &[String]) -> Result<(i32, String)> {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let text = format!(
-        "{}{}",
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default()
-    );
-    Ok((code, text.trim().to_string()))
+    // A helper the CLI started can keep the pipes open after it exits or is killed, so
+    // wait only briefly for the rest of the output instead of joining the readers.
+    let mut parts = [String::new(), String::new()];
+    let grace = Instant::now() + Duration::from_secs(2);
+    while let Ok((i, s)) = rx.recv_timeout(grace.saturating_duration_since(Instant::now())) {
+        parts[i] = s;
+    }
+    Ok((code, parts.concat().trim().to_string()))
 }
 
 /// Substitutes `{name}` placeholders; unknown names become empty.

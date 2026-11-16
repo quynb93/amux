@@ -146,6 +146,12 @@ pub fn load_providers_from(cfg: &Config) -> Result<Vec<ProviderSpec>> {
                 paths::config_file().display()
             )
         };
+        if !valid_name(&id) {
+            bail!(
+                "Provider id \"{id}\" in {} may use only letters, digits, '.', '_' and '-'.",
+                paths::config_file().display()
+            );
+        }
         let pos = raw
             .iter()
             .position(|m| m.get("id").and_then(Value::as_str) == Some(&id));
@@ -215,18 +221,36 @@ pub fn get_provider(id: &str) -> Result<ProviderSpec> {
         .ok_or_else(|| anyhow!("Unknown provider \"{id}\". Run `amux providers` to see the list."))
 }
 
+/// Letters, digits, '.', '_' and '-', starting with a letter or digit. Provider ids and
+/// account names become path components under ~/.amux/accounts, so nothing else is allowed.
+pub fn valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 pub fn load_accounts() -> Result<Vec<Account>> {
-    Ok(read_json::<AccountsFile>(&paths::accounts_file())?.accounts)
+    let file = paths::accounts_file();
+    let accounts = read_json::<AccountsFile>(&file)?.accounts;
+    // A hand-edited entry like "../.." would point account_dir (and `rm --purge`) outside ~/.amux.
+    if let Some(bad) = accounts
+        .iter()
+        .find(|a| !valid_name(&a.provider) || !valid_name(&a.name))
+    {
+        bail!(
+            "Invalid account \"{}\" in {}: names may use letters, digits, '.', '_' and '-'.",
+            bad.id(),
+            file.display()
+        );
+    }
+    Ok(accounts)
 }
 
 pub fn save_accounts(accounts: Vec<Account>) -> Result<()> {
-    write_json(
-        &paths::accounts_file(),
-        &AccountsFile {
-            accounts,
-            extra: Map::new(),
-        },
-    )
+    let file = paths::accounts_file();
+    // Keep top-level keys written by other amux versions.
+    let extra = read_json::<AccountsFile>(&file)?.extra;
+    write_json(&file, &AccountsFile { accounts, extra })
 }
 
 /// Parses "claude@work", or "claude" (uses the provider's default account).
