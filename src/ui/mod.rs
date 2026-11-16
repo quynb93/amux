@@ -622,6 +622,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn draws_on_tiny_terminals_without_panicking() {
+        let mut app = App::new();
+        for i in 0..5 {
+            app.rows.push(Row {
+                run: Run {
+                    id: format!("run-{i}"),
+                    account: "fake@one".into(),
+                    exit_code: Some(0),
+                    ..Default::default()
+                },
+                kind: Kind::Done,
+                label: "done".into(),
+            });
+        }
+        app.set_index(Some(0));
+        let modes = [
+            Mode::Normal,
+            Mode::Help,
+            Mode::Spawn(Box::new(SpawnForm::new(
+                vec!["fake@one".into()],
+                None,
+                true,
+            ))),
+        ];
+        for mode in modes {
+            app.mode = mode;
+            for (rows, cols) in [(1, 1), (3, 20), (9, 80), (5, 120), (40, 6)] {
+                let lines = app.dump(rows, cols);
+                assert_eq!(lines.len(), rows as usize);
+            }
+        }
+    }
+
+    #[test]
     fn parses_dump_sizes() {
         assert_eq!(parse_dims("30x100"), Some((30, 100)));
         assert_eq!(parse_dims("0x100"), None);

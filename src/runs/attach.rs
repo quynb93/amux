@@ -10,6 +10,18 @@ use std::time::{Duration, Instant};
 
 /// Ctrl-]
 pub const DETACH_KEY: u8 = 0x1d;
+/// Ctrl-] as the kitty keyboard protocol sends it, once a CLI has turned that on: plain,
+/// and with the event type that "report event types" adds.
+const DETACH_KITTY: [&[u8]; 2] = [b"\x1b[93;5u", b"\x1b[93;5:1u"];
+
+/// Where the detach key starts in `input`, if it is there.
+pub fn find_detach(input: &[u8]) -> Option<usize> {
+    let plain = input.iter().position(|&b| b == DETACH_KEY);
+    let kitty = DETACH_KITTY
+        .iter()
+        .filter_map(|k| input.windows(k.len()).position(|w| w == *k));
+    plain.into_iter().chain(kitty).min()
+}
 
 /// Puts the terminal in raw mode until dropped.
 struct RawMode(libc::termios);
@@ -38,9 +50,9 @@ impl Drop for RawMode {
 }
 
 /// Undoes terminal modes a full-screen CLI may have left on when we detach mid-screen:
-/// alternate screen, hidden cursor, mouse reporting, bracketed paste, focus events.
-pub const RESET_MODES: &str =
-    "\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[0m";
+/// alternate screen, hidden cursor, mouse reporting, bracketed paste, focus events, and
+/// the kitty keyboard protocol and modifyOtherKeys (terminals without them ignore these).
+pub const RESET_MODES: &str = "\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[<u\x1b[>4;0m\x1b[0m";
 
 enum Event {
     Detached,
@@ -98,9 +110,9 @@ pub fn attach(run: &Run) -> Result<i32> {
                     Ok(n) => n,
                 };
                 let mut chunk = &buf[..n];
-                let detach = tty && chunk.contains(&DETACH_KEY);
-                if detach {
-                    let i = chunk.iter().position(|&b| b == DETACH_KEY).unwrap_or(0);
+                let cut = if tty { find_detach(chunk) } else { None };
+                let detach = cut.is_some();
+                if let Some(i) = cut {
                     chunk = &chunk[..i];
                 }
                 if !chunk.is_empty() {
@@ -168,5 +180,20 @@ pub fn attach(run: &Run) -> Result<i32> {
             eprintln!("amux: {} exited with code {code}", run.id);
             Ok(code)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_detach_key_plain_or_kitty_encoded() {
+        assert_eq!(find_detach(b"ls\r"), None);
+        assert_eq!(find_detach(b"ab\x1dcd"), Some(2));
+        assert_eq!(find_detach(b"x\x1b[93;5u"), Some(1));
+        assert_eq!(find_detach(b"\x1b[93;5:1u\x1d"), Some(0));
+        // Other kitty keys are not it.
+        assert_eq!(find_detach(b"\x1b[93;3u\x1b[97;5u"), None);
     }
 }

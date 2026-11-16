@@ -109,7 +109,7 @@ These are the same signals as `amux ps`, so the two never disagree. Rows keep th
 
 `ui/preview.rs`. A preview is an ordinary host client:
 
-1. It connects to `runs/<id>/sock` (by relative name when the path is longer than the socket limit, as `amux attach` does) and sends `WATCH [1]`.
+1. It connects to `runs/<id>/sock` and sends `WATCH [1]` as its first bytes. When the path is longer than the socket limit, it connects through a short symlink in a fresh mode-0700 folder under `/tmp`. Unlike `amux attach`, the UI never changes its working directory, because the background `amux spawn` commands inherit it.
 2. The host replays its 256 KB buffer, then streams live output. A reader thread feeds both into a `vt100::Parser` sized to the run's terminal, which it reads from the host's `size` file, falling back to `run.json`.
 3. Replay starts at a line boundary, so it can begin in the middle of a full-screen redraw. To repair that, the preview sends a `RESIZE` with the run's *current* size: nothing moves, and the CLI redraws (SIGWINCH). This is skipped for hosts from before 0.5, which don't publish `size`. That way the preview can never resize a run to a guessed size.
 4. Drawing crops the emulator's screen to the pane, keeping the bottom of the content (or the cursor) in view, since that is where CLIs ask questions. The run is **not** resized to the pane. Shrinking an agent to a 60-column box would make it reflow, and you would attach to a squashed transcript.
@@ -123,8 +123,8 @@ These are the same signals as `amux ps`, so the two never disagree. Rows keep th
 
 1. Leave the alternate screen. Under the preview's lock, paint the emulator's current screen (`state_formatted`, which also restores bracketed paste and keypad modes), then turn on passthrough, so the reader thread writes output straight to the terminal. No byte is lost or doubled between the picture and the stream.
 2. Send `WATCH [0]` (a person is attached now, so the host doesn't notify) and a `RESIZE` to the real terminal size.
-3. Read stdin directly (`poll` plus `read` on fd 0, not the buffered `Stdin`) and forward it as `INPUT` frames, until Ctrl-]. Follow terminal resizes.
-4. On Ctrl-] or when the run ends: passthrough off, `WATCH [1]`, reset the modes a CLI may have left on (the alternate screen, mouse, bracketed paste, focus events, kitty keyboard, modifyOtherKeys), re-enter the UI and repaint.
+3. Read stdin directly (`poll` plus `read` on fd 0, not the buffered `Stdin`) and forward it as `INPUT` frames, until Ctrl-]. Ctrl-] also counts in its kitty keyboard encoding (`ESC[93;5u`), which a CLI may have turned on. Follow terminal resizes.
+4. On Ctrl-], when the run ends, or on an error (a Drop guard does this): passthrough off, `WATCH [1]`, reset the modes a CLI may have left on (the alternate screen, mouse, bracketed paste, focus events, kitty keyboard, modifyOtherKeys), re-enter the UI and repaint.
 
 Switching runs is Ctrl-] then j/k (or 1–9, or Tab) then Enter. The preview already holds a live connection, so attaching again costs one redraw. A one-chord switch while attached is in Next steps.
 
@@ -171,10 +171,12 @@ The list scrolls, and 1–9 plus Tab cover the common jumps. Past about 50 runs,
 
 | Change | Old host, new UI | New host, old client |
 |---|---|---|
-| `WATCH` frame (kind 2, payload `[1]` watching, `[0]` attached). A watching client doesn't count as attached, so waiting and exit notifications still fire while a preview is open. | Ignored (unknown kinds were always skipped). The preview then suppresses notifications, as any client did in 0.4. | Never sent; every client counts as attached, as before. |
+| `WATCH` frame (kind 2, payload `[1]` watching, `[0]` attached). A watching client doesn't count as attached, so waiting and exit notifications still fire while a preview is open. If it is the client's first frame, the host reads it before the replay (it peeks for up to 20 ms), so a preview never counts as attached, not even during the replay. | Ignored (unknown kinds were always skipped). The preview then suppresses notifications, as any client did in 0.4. | Never sent; every client counts as attached, as before. |
 | `runs/<id>/size` ("rows cols"), written atomically at start and on every `RESIZE` | No file, so the preview uses `run.json`'s start size and does not send the redraw `RESIZE` | Unused |
 
-Nothing else changed. The edits to `src/runs/host.rs` are about 40 lines: a `Client` struct with an `AtomicBool`, a `Hub::attached()` helper, and the size file. `src/runs/mod.rs` gains one constant. `RESET_MODES` in `src/runs/attach.rs` became `pub`. `Run`, `run.json` and `detect.rs` are untouched.
+Nothing else changed in the protocol. The edits to `src/runs/host.rs` are about 70 lines: a `Client` struct with an `AtomicBool`, a `Hub::attached()` helper, the leading-`WATCH` peek, and the size file. `src/runs/mod.rs` gains one constant. `Run`, `run.json` and `detect.rs` are untouched.
+
+`src/runs/attach.rs` (`amux attach`) changed in two small ways that the UI shares. `find_detach` also recognizes the kitty encoding of Ctrl-], and `RESET_MODES` (now `pub`) also pops the kitty keyboard mode and modifyOtherKeys, so a shell isn't left in those modes after detaching. Terminals that don't support them ignore both sequences.
 
 Why not put the size in `run.json`? The host rewrites `run.json` whenever `waiting` changes, and a separate file keeps resizes from racing those writes. The file's presence also tells the UI the host is new enough to trust for a redraw.
 
