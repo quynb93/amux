@@ -233,7 +233,7 @@ A light terminal background that reports itself (`COLORFGBG`, with truecolor) ge
 { "extends": "dark", "colors": { "selection": "on #2d3149", "done": "green" } }
 ```
 
-A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `default`…), plus `bold`, `dim`, `italic`, `underline` or `reverse`, and `on <color>` for the background. The roles are `text`, `muted`, `border`, `title`, `accent`, `key`, `selection`, `header`, `input`, `starting`, `working`, `waiting`, `idle`, `done`, `failed`, `lost`, `success` and `error`. `/theme` lists them too.
+A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `default`…), plus `bold`, `dim`, `italic`, `underline` or `reverse`, and `on <color>` for the background. The roles are `text`, `muted`, `border`, `title`, `accent`, `key`, `selection`, `header`, `input`, `starting`, `working`, `waiting`, `idle`, `done`, `failed`, `lost`, `stopped`, `success` and `error`. `/theme` lists them too.
 
 - **STATE** is `waiting <time>` when the CLI is asking you something: a permission or confirmation prompt, a terminal bell, or a notification it sent to the terminal. Otherwise it is `running` while the CLI prints and `idle <time>` once it has been quiet for a few seconds. Typing into the run clears `waiting`.
 - **Self-reported state.** CLIs that report their own state with OSC 7501 (Codex, and Claude Code 2.1.295 and later) get exact states: `waiting` with the CLI's own message ("approve Write: a.rs"), `running`, `idle` once the turn is done, and `error`. amux answers Claude Code's request to report. For other CLIs, amux falls back to the prompt text in `waitingPatterns` and to output timing.

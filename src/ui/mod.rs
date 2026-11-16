@@ -64,6 +64,10 @@ pub fn ui_cmd(argv: &[String]) -> Result<i32> {
             }
             "--select" => select = it.next().cloned(),
             "--keys" => keys = it.next().cloned().unwrap_or_default(),
+            "--help" | "-h" => {
+                println!("{USAGE}\n\nWatch, attach to, start and stop runs in one screen. Press / for commands, ? for keys.\n--dump prints one frame instead (--ansi in color, --keys presses keys first).");
+                return Ok(0);
+            }
             _ => bail!("Unknown option {a}. Usage: {USAGE}"),
         }
     }
@@ -232,6 +236,8 @@ struct App {
     /// Lines scrolled back in the preview.
     scroll: usize,
     pending: Option<Pending>,
+    /// Command output that finished while a dialog was open.
+    deferred: Option<OutputView>,
     quit: bool,
     started: Instant,
 }
@@ -258,6 +264,7 @@ impl App {
             last_reload: None,
             scroll: 0,
             pending: None,
+            deferred: None,
             quit: false,
             started: Instant::now(),
         }
@@ -381,12 +388,16 @@ impl App {
             any = true;
             self.busy = self.busy.saturating_sub(1);
             if let Some((title, text)) = d.output {
+                let view = OutputView {
+                    title,
+                    lines: text.lines().map(str::to_string).collect(),
+                    scroll: 0,
+                };
+                // Shown now, or once the dialog that is open closes.
                 if matches!(self.mode, Mode::Normal | Mode::Palette(_)) {
-                    self.mode = Mode::Output(OutputView {
-                        title,
-                        lines: text.lines().map(str::to_string).collect(),
-                        scroll: 0,
-                    });
+                    self.mode = Mode::Output(view);
+                } else {
+                    self.deferred = Some(view);
                 }
             } else {
                 self.say(d.message, !d.ok);
@@ -399,6 +410,20 @@ impl App {
         any
     }
 
+    /// Shows command output that arrived while a dialog was open, once it has closed.
+    fn show_deferred(&mut self) -> bool {
+        if !matches!(self.mode, Mode::Normal) {
+            return false;
+        }
+        match self.deferred.take() {
+            Some(view) => {
+                self.mode = Mode::Output(view);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn run<B: Backend>(&mut self, term: &mut Terminal<B>) -> Result<()>
     where
         B::Error: Send + Sync + 'static,
@@ -407,6 +432,7 @@ impl App {
         let mut last_draw = Instant::now();
         while !self.quit {
             dirty |= self.poll_done();
+            dirty |= self.show_deferred();
             if self.last_reload.is_none_or(|t| t.elapsed() >= RELOAD_EVERY) {
                 self.reload();
                 dirty = true;
@@ -877,16 +903,23 @@ impl App {
                 });
             }
             Action::Theme(Some(name)) => match Theme::named(&name) {
-                Ok((t, notes)) => {
-                    self.theme = t;
-                    match Theme::save_choice(&name) {
-                        Err(e) => self.say(format!("Theme {name}, but not saved: {e:#}"), true),
-                        Ok(()) if notes.is_empty() => {
-                            self.say(format!("Theme {name}, saved in config.json."), false)
-                        }
-                        Ok(()) => self.say(format!("Theme {name}: {}", notes.join("; ")), true),
+                Ok((t, notes)) => match Theme::save_choice(&name) {
+                    Err(e) => {
+                        self.theme = t;
+                        self.say(format!("Theme {name}, but not saved: {e:#}"), true)
                     }
-                }
+                    Ok(()) => {
+                        // Read back as a restart would, so ui.colors overrides apply too.
+                        let (t, more) = Theme::from_config();
+                        self.theme = t;
+                        let notes: Vec<String> = notes.into_iter().chain(more).collect();
+                        if notes.is_empty() {
+                            self.say(format!("Theme {name}, saved in config.json."), false)
+                        } else {
+                            self.say(format!("Theme {name}: {}", notes.join("; ")), true)
+                        }
+                    }
+                },
                 Err(e) => self.say(e, true),
             },
             Action::Help => self.mode = Mode::Help,
@@ -1192,6 +1225,27 @@ mod tests {
             "{line:?}"
         );
         assert!(line.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn keeps_command_output_until_the_open_dialog_closes() {
+        let mut app = App::new(Theme::built_in("default").unwrap());
+        app.mode = Mode::Help;
+        app.busy = 1;
+        let _ = app.tx.send(Done {
+            ok: true,
+            message: String::new(),
+            started: None,
+            output: Some(("Accounts".into(), "a\nb".into())),
+        });
+        app.poll_done();
+        assert!(matches!(app.mode, Mode::Help));
+        assert!(!app.show_deferred());
+        app.mode = Mode::Normal;
+        assert!(app.show_deferred());
+        assert!(
+            matches!(&app.mode, Mode::Output(o) if o.title == "Accounts" && o.lines == ["a", "b"])
+        );
     }
 
     #[test]

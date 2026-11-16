@@ -530,7 +530,18 @@ fn ui_dump_shows_runs_their_state_and_a_live_preview() {
     let tty = s.amux(&["ui"]);
     assert_eq!(tty.code, 1);
     assert!(tty.err.contains("needs a terminal"), "{}", tty.err);
+    let help = s.amux(&["ui", "--help"]);
+    assert_eq!(help.code, 0);
+    assert!(help.out.starts_with("amux ui ["), "{}", help.out);
+
+    // A run you stopped shows as stopped, not failed.
     s.amux(&["stop", "ask"]);
+    wait_ps(&s, "ask", "exited 143");
+    let ui = s
+        .amux(&["ui", "--dump", "--size", "24x120", "--select", "ask"])
+        .out;
+    assert!(ui.contains("1 stopped") && ui.contains("■ ask"), "{ui}");
+    assert!(!ui.contains("failed"), "{ui}");
 }
 
 #[test]

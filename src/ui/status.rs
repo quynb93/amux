@@ -16,6 +16,8 @@ pub enum Kind {
     /// A state the host reports that needs you (for example waiting for a permission).
     Attention,
     Done,
+    /// Ended because it was stopped (SIGINT, SIGTERM or SIGKILL), not because it failed.
+    Stopped,
     Failed,
     Lost,
 }
@@ -81,6 +83,8 @@ pub fn classify(
             _ => (Kind::Working, "working".into()),
         },
         State::Exited(0) => (Kind::Done, "done".into()),
+        // 128 + SIGINT, SIGKILL or SIGTERM: what `amux stop` and Ctrl-C end a CLI with.
+        State::Exited(130 | 137 | 143) => (Kind::Stopped, "stopped".into()),
         State::Exited(code) => (Kind::Failed, format!("exit {code}")),
         State::Failed => (Kind::Failed, "failed".into()),
         State::Lost => (Kind::Lost, "lost".into()),
@@ -127,9 +131,15 @@ mod tests {
         );
         assert_eq!(c(State::Exited(0), None, None).0, Kind::Done);
         assert_eq!(
-            c(State::Exited(130), None, None),
-            (Kind::Failed, "exit 130".into())
+            c(State::Exited(1), None, None),
+            (Kind::Failed, "exit 1".into())
         );
+        for code in [130, 137, 143] {
+            assert_eq!(
+                c(State::Exited(code), None, None),
+                (Kind::Stopped, "stopped".into())
+            );
+        }
         assert_eq!(c(State::Failed, None, None).0, Kind::Failed);
         assert_eq!(c(State::Lost, None, None).0, Kind::Lost);
         assert!(Kind::Idle.is_live() && !Kind::Done.is_live());
