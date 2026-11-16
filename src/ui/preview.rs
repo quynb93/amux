@@ -276,9 +276,10 @@ impl Previews {
         let pos = self.list.iter().position(|p| p.id == run.id);
         let stale = pos.is_some_and(|i| {
             let p = &self.list[i];
-            // A live preview whose run is now over is fine (it shows the last screen); a
-            // log preview of a run that is now live is not.
-            live && p.conn.is_none()
+            // A live preview whose run is now over is fine (it shows the last screen). A
+            // log preview of a run that is now live is not, nor a connection the host
+            // dropped (a client that stalls for 2 seconds) while the run goes on.
+            live && (p.conn.is_none() || p.lock().ended)
         });
         let i = match pos {
             Some(i) if !stale => i,
