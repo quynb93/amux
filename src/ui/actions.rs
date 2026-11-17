@@ -418,6 +418,14 @@ impl App {
                 vec!["compare".into(), task.clone()],
                 format!("Attempts at {task}"),
             ),
+            Action::Revive(r) => {
+                let mut argv = vec!["revive".to_string()];
+                match r {
+                    Some(name) => argv.push(name),
+                    None => argv.push("--all".into()),
+                }
+                self.background_output(argv, "Reviving lost runs".into());
+            }
             Action::Gc => self.background_output(vec!["gc".into()], "Leftover processes".into()),
             Action::Usage => self.background_output(vec!["usage".into()], "Usage limits".into()),
             Action::Failover(r) => {

@@ -4,6 +4,19 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-17
+
+Runs survive a restart: amux brings them back where they were, with the session they were having.
+
+### Added
+
+- **`amux revive [<run>...] | --all`** brings back lost runs, whose host ended without recording an exit (a restart, a crash, or `kill -9`).
+  - Each one keeps its name, folder, worktree, ports, group and guards.
+  - Its CLI resumes the session it was having (`claude --resume <id>`, `codex resume <id>`), and once it's up the agent is told the computer restarted and to carry on. `--fresh` starts a run whose session can't be found again with its original command, and `--dry-run` shows what would run.
+  - `amux revive` on its own lists lost runs and whether a restart lost them (by the machine's boot time).
+- **`amux revive --at-login`** installs a login item (a LaunchAgent on macOS, a systemd user unit on Linux) that runs `amux revive --all` 30 seconds after each login, with your `PATH`. `--no-at-login` removes it.
+- `amux explain` says whether a lost run was lost in a restart. `amux ui` says how many runs were lost when it opens and has `/revive`, and the phone app has a Revive button.
+
 ## [0.9.0] - 2026-11-17
 
 Agents working in parallel can now be run against each other and the best kept, and they share decisions instead of colliding on ports and env files.

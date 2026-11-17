@@ -172,6 +172,48 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// When the machine last started, in ms since the epoch: a lost run that started before
+/// it was lost in a restart, not a crash.
+#[cfg(target_os = "macos")]
+pub fn boot_time() -> Option<i64> {
+    let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    let r = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            (&mut tv as *mut libc::timeval).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (r == 0).then(|| tv.tv_sec as i64 * 1000 + tv.tv_usec as i64 / 1000)
+}
+
+#[cfg(target_os = "linux")]
+pub fn boot_time() -> Option<i64> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let secs: i64 = stat
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(secs * 1000)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn boot_time() -> Option<i64> {
+    None
+}
+
+impl Run {
+    /// Lost because the machine restarted after it started (not because its host died).
+    pub fn lost_in_restart(&self) -> bool {
+        self.state() == State::Lost && boot_time().is_some_and(|b| self.started_at < b)
+    }
+}
+
 pub fn run_dir(id: &str) -> PathBuf {
     paths::runs_dir().join(id)
 }

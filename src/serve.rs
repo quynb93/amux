@@ -376,6 +376,7 @@ fn run_action(s: &TcpStream, method: &str, id: &str, action: &str, body: &serde_
         }
         ("POST", "push") => reply_text(s, amux(&["verify", id, "--push"])),
         ("POST", "failover") => reply_text(s, amux(&["failover", id])),
+        ("POST", "revive") => reply_text(s, amux(&["revive", id])),
         ("POST", "land") => {
             detach(&["land", id]);
             text(

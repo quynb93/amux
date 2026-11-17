@@ -99,6 +99,13 @@ pub fn ui_cmd(argv: &[String]) -> Result<i32> {
         app.say(format!("Theme: {}", notes.join("; ")), true);
     }
     app.reload();
+    let lost = app.rows.iter().filter(|r| r.kind == Kind::Lost).count();
+    if lost > 0 {
+        app.say(
+            format!("{lost} run(s) were lost (a restart?). /revive brings them back with their sessions."),
+            false,
+        );
+    }
     if let Some(id) = select {
         if crate::remote::split(&id).is_some() {
             app.select_id(&id);
