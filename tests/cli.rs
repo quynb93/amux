@@ -1827,11 +1827,18 @@ fn flags_a_run_that_works_without_changing_anything_and_cleans_up_leftovers() {
 
     // A CLI that starts a server in the background and exits leaves it running.
     let leaky = s.home.join("bin/leaky");
+    let up = s.home.join("daemon-up");
     write(
         &leaky,
         // Detached into a session of its own, as daemons and some dev servers do, so the
-        // end of the run's terminal doesn't take it along.
-        "#!/bin/sh\nperl -e 'use POSIX; fork and exit; setsid(); open STDIN, \"</dev/null\"; open STDOUT, \">/dev/null\"; open STDERR, \">&STDOUT\"; sleep 345' &\necho started a server\nsleep 0.5\n",
+        // end of the run's terminal doesn't take it along. The CLI exits only once the
+        // daemon has detached (it says so with a file), or a slow machine could end the
+        // terminal first and take the daemon with it.
+        &format!(
+            "#!/bin/sh\nperl -e 'use POSIX; fork and exit; setsid(); open STDIN, \"</dev/null\"; open STDOUT, \">/dev/null\"; open STDERR, \">&STDOUT\"; open F, \">{up}\"; close F; sleep 345' &\n\
+             echo started a server\nfor i in $(seq 1 100); do [ -f '{up}' ] && break; sleep 0.1; done\n",
+            up = up.display()
+        ),
     );
     fs::set_permissions(&leaky, fs::Permissions::from_mode(0o755)).unwrap();
     c["providers"][0]["bin"] = leaky.to_str().unwrap().into();
