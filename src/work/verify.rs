@@ -236,6 +236,20 @@ pub fn test_command(dir: &Path) -> Option<String> {
     dir.ancestors().take(8).find_map(guess_test_command)
 }
 
+/// Plain Python tests with no test runner configured: test_*.py here or in tests/.
+fn has_unittests(d: &Path) -> bool {
+    [d.to_path_buf(), d.join("tests")].iter().any(|dir| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with("test_") && n.ends_with(".py")
+            })
+    })
+}
+
 fn guess_test_command(d: &Path) -> Option<String> {
     let has = |f: &str| d.join(f).exists();
     if let Ok(text) = std::fs::read_to_string(d.join("package.json")) {
@@ -267,7 +281,9 @@ fn guess_test_command(d: &Path) -> Option<String> {
     } else if make_test() {
         "make test"
     } else if has("pytest.ini") || has("pyproject.toml") || has("setup.py") || has("tox.ini") {
-        "python -m pytest"
+        "python3 -m pytest"
+    } else if has_unittests(d) {
+        "python3 -m unittest"
     } else if has("gradlew") {
         "./gradlew test"
     } else if has("pom.xml") {
@@ -396,6 +412,8 @@ pub fn run_tests(run: &Run, cmd: Option<String>) -> Result<TestOutcome> {
         .current_dir(&dir)
         .env("AMUX_RUN", &run.id)
         .env("CI", "1")
+        // Keep Python from leaving __pycache__ folders in the run's worktree.
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
@@ -520,6 +538,19 @@ mod tests {
         assert_eq!(guess_test_command(d).as_deref(), Some("make test"));
         write(&d.join("Cargo.toml"), "");
         assert_eq!(guess_test_command(d).as_deref(), Some("cargo test"));
+
+        // Python: pytest when it's configured, plain unittest when there are only tests.
+        let t = TempDir::new();
+        let d = t.path();
+        write(&d.join("calc.py"), "");
+        assert_eq!(guess_test_command(d), None);
+        write(&d.join("tests/test_calc.py"), "");
+        assert_eq!(
+            guess_test_command(d).as_deref(),
+            Some("python3 -m unittest")
+        );
+        write(&d.join("pyproject.toml"), "");
+        assert_eq!(guess_test_command(d).as_deref(), Some("python3 -m pytest"));
     }
 
     #[test]

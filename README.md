@@ -355,12 +355,14 @@ Hand a whole goal to one agent, and it runs a team: it splits the goal into part
 ```sh
 amux lead --name auth --workers 3 claude@work -p "move login to OAuth: backend, UI and tests"
 amux lead --worker claude@work --worker codex@me claude@work -p "…"   # workers on these accounts
+amux lead claude@work -p "…" -- --permission-mode acceptEdits --allowedTools "Bash(amux:*),Bash(git:*)"
 amux team auth          # the workers: state, files and lines changed, tests, what each reported
 amux team wait auth     # block until the next worker finishes or needs help, and print its report
 ```
 
 - **The lead is told how.** Its prompt starts with instructions for running the team with amux commands: `spawn --worktree` for each part, `team wait` instead of polling, `diff`, `verify --test`, `overlap` and `land` to review and merge, and `send` to answer a worker.
 - **Workers report back.** Any run started from inside a run is its worker (`lead` in `ps --json`). Its prompt ends with how to finish: commit, then `amux report "<what it did, how it checked, what's left>"`. `team wait` shows the lead that report, or what the worker is asking and the end of its screen.
+- **Permissions.** Flags after `--` go to the lead's CLI and to its workers, so they can edit files and run `amux` without asking you each time. The first time Claude Code opens the folder it asks whether you trust it; answer that once with `amux attach` or `amux send <lead> --no-enter --key down --key enter`.
 - **It can't run away.** A lead has at most `--workers` going at once (3 by default), and workers can't start workers of their own. Each worker is still a normal run: slots, guards, usage-limit failover and phone notifications all apply.
 - The same commands work for any agent you start yourself: from inside a run, `amux spawn` makes workers and `amux team wait` waits for them.
 
@@ -634,7 +636,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
-| `amux lead [--name <team>] [--workers <n>] [--worker <acct>]… <cli>[@name] -p <goal>` | Start a lead agent that splits the goal and runs a team of workers. |
+| `amux lead [--name <team>] [--workers <n>] [--worker <acct>]… <cli>[@name] -p <goal> [-- <cli flags>]` | Start a lead agent that splits the goal and runs a team of workers. |
 | `amux team [<lead>] [--json]`, `amux team wait [<lead>] [--timeout <secs>]` | A team's workers and their reports; block until the next one finishes or needs help. |
 | `amux report <text…>` | From inside a run: what it did, for its lead. |
 | `amux theme [<name>] [--json]` | List the themes with swatches, or choose one for `amux ui` and the phone app. |

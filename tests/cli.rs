@@ -2619,6 +2619,46 @@ fn a_lead_runs_a_team_of_workers() {
     let again = s.amux_with(&["team", "wait", "t", "--timeout", "1"], &tick, None);
     assert_eq!(again.code, 124, "nothing new: {}", again.out);
 
+    // A worker's committed work lands even with untracked leftovers (a test run's
+    // __pycache__), tested with the command the lead gives.
+    let wt = s.amux_home.join("worktrees/repo-t-b");
+    write(&wt.join("b.txt"), "b\n");
+    write(&wt.join("__pycache__/x.pyc"), "junk");
+    for args in [&["add", "b.txt"][..], &["commit", "-qm", "part b"]] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    let landed = s.amux_with(
+        &["land", "t-b", "--command", "test -f b.txt", "--no-tell"],
+        &[
+            ("GIT_AUTHOR_NAME", "t"),
+            ("GIT_AUTHOR_EMAIL", "t@example.com"),
+            ("GIT_COMMITTER_NAME", "t"),
+            ("GIT_COMMITTER_EMAIL", "t@example.com"),
+        ],
+        None,
+    );
+    assert_eq!(landed.code, 0, "{}{}", landed.out, landed.err);
+    let git_out = |args: &[&str]| {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let branch = git_out(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let top = git_out(&["log", "--format=%s", "-1", &branch]);
+    assert_eq!(top, "part b", "landed on {branch}");
+
     // From the lead's shell, `amux team` needs no name.
     let t = s.amux_with(&["team"], &[("AMUX_RUN", "t")], None);
     assert!(

@@ -4,6 +4,24 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-17
+
+Fixes from running a real lead with Claude Code: it split a two-module task between two workers, then reviewed, tested and landed their work in about two minutes.
+
+### Added
+
+- `amux lead … -- <cli flags>` passes flags (permission mode, allowed tools, model) to the lead's CLI, and the lead gives the same flags to its workers.
+- `amux land --command <cmd>` tests with that command instead of the configured or detected one.
+- Python projects with only `test_*.py` files (and no pytest config) are tested with `python3 -m unittest`.
+
+### Fixed
+
+- `amux land` no longer refuses a run whose worktree has untracked files, such as the `__pycache__` a test run leaves. Only uncommitted changes to tracked files stop it. amux's own test runs also set `PYTHONDONTWRITEBYTECODE`.
+- A prompt now goes before the CLI's own flags, so a flag that takes several values (`claude --allowedTools a b`) can't swallow it.
+- The lead was told to answer a worker's menu with Enter. Claude Code's folder-trust menu has "No, exit" highlighted, so it's now told to read the prompt first and press the keys for the answer it wants.
+- Detected pytest runs use `python3`, which macOS has, instead of `python`.
+- `amux serve` no longer exits when its output is closed (`amux serve | head`, a closed terminal); it keeps serving.
+
 ## [0.11.3] - 2026-11-17
 
 A lead agent that runs a team.

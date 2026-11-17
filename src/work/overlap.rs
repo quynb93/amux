@@ -229,6 +229,8 @@ pub struct Landed {
 pub struct LandOpts {
     pub into: Option<String>,
     pub test: bool,
+    /// The test command, instead of the configured or detected one.
+    pub command: Option<String>,
     /// Tell a live run's agent what to fix when its run can't land.
     pub tell: bool,
     pub dry_run: bool,
@@ -278,7 +280,9 @@ fn land_one(run: &Run, o: &LandOpts, progress: &mut impl FnMut(&str)) -> Result<
     if !dir.is_dir() {
         return Ok(res("skipped", "its worktree is gone".into(), false));
     }
-    let dirty = git(&dir, &["status", "--porcelain"])?;
+    // Only tracked changes: untracked files (a test run's __pycache__, build output)
+    // aren't part of the work and don't stop it landing.
+    let dirty = git(&dir, &["status", "--porcelain", "--untracked-files=no"])?;
     if !dirty.is_empty() {
         let n = dirty.lines().count();
         let told = tell(
@@ -342,7 +346,7 @@ fn land_one(run: &Run, o: &LandOpts, progress: &mut impl FnMut(&str)) -> Result<
     }
     if o.test {
         progress(&format!("{}: testing (waits for a test slot)…", run.id));
-        let cmd = Plan::for_run(run).test;
+        let cmd = o.command.clone().or_else(|| Plan::for_run(run).test);
         match verify::run_tests(run, cmd)? {
             TestOutcome::Passed { .. } => {}
             TestOutcome::NoSlot => {
