@@ -18,7 +18,7 @@ work/            what runs do to code and to the machine:
                    review (diff and line comments). Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
-                   screen, attach, notify
+                   screen, attach, notify (desktop), push (phone: ntfy, Pushover, webhook)
 git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   foundations
 ```
 
@@ -100,7 +100,7 @@ The host (`runs/host.rs`) is a small terminal multiplexer, in the spirit of dtac
 
 `amux attach` (`runs/attach.rs`) puts the terminal in raw mode and copies bytes both ways. It polls the window size and sends `RESIZE` when it changes. On Ctrl-], or when the host closes, it restores the terminal and switches off modes a full-screen CLI may have left on: the alternate screen, a hidden cursor, mouse reporting and bracketed paste.
 
-The pump also feeds each chunk to a detector (`runs/detect.rs`). It strips escape sequences as they arrive, even when one is split across chunks, and keeps the last 4 KB of text. It reports "waiting" when the text contains one of the provider's `waitingPatterns`, or when the CLI rings the bell or sends a notification OSC (9, 777 or 99). It reports "cleared" when a client sends input, or after 4 KB more output with no new signal. The host records the reason, the time and what showed it (`source`: report, pattern, bell or notification) in `run.json`. `amux explain` reads these to say why a run shows its state. When no client is attached, it sends a notification through `runs/notify.rs`. The CLI's own bell already reaches an attached terminal.
+The pump also feeds each chunk to a detector (`runs/detect.rs`). It strips escape sequences as they arrive, even when one is split across chunks, and keeps the last 4 KB of text. It reports "waiting" when the text contains one of the provider's `waitingPatterns`, or when the CLI rings the bell or sends a notification OSC (9, 777 or 99). It reports "cleared" when a client sends input, or after 4 KB more output with no new signal. The host records the reason, the time and what showed it (`source`: report, pattern, bell or notification) in `run.json`. `amux explain` reads these to say why a run shows its state. When no client is attached, it sends a notification through `runs/notify.rs`: to the desktop, and to the phone through `runs/push.rs` once `amux phone` is set up. The CLI's own bell already reaches an attached terminal.
 
 A CLI can also report its own state with OSC 7501, the Program Status Protocol (`runs/program.rs`): `ESC ] 7501 ; state=blocked:kind=permission:msg=<base64> ST`. Codex sends it on any terminal. Claude Code (2.1.295 and later) sends it once the terminal answers the probe `ESC ] 7501 ; ? ST`, so the pump answers that probe by writing the reply to the CLI's input. It only answers live output, never a replay, so each probe gets one answer.
 
@@ -135,6 +135,8 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `machines.json` | `amux machine` | Other machines: name, SSH destination, amux path |
 | `plugins/`, `hooks/` | you | Plugins (`amux <name>`) and event hooks (`on-<event>`) |
 | `serve-token` | `amux serve` | The phone app's token (mode 0600) |
+| `serve.json` | `amux serve` | The address it last listened on, for links in phone notifications |
+| `phone.json`, `phone-sent.json`, `phone.log` | `amux phone`, `amux __push` | Where phone notifications go (mode 0600), when each run and event was last sent, and failed sends |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
 

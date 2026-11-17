@@ -583,6 +583,13 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
              `amux serve --new-token` replaces it."
         );
     }
+    // So phone notifications can link to the run here (`amux phone`).
+    if !addr.ip().is_unspecified() {
+        let _ = crate::store::write_json(
+            &paths::AMUX_HOME.join("serve.json"),
+            &serde_json::json!({ "url": format!("http://{addr}") }),
+        );
+    }
     let token: &'static str = Box::leak(token.into_boxed_str());
     for stream in listener.incoming().flatten() {
         std::thread::spawn(move || handle(stream, token));

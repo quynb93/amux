@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 pub struct Notifier {
     enabled: bool,
     command: Option<Vec<String>>,
+    /// Also to the phone (`amux phone`), whether or not desktop ones are on.
+    phone: bool,
 }
 
 impl Notifier {
@@ -21,6 +23,7 @@ impl Notifier {
             return Notifier {
                 enabled: true,
                 command: None,
+                phone: true,
             };
         };
         let enabled = !matches!(cfg.extra.get("notify"), Some(Value::Bool(false)));
@@ -34,11 +37,19 @@ impl Notifier {
                     .collect::<Vec<_>>()
             })
             .filter(|c| !c.is_empty());
-        Notifier { enabled, command }
+        Notifier {
+            enabled,
+            command,
+            phone: true,
+        }
     }
 
-    /// Sends a notification without waiting for it. `event` is "waiting" or "exited".
+    /// Sends a notification without waiting for it: to the desktop and, when set up, the
+    /// phone. `event` is "waiting", "stalled", "limited" or "exited".
     pub fn send(&self, run: &str, event: &str, title: &str, message: &str) {
+        if self.phone {
+            super::push::send(event, run, title, message);
+        }
         if !self.enabled {
             return;
         }

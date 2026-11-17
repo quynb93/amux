@@ -455,6 +455,22 @@ amux serve --listen 100.101.102.103:7878      # your Tailscale address, to reach
 - Every action runs the same command the CLI has (`ps --json`, `peek`, `send`, `spawn`, `verify`, `pr`, `comment`…), so runs on other machines work too, and the app can do nothing the CLI can't.
 - **From another laptop without Tailscale:** run `ssh -N -L 7878:127.0.0.1:7878 you@your-mac`, then open the link. Or skip the browser: `ssh you@your-mac` and run `amux ui`.
 
+#### Notifications on your phone
+
+The app only buzzes while it's open. To hear from amux with the phone in your pocket, send its notifications to a push service:
+
+```sh
+amux phone ntfy                 # free, no account: install the ntfy app and subscribe to the topic it prints
+amux phone pushover <user-key>  # or Pushover (asks for your app token)
+amux phone webhook <url>        # or any webhook: Slack and Discord ones work as is
+amux phone test                 # check that it arrives
+```
+
+- **What you're told:** a run is waiting for you, stalled, hit a usage limit or ended, and a run's tests or CI checks passed or failed. Waiting, stalls, limits and failures come at high priority. `amux phone events waiting,checks` picks only some.
+- **A tap opens the run** in the phone app. The link is the address `amux serve` last listened on, or set it with `amux phone open http://100.101.102.103:7878`. The link never holds the token.
+- **Privacy:** with ntfy.sh, anyone who knows the topic can read it, so amux makes one nobody will guess. Use `amux phone ntfy https://ntfy.example.com/<topic> --token <t>` for your own server, or `amux phone brief on` to send only run names and events, never what the agents said.
+- Like desktop notifications, they're sent only when no terminal is attached to the run, at most once a minute per run and event. Failed sends are logged in `~/.amux/phone.log`. `amux phone off` stops them.
+
 ### Plugins and hooks
 
 ```sh
@@ -594,6 +610,8 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
+| `amux serve [--listen <host:port>] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. |
+| `amux phone ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. |
 | `amux providers` | List providers, shared homes and private entries. |
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
@@ -613,6 +631,7 @@ Commands never wait on the network. The notice comes from a cached result, which
   worktrees/           git worktrees made by `amux spawn --worktree`
   launches.jsonl       local log of launches: time, account, directory, arguments (mode 0600)
   update-check.json    cached result of the update check
+  phone.json           where phone notifications go (`amux phone`, mode 0600)
 ```
 
 | Variable | Effect |
@@ -622,7 +641,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `AMUX_ACCOUNT` | Set by amux in the launched CLI's environment, e.g. `claude@work`. Read it from hooks or scripts. |
 | `AMUX_RUN` | Set in the CLI's environment when it was started by `amux spawn`: the run's name. |
 
-amux makes no network requests of its own, except the daily update check to `api.github.com`.
+amux makes no network requests of its own, except the daily update check to `api.github.com` and, once you set them up with `amux phone`, notifications to the service you chose.
 
 ## Moving from separate config dirs
 
@@ -658,12 +677,12 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-1. **Parallel runs and status.** Shipped: `amux spawn`, `ps`, `attach`, `logs`, `stop`, `rm`. Next: telling "waiting for permission" apart from plain idle, and notifications when a run needs you.
-2. **Messaging between sessions.** An `amux daemon` with a session registry and inboxes, plus an MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
-3. **Rate-limit failover.** Detect a limit error and resume the session under the next account.
-4. **Usage view.** Usage and limits for each account.
-5. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
-6. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
+Shipped: parallel runs with waiting detection, desktop and phone notifications, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+
+1. **HTTPS for `amux serve`**, so the app works away from a private network and can use web push.
+2. **Messaging between sessions.** An MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
+3. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
+4. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
 
 Ideas and feedback are welcome in [issues](https://github.com/quynb93/amux/issues).
 

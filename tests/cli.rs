@@ -2153,3 +2153,119 @@ fn revives_a_run_lost_in_a_restart_with_its_session() {
     assert_eq!(s.amux(&["revive", "--no-at-login"]).code, 0);
     assert!(!item.exists());
 }
+
+/// A stand-in notification server: answers 200 to every request and keeps each one.
+fn receiver() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("http://{}", l.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut head = String::new();
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            let _ = (&s)
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            let _ = tx.send(format!("{head}\n{}", String::from_utf8_lossy(&body)));
+        }
+    });
+    (addr, rx)
+}
+
+#[test]
+fn notifies_the_phone_when_a_run_needs_you() {
+    let s = Sandbox::new("phone");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let (addr, rx) = receiver();
+    let wait = || rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+    let out = s.amux(&["phone"]);
+    assert!(out.out.contains("No phone set up"), "{}", out.out);
+    assert_ne!(s.amux(&["phone", "test"]).code, 0);
+
+    // ntfy, on a server of your own: the topic, a title, and a link to the run.
+    let out = s.amux(&[
+        "phone",
+        "ntfy",
+        &format!("{addr}/amux-secret"),
+        "--token",
+        "tk",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.err);
+    assert!(out.out.contains("amux-secret"));
+    let mode = fs::metadata(s.amux_home.join("phone.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "phone.json is private");
+    assert_eq!(s.amux(&["phone", "open", "http://100.64.0.1:7878"]).code, 0);
+    let out = s.amux(&["phone", "test"]);
+    assert_eq!(out.code, 0, "{}", out.err);
+    let got = wait();
+    assert!(got.starts_with("POST / "), "{got}");
+    assert!(
+        got.to_ascii_lowercase()
+            .contains("authorization: bearer tk"),
+        "{got}"
+    );
+    assert!(got.contains(r#""topic":"amux-secret""#), "{got}");
+
+    // A run that starts waiting while nobody watches it.
+    let env = [("FAKE_CHAT", "1"), ("FAKE_ASK", "1")];
+    assert_eq!(
+        s.amux_with(&["spawn", "--name", "ask", "fake"], &env, None)
+            .code,
+        0
+    );
+    wait_ps(&s, "ask", "waiting");
+    let got = wait();
+    assert!(got.contains("Waiting for you: approve THIS?"), "{got}");
+    assert!(
+        got.contains(r#""click":"http://100.64.0.1:7878/#run=ask""#),
+        "{got}"
+    );
+    assert!(got.contains(r#""priority":4"#), "{got}");
+
+    // A webhook, brief, only for exits: what the agent said stays home.
+    assert_eq!(
+        s.amux(&["phone", "webhook", &format!("{addr}/hook")]).code,
+        0
+    );
+    assert_eq!(s.amux(&["phone", "events", "exited"]).code, 0);
+    assert_eq!(s.amux(&["phone", "brief", "on"]).code, 0);
+    let out = s.amux(&["phone"]);
+    assert!(
+        out.out.contains("Events:     exited") && out.out.contains("Brief:      on"),
+        "{}",
+        out.out
+    );
+    assert_ne!(s.amux(&["phone", "events", "bogus"]).code, 0);
+    s.amux(&["send", "ask", "quit"]);
+    wait_ps(&s, "ask", "exited 7");
+    let got = wait();
+    assert!(got.starts_with("POST /hook "), "{got}");
+    assert!(
+        got.contains(r#""event":"exited""#) && got.contains(r#""content":"amux: ask"#),
+        "{got}"
+    );
+    assert!(
+        !got.contains("Exited with code"),
+        "brief leaves out the message: {got}"
+    );
+
+    assert!(s.amux(&["phone", "off"]).out.contains("off"));
+    assert!(!s.amux_home.join("phone.json").exists());
+}

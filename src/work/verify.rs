@@ -74,7 +74,9 @@ pub fn record(id: &str, kind: &str, state: &str, detail: &str, live: bool) {
     };
     let _ = write_json(&verify_file(id), &v);
     if v.pid.is_none() {
-        crate::plugins::hook("verify", id, &format!("{kind} {state}: {}", v.detail));
+        let msg = format!("{kind} {state}: {}", v.detail);
+        crate::plugins::hook("verify", id, &msg);
+        crate::runs::push::send("verify", id, &format!("amux: {id}"), &msg);
     }
 }
 
