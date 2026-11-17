@@ -2678,3 +2678,157 @@ fn a_lead_runs_a_team_of_workers() {
         s.amux(&["stop", r]);
     }
 }
+
+/// A stand-in for GitHub: serves the files in `files` by path, and 404 for the rest.
+fn file_server(files: Vec<(String, Vec<u8>)>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = r.read_line(&mut first);
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+            let mut w = &s;
+            match files.iter().find(|(p, _)| *p == path) {
+                Some((_, body)) => {
+                    let _ = write!(
+                        w,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = w.write_all(body);
+                }
+                None => {
+                    let _ = w.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        }
+    });
+    addr
+}
+
+#[test]
+fn update_installs_the_latest_release() {
+    use sha2::Digest;
+    let s = Sandbox::new("update");
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", a) => format!("{a}-apple-darwin"),
+        (_, a) => format!("{a}-unknown-linux-musl"),
+    };
+    // The release: an "amux" that only knows its version.
+    let pack = s.home.join("pack");
+    write(&pack.join("amux"), "#!/bin/sh\necho 9.9.9\n");
+    fs::set_permissions(pack.join("amux"), fs::Permissions::from_mode(0o755)).unwrap();
+    let tgz = s.home.join("release.tar.gz");
+    assert!(Command::new("tar")
+        .arg("-czf")
+        .arg(&tgz)
+        .arg("-C")
+        .arg(&pack)
+        .arg("amux")
+        .status()
+        .unwrap()
+        .success());
+    let bytes = fs::read(&tgz).unwrap();
+    let sum = format!("{:x}  amux-{target}.tar.gz\n", sha2::Sha256::digest(&bytes));
+    let dl = format!("/quynb93/amux/releases/download/v9.9.9/amux-{target}.tar.gz");
+    let latest = (
+        "/repos/quynb93/amux/releases/latest".to_string(),
+        br#"{"tag_name":"v9.9.9"}"#.to_vec(),
+    );
+    let good = file_server(vec![
+        latest.clone(),
+        (dl.clone(), bytes.clone()),
+        (format!("{dl}.sha256"), sum.into_bytes()),
+    ]);
+    let bad = file_server(vec![
+        latest,
+        (dl.clone(), bytes),
+        (
+            format!("{dl}.sha256"),
+            format!("{}  x\n", "0".repeat(64)).into_bytes(),
+        ),
+    ]);
+
+    // A copy installed by the install script.
+    let exe = s.home.join("local/bin/amux");
+    fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_amux"), &exe).unwrap();
+    let run = |args: &[&str], url: &str| {
+        let mut c = Command::new(&exe);
+        c.args(args)
+            .env("HOME", &s.home)
+            .env("AMUX_HOME", &s.amux_home)
+            .env("AMUX_NO_UPDATE_CHECK", "1")
+            .env("AMUX_GITHUB_URL", url);
+        let o = c.output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        (o.status.code().unwrap_or(-1), text)
+    };
+    let version = || {
+        String::from_utf8_lossy(&Command::new(&exe).arg("--version").output().unwrap().stdout)
+            .trim()
+            .to_string()
+    };
+
+    let (code, out) = run(&["update", "--check"], &good);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("→ 9.9.9") && out.contains("install.sh"),
+        "{out}"
+    );
+    assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+
+    let (code, out) = run(&["update"], &bad);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("checksum mismatch"), "{out}");
+    assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+
+    let (code, out) = run(&["update"], &good);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Updated amux"), "{out}");
+    assert_eq!(version(), "9.9.9");
+    let leftovers: Vec<_> = fs::read_dir(exe.parent().unwrap()).unwrap().collect();
+    assert_eq!(leftovers.len(), 1, "temp files left behind");
+
+    // A Homebrew copy is upgraded by brew.
+    let cellar = s.home.join("brew/Cellar/amux/0.1.0/bin/amux");
+    fs::create_dir_all(cellar.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_amux"), &cellar).unwrap();
+    let tools = s.home.join("tools");
+    write(
+        &tools.join("brew"),
+        &format!(
+            "#!/bin/sh\necho \"$@\" > {}\n",
+            s.home.join("brew-args").display()
+        ),
+    );
+    fs::set_permissions(tools.join("brew"), fs::Permissions::from_mode(0o755)).unwrap();
+    let o = Command::new(&cellar)
+        .arg("update")
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_GITHUB_URL", &good)
+        .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        fs::read_to_string(s.home.join("brew-args")).unwrap().trim(),
+        "upgrade amux"
+    );
+}

@@ -95,19 +95,17 @@ fn disabled() -> bool {
 
 /// Asks GitHub for the latest release tag and caches it. Returns the version without "v".
 pub fn fetch_latest() -> Option<String> {
-    let latest = ureq::get(&format!(
-        "https://api.github.com/repos/{REPO}/releases/latest"
-    ))
-    .set("Accept", "application/vnd.github+json")
-    .set("User-Agent", &format!("amux/{}", version()))
-    .timeout(std::time::Duration::from_secs(5))
-    .call()
-    .ok()
-    .and_then(|r| r.into_string().ok())
-    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-    .and_then(|v| v.get("tag_name")?.as_str().map(str::to_string))
-    .filter(|tag| is_version_tag(tag))
-    .map(|tag| tag.trim_start_matches('v').to_string());
+    let latest = ureq::get(&format!("{}/repos/{REPO}/releases/latest", github(true)))
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", &format!("amux/{}", version()))
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|v| v.get("tag_name")?.as_str().map(str::to_string))
+        .filter(|tag| is_version_tag(tag))
+        .map(|tag| tag.trim_start_matches('v').to_string());
     // Offline or blocked: record the attempt so the next try is tomorrow, and keep the last known version.
     write_cache(&Cache {
         checked_at: time::now_ms(),
@@ -202,8 +200,121 @@ pub fn upgrade_command(install_path: &str, latest: &str) -> String {
     }
 }
 
-/// `amux update`: checks now and prints how to upgrade.
-pub fn update_cmd() -> i32 {
+/// GitHub, or a stand-in for tests (`AMUX_GITHUB_URL` replaces both github.com and its API).
+fn github(api: bool) -> String {
+    match std::env::var("AMUX_GITHUB_URL") {
+        Ok(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
+        _ if api => "https://api.github.com".into(),
+        _ => "https://github.com".into(),
+    }
+}
+
+/// The release archive built for this machine, as named by the release workflow.
+fn target() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-musl"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
+        _ => None,
+    }
+}
+
+fn fetch(url: &str) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read;
+    let r = ureq::get(url)
+        .set("User-Agent", &format!("amux/{}", version()))
+        .timeout(std::time::Duration::from_secs(120))
+        .call()
+        .map_err(|e| anyhow::anyhow!("download failed: {url}: {e}"))?;
+    let mut body = Vec::new();
+    r.into_reader().take(200 << 20).read_to_end(&mut body)?;
+    Ok(body)
+}
+
+/// Replaces the binary at `exe` with release `latest`: downloads the archive for this
+/// machine, checks it against the published SHA-256, unpacks it next to `exe`, makes sure
+/// it runs and reports `latest`, then renames it into place. A rename leaves running
+/// amux processes on the old file, so background runs keep going.
+fn self_replace(exe: &std::path::Path, latest: &str) -> anyhow::Result<()> {
+    use anyhow::{bail, Context};
+    use sha2::Digest;
+    let Some(target) = target() else {
+        bail!(
+            "no release is built for this machine ({} {})",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+    };
+    let archive = format!("amux-{target}.tar.gz");
+    let base = format!("{}/{REPO}/releases/download/v{latest}", github(false));
+    println!("Downloading {archive}...");
+    let bytes = fetch(&format!("{base}/{archive}"))?;
+    let sums = String::from_utf8(fetch(&format!("{base}/{archive}.sha256"))?).unwrap_or_default();
+    let expected = sums
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
+    if expected != actual {
+        bail!("checksum mismatch for {archive}; nothing was changed");
+    }
+    let dir = exe.parent().context("the amux binary has no directory")?;
+    let tmp = dir.join(format!(".amux-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).with_context(|| {
+        format!(
+            "can't write to {}; rerun with permission to change it",
+            dir.display()
+        )
+    })?;
+    let result = (|| {
+        std::fs::write(tmp.join(&archive), &bytes)?;
+        let ok = Command::new("tar")
+            .arg("-xzf")
+            .arg(tmp.join(&archive))
+            .arg("-C")
+            .arg(&tmp)
+            .status()
+            .is_ok_and(|s| s.success());
+        let new = tmp.join("amux");
+        if !ok || !new.is_file() {
+            bail!("could not unpack {archive}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let said = Command::new(&new)
+            .arg("--version")
+            .env("AMUX_NO_UPDATE_CHECK", "1")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if is_newer(latest, &said) || is_newer(&said, latest) || said.is_empty() {
+            bail!("the downloaded amux reports {said:?}, not {latest}; nothing was changed");
+        }
+        std::fs::rename(&new, exe).with_context(|| format!("can't replace {}", exe.display()))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+/// `amux update [--check]`: installs the latest release, the same way this copy was
+/// installed. With `--check`, only says whether there is one and how to get it.
+pub fn update_cmd(args: &[String]) -> i32 {
+    let check = match args.first().map(String::as_str) {
+        None => false,
+        Some("--check") => true,
+        Some(_) => {
+            eprintln!("Usage: amux update [--check]");
+            return 2;
+        }
+    };
     let Some(latest) = fetch_latest() else {
         println!(
             "amux {}. Could not read the latest release from {}.",
@@ -216,14 +327,56 @@ pub fn update_cmd() -> i32 {
         println!("amux {} is up to date.", version());
         return 0;
     }
-    let exe = std::env::current_exe()
-        .and_then(|p| p.canonicalize())
+    let exe = std::env::current_exe().and_then(|p| p.canonicalize());
+    let path = exe
+        .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let how = upgrade_command(&path, &latest);
     println!("Update available: amux {} → {latest}", version());
-    println!("  {}", upgrade_command(&exe, &latest));
-    println!("  Release notes: {}", releases_url());
-    0
+    if check {
+        println!("  {how}   (or `amux update`)");
+        println!("  Release notes: {}", releases_url());
+        return 0;
+    }
+    if path.replace('\\', "/").contains("/target/") {
+        println!("This amux was built from source ({path}). Pull and rebuild it instead.");
+        return 1;
+    }
+    let done = |ok: bool| {
+        if ok {
+            println!(
+                "Updated amux {} → {latest}. Release notes: {}",
+                version(),
+                releases_url()
+            );
+            println!("Runs already going keep the old version until they restart.");
+            0
+        } else {
+            eprintln!("Update failed. You can run it yourself:\n  {how}");
+            1
+        }
+    };
+    if !how.starts_with("curl ") {
+        // Homebrew and npm own their copies, so let them do the upgrade.
+        println!("Running: {how}");
+        let mut parts = how.split_whitespace();
+        let ok = Command::new(parts.next().unwrap_or_default())
+            .args(parts)
+            .status()
+            .is_ok_and(|s| s.success());
+        return done(ok);
+    }
+    match exe
+        .map_err(anyhow::Error::from)
+        .and_then(|e| self_replace(&e, &latest))
+    {
+        Ok(()) => done(true),
+        Err(e) => {
+            eprintln!("amux update: {e:#}");
+            done(false)
+        }
+    }
 }
 
 #[cfg(test)]
