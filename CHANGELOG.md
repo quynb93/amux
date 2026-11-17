@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-17
+
+Catch conflicts between parallel agents while they work, and land their branches one at a time.
+
 ### Added
 
 - **Catch conflicts between parallel runs before they merge.** `amux overlap` shows which runs touch the same files, and whether their changes would actually conflict with each other or with the branch they land in. Uncommitted work counts too. The merges happen in memory (`git merge-tree`), so nothing on disk changes. `--check` exits 1 on a conflict, and `--json` prints it all for scripts. `amux ui` marks runs that conflict (`✗ conflicts with …`) in the list and on the board, and the phone app lists overlaps under Monitor.

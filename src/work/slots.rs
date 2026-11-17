@@ -729,6 +729,12 @@ mod tests {
             "the queue file is removed after giving up"
         );
         held.pop();
+        // Other tests start processes in parallel, and a child holds a copy of every open
+        // file until it execs, so the lock can outlive the drop for a moment.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while holders(root, "t1").len() > 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(holders(root, "t1").len(), 1);
         assert!(take(&mut None).is_some());
         assert!(acquire_in(root, "../x", &me, &w, limits, |_| {}).is_err());
