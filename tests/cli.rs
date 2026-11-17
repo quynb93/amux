@@ -44,6 +44,9 @@ impl Sandbox {
                && printf '\\033]7501;?\\033\\\\' && sleep 0.3 \\
                && st \"blocked:kind=permission:msg=$(printf 'approve Write: a.rs' | base64)\" && read a \\
                && st \"working:msg=$(printf 'writing a.rs' | base64)\" && read b && st done && read c && exit 3\n\
+             [ -n \"$FAKE_PERM\" ] && stty -icanon -echo && for c in 'cargo test --all' 'git push origin main'; do \
+               printf '%s\\n' '────────────────' ' Bash command' ' approve this?' '╌╌╌╌╌╌╌╌╌╌' \" $c\" '╌╌╌╌╌╌╌╌╌╌' ' Do you want to proceed?' ' ❯ 1. Yes' '   2. No'; \
+               a=$(dd bs=1 count=1 2>/dev/null); echo \"answer $a to $c\"; done\n\
              [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = ask ] && echo \"Approve this? [y/n]\"; [ \"$l\" = quit ] && exit 7; done\n\
              exit 0\n",
         );
@@ -3041,4 +3044,76 @@ fn works_on_github_issues_and_runs_commands_on_a_schedule() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     panic!("the scheduler is still going");
+}
+
+#[test]
+fn answers_permission_prompts_the_rules_allow() {
+    let s = Sandbox::new("allow");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let env = [("FAKE_PERM", "1")];
+    let peek = |run: &str, want: &str| {
+        for _ in 0..100 {
+            let out = s.amux(&["peek", run]).out;
+            if out.contains(want) {
+                return out;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!(
+            "{run} never showed {want:?}:\n{}",
+            s.amux(&["peek", run]).out
+        );
+    };
+
+    // No rules: the prompt waits for you.
+    let r = s.amux_with(&["spawn", "--name", "none", "fake"], &env, None);
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "none", "waiting");
+    assert!(!s.amux(&["peek", "none"]).out.contains("answer"));
+
+    assert_eq!(s.amux(&["allow", "bash: cargo test*"]).code, 0);
+    assert_eq!(s.amux(&["allow", "--deny", "bash: *git push*"]).code, 0);
+    assert_ne!(s.amux(&["allow", "not a rule"]).code, 0);
+    let list = s.amux(&["allow"]).out;
+    assert!(
+        list.contains("allow  bash: cargo test*") && list.contains("deny   bash: *git push*"),
+        "{list}"
+    );
+    let c = s.amux(&["allow", "--check", "bash: cargo test && git push"]);
+    assert_eq!(c.code, 1);
+    assert!(c.out.contains("denied by bash: *git push*"), "{}", c.out);
+
+    // With rules: cargo test is answered by itself, git push waits for you.
+    let r = s.amux_with(&["spawn", "--name", "auto", "fake"], &env, None);
+    assert_eq!(r.code, 0, "{}", r.err);
+    peek("auto", "answer 1 to cargo test --all");
+    wait_ps(&s, "auto", "waiting");
+    assert!(!s.amux(&["peek", "auto"]).out.contains("to git push"));
+    let log = s.amux(&["allow", "--log", "auto"]).out;
+    assert!(
+        log.contains("approved") && log.contains("bash: cargo test --all"),
+        "{log}"
+    );
+    assert!(
+        log.contains("denied") && log.contains("git push origin main"),
+        "{log}"
+    );
+
+    // A run that must always ask.
+    let r = s.amux_with(
+        &["spawn", "--name", "manual", "--no-auto-approve", "fake"],
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "manual", "waiting");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!s.amux(&["peek", "manual"]).out.contains("answer"));
+    assert!(s
+        .amux(&["allow", "--log", "manual"])
+        .out
+        .contains("No prompts judged"));
+    for r in ["none", "auto", "manual"] {
+        s.amux(&["stop", r, "--force"]);
+    }
 }

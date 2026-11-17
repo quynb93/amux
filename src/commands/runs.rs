@@ -32,6 +32,8 @@ struct SpawnOpts {
     max_time: Option<u64>,
     /// A first prompt, passed the way the provider takes one (its `promptArgs`).
     prompt: Option<String>,
+    /// Permission prompts always wait for you (`--no-auto-approve`).
+    no_auto: bool,
     /// A GitHub issue to work on: it becomes the first prompt (`--issue`).
     issue: Option<String>,
     worktree: bool,
@@ -72,6 +74,7 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--base" => o.base = Some(value()?),
             "--worktree" | "-w" => o.worktree = true,
             "--attach" | "-a" => o.attach = true,
+            "--no-auto-approve" => o.no_auto = true,
             "--dir" | "-C" => o.dir = Some(value()?),
             "--adopt" => o.adopt = Some(value()?),
             "--group" => o.group = Some(value()?),
@@ -313,6 +316,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         lead: lead.clone(),
         team: o.workers,
         issue: issue.as_ref().map(|i| i.number),
+        auto_approve: o.no_auto.then_some(false),
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));

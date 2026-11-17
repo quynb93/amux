@@ -70,6 +70,10 @@ pub struct Run {
     /// For a lead (`amux lead`): how many workers it may have going at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<u32>,
+    /// Some(false) when permission prompts must always wait for you (`--no-auto-approve`),
+    /// whatever the rules in approve.json say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approve: Option<bool>,
     /// The GitHub issue it works on (`amux spawn --issue`); its PR says it fixes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<u64>,

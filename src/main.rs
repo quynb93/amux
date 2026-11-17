@@ -1,6 +1,8 @@
 mod commands {
     pub mod account;
     #[cfg(unix)]
+    pub mod allow;
+    #[cfg(unix)]
     pub mod attempts;
     #[cfg(unix)]
     pub mod control;
@@ -94,6 +96,7 @@ Accounts:
 
 Parallel runs (each CLI in the background, in its own terminal):
   amux spawn [--on <machine>[:<dir>]] [--stall <30m>] [--max-time <4h>] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
+      --no-auto-approve: every permission prompt waits for you, whatever `amux allow` says
       --issue <n>: work on a GitHub issue (its own worktree; the PR says it fixes it)
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
       --on starts it on another machine; then name it <machine>:<run> anywhere a run goes.
@@ -137,6 +140,9 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux revive [<run>...] [--all] [--fresh] Bring back runs lost in a restart: same name, worktree
                                            and session (--resume); --at-login does it after each restart
   amux gc [--dry-run]                      End processes finished runs left behind (dev servers…)
+  amux allow [<rule>... | --deny <rule> | --rm <rule> | --starter | --check <rule> | --log]
+      Answer permission prompts by themselves when they ask for what the rules allow:
+      \"bash: cargo test*\", \"edit\" (inside the run's folder); deny rules win
   amux schedule add <name> \"<when>\" <amux command...> | rm | run | pause | resume | log
       Run an amux command by itself: \"every 1h\", \"weekdays 9:00\", or cron (\"0 9 * * 1-5\")
   amux intake [--label <l>] [--limit <n>] <provider>[@name]
@@ -293,6 +299,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "lead" => commands::team::lead_cmd(rest),
         #[cfg(unix)]
         "team" => commands::team::team_cmd(rest),
+        #[cfg(unix)]
+        "allow" => commands::allow::allow_cmd(rest),
         #[cfg(unix)]
         "schedule" | "schedules" => commands::schedule::schedule_cmd(rest),
         #[cfg(unix)]

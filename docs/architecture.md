@@ -17,7 +17,7 @@ remote.rs        other machines: SSH, forwarding, the socket pipe
 plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:
                    slots (machine limits), verify (tests or push), github (PR, CI),
-                   issues (GitHub issues as prompts), review (diff and line comments).
+                   issues (GitHub issues as prompts), approve (auto-approve rules), review (diff and line comments).
                    Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
@@ -145,6 +145,8 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `phone.json`, `phone-sent.json`, `phone.log` | `amux phone`, `amux __push` | Where phone notifications go (mode 0600), when each run and event was last sent, and failed sends |
 | `schedules.json`, `schedules.lock`, `schedules/<name>.log` | `amux schedule`, `amux __scheduler` | Schedules and how each last went (edited under the lock), and each one's output |
 | `scheduler.lock`, `scheduler.log` | `amux __scheduler` | Held with `flock(2)` by the one scheduler while it runs; when it started and stopped |
+| `approve.json` | `amux allow` | Auto-approve rules: allow and deny lists, read by each run host every few seconds |
+| `runs/<id>/approvals.jsonl` | the run host | Each permission prompt it judged: what it asked, approved, denied or left for you, and why |
 | `intake.json` | `amux intake` | Issue numbers already started, per repo, so none starts twice |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |

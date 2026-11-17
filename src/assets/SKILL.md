@@ -78,6 +78,11 @@ needs you, then prints what it reported. Loop on it instead of polling. A worker
 `amux report "<what it did, how it checked, what's left>"`. Workers can't start workers.
 To hand a whole goal to a lead agent: `amux lead --workers 3 claude -p "<goal>"`.
 
+## Permission prompts
+
+`amux allow` lists the rules that answer workers' permission prompts by themselves
+(`amux allow --log` shows what was answered). Don't add rules on your own: ask the user.
+
 ## Issues and schedules
 
 `amux spawn --issue 42 claude` works on GitHub issue #42 in its own worktree; its PR says

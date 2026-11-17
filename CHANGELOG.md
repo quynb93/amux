@@ -4,6 +4,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-11-17
+
+### Added
+
+- Auto-approve: `amux allow` keeps rules (`bash: cargo test*`, `edit`, deny rules that win) in `~/.amux/approve.json`, and each run's host answers Claude Code permission prompts that ask for what they allow. Shell commands are judged part by part; substitution, redirection, background jobs and multi-line commands always wait for you, and edits are only answered inside the run's folder. `--starter` adds a safe set, `--check` says what would happen to a prompt, and `--log` shows every decision (`runs/<run>/approvals.jsonl`). `amux spawn --no-auto-approve` makes a run always ask. Answers run the `on-approved` hook.
+
 ## [0.11.6] - 2026-11-17
 
 ### Added

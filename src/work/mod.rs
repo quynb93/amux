@@ -2,6 +2,7 @@
 //! (`slots`), checking a run's work (`verify`), its pull request and CI (`github`), and
 //! reviewing its changes (`review`). Nothing here prints; `commands/` and `ui/` show it.
 
+pub mod approve;
 pub mod github;
 pub mod guards;
 pub mod issues;
