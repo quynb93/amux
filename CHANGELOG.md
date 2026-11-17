@@ -20,6 +20,7 @@ Fixes from running a real lead with Claude Code: it split a two-module task betw
 - A prompt now goes before the CLI's own flags, so a flag that takes several values (`claude --allowedTools a b`) can't swallow it.
 - The lead was told to answer a worker's menu with Enter. Claude Code's folder-trust menu has "No, exit" highlighted, so it's now told to read the prompt first and press the keys for the answer it wants.
 - Detected pytest runs use `python3`, which macOS has, instead of `python`.
+- `amux serve` no longer exits when its output is closed (`amux serve | head`, a closed terminal); it keeps serving.
 
 ## [0.11.3] - 2026-11-17
 

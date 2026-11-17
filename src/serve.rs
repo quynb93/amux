@@ -618,6 +618,15 @@ fn start_tailscale(port: u16) -> Result<(String, std::process::Child)> {
     Ok((format!("https://{name}"), child))
 }
 
+/// Prints a line, ignoring a closed stdout: the server keeps serving when whoever started
+/// it stops reading (`amux serve | head`, a closed terminal).
+macro_rules! say {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+
 pub fn serve_cmd(argv: &[String]) -> Result<i32> {
     let mut listen = "127.0.0.1:7878".to_string();
     let (mut renew, mut tls, mut tailscale) = (false, false, false);
@@ -683,30 +692,30 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
         }
     };
 
-    println!("amux serve: open this on your phone, then add it to the home screen:\n");
-    println!("  {base}/?t={token}\n");
+    say!("amux serve: open this on your phone, then add it to the home screen:\n");
+    say!("  {base}/?t={token}\n");
     if tailscale {
-        println!(
+        say!(
             "Served by Tailscale over HTTPS with a real certificate, to your tailnet's devices only.\n\
              Anyone with the link can control your runs: keep it private."
         );
     } else if let Some(c) = &self_signed {
-        println!(
+        say!(
             "HTTPS with a self-signed certificate: the browser warns once. Check the fingerprint is\n  {}\n\
              To stop the warning, install {base}/amux-cert.pem on the phone and trust it\n\
              (iOS: Settings → General → About → Certificate Trust Settings).",
             crate::tls::fingerprint(c).unwrap_or_default()
         );
     } else if tls {
-        println!("HTTPS with your certificate.");
+        say!("HTTPS with your certificate.");
     } else if ip.is_loopback() {
-        println!(
+        say!(
             "It listens on this machine only. From a phone: `--tailscale` (HTTPS, nothing to set up\n\
              if you use Tailscale), `--listen <address>:{port} --tls`, or an SSH tunnel.\n\
              Anyone with the link can control your runs: keep it private."
         );
     } else {
-        println!(
+        say!(
             "Warning: no TLS. Use this only on a private network, or add --tls (or --tailscale).\n\
              The link is a password; `amux serve --new-token` replaces it."
         );
