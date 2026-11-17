@@ -39,6 +39,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Usage limits](#usage-limits)
   - [After a restart](#after-a-restart)
   - [Runaway and stuck agents](#runaway-and-stuck-agents)
+  - [Answering permission prompts](#answering-permission-prompts)
   - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
   - [Issues and schedules](#issues-and-schedules)
@@ -67,6 +68,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
 - **Sign in your way.** Use the CLI's own login flow or a stored token (macOS Keychain, or a `0600` file on Linux).
 - **Sessions across accounts and CLIs.** List every session from every CLI in one place. Resume one under another account, or hand it to a different CLI with a transcript handoff.
 - **Parallel runs.** Start several agents in the background, across accounts and CLIs, each in its own git worktree if you like. See which are working and which are waiting, attach to any of them, and detach again.
+- **Auto-approve.** Permission prompts for what your rules allow, such as `cargo test` or edits inside the run's worktree, are answered for you. Everything else waits for you, and every answer is logged.
 - **Issues and schedules.** Turn a GitHub issue into a run on its own branch, pick up new issues by label, and run any amux command on a schedule, such as a morning triage.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
 - **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
@@ -410,6 +412,29 @@ An agent can keep "working" for an hour without getting anywhere, using up your 
 - `~/.amux/hooks/on-stalled` runs when a run is flagged.
 - **`amux gc`** ends what finished runs left behind, such as a dev server still holding a port. It finds processes still in the run's process group, ones carrying the run's `AMUX_RUN` (on Linux), and ones working inside the run's own worktree. `--dry-run` lists them first.
 
+### Answering permission prompts
+
+A run that nobody watches stops at every "Do you want to proceed?". Rules let amux answer the safe ones itself:
+
+```sh
+amux allow --starter                      # read-only git, builds, tests, linters, edits in the run's folder
+amux allow "bash: make lint*" "bash: docker compose ps"   # more commands (* is any text)
+amux allow --deny "bash: *terraform apply*"              # always ask; deny rules win
+amux allow                                # the rules
+amux allow --check "bash: cargo test && git push"        # what amux would do with that prompt
+amux allow --log                          # what was answered, denied or left for you, per run
+amux spawn --no-auto-approve claude       # this run always asks
+```
+
+The run's host reads the prompt from the screen and answers "Yes" only when every part of it is allowed:
+
+- **Shell commands** are split on `&&`, `||`, `;` and `|`, and each part needs an allow rule. If any part matches a deny rule, the whole command waits for you. A command that substitutes (`$(…)`, backticks), redirects (other than to `/dev/null` or `2>&1`), runs in the background or spans several lines always waits.
+- **File edits** (`edit`) are only answered for files inside the run's folder, so a worktree run can only change its own checkout.
+- **Anything else**, such as a web fetch or an MCP tool, waits unless a rule names it (`fetch`).
+- **The starter set** denies `git push`, `rm -rf`, `sudo`, `--force` and `--no-verify`.
+
+Answered prompts don't notify you; the ones left for you do, as before. The rules are in `~/.amux/approve.json` and apply to running runs within seconds. Each run's decisions are in `runs/<run>/approvals.jsonl`, and the `on-approved` hook runs for each answer. This reads Claude Code's prompts today; Codex and Gemini CLI prompts still wait for you. Claude Code's own permission settings and auto mode work as before; amux only answers prompts the CLI still shows.
+
 ### Landing parallel runs
 
 Worktrees keep agents out of each other's files, but two branches that change the same lines still conflict, and you only find out when the second one merges. amux checks while they work:
@@ -534,7 +559,7 @@ amux plugin list
 ```
 
 - **Plugins** are any executable in `~/.amux/plugins/`, or named `amux-<name>` on PATH, the way git does it. They get `AMUX_BIN` (amux itself) and `AMUX_HOME`. In `amux ui`, `/plugin <name>` runs one on the selected run, with `AMUX_RUN` set, and shows what it printed. A line `# amux: <what it does>` describes it.
-- **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify` or `on-checks`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
+- **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify`, `on-checks` or `on-approved`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
 - amux runs a plugin or hook only if it belongs to you and no one else can write to it.
 
 ### Agents that run agents
@@ -664,6 +689,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux spawn --issue <n> …` | Work on a GitHub issue in its own worktree; the PR says it fixes it. |
 | `amux intake [--label <l>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open GitHub issue (with the label). |
 | `amux schedule [add <name> "<when>" <command…> \| rm \| run \| pause \| resume \| log <name>]` | Run amux commands by themselves at set times. |
+| `amux allow [<rule>… \| --deny <rule>… \| --rm <rule>… \| --starter \| --clear \| --check <rule> \| --log [<run>]]` | Rules for answering permission prompts by themselves. |
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
@@ -694,6 +720,7 @@ Commands never wait on the network. The notice comes from a cached result, which
   update-check.json    cached result of the update check
   phone.json           where phone notifications go (`amux phone`, mode 0600)
   tls/                 the self-signed certificate made by `amux serve --tls`
+  approve.json         rules for answering permission prompts (`amux allow`)
   schedules.json       schedules (`amux schedule`); schedules/<name>.log is what each printed
   scheduler.log        when the scheduler started and stopped, and commands it couldn't start
   intake.json          issues `amux intake` started, per repo
@@ -743,7 +770,7 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, GitHub issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, auto-approve rules, GitHub issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
 1. **Web push from the phone app**, now that it can be served over HTTPS.
 2. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.

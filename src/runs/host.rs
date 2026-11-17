@@ -10,7 +10,7 @@ use super::screen;
 use super::{
     load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, WATCH,
 };
-use crate::work::slots;
+use crate::work::{approve, slots};
 use crate::{fsx, time};
 use anyhow::{anyhow, Result};
 use std::fs::{self, File};
@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -117,6 +117,11 @@ struct Hub {
     notifier: Notifier,
     /// The host's copy of run.json, which it alone writes while the run is alive.
     run: Run,
+    /// The auto-approve rules, reread every few seconds, and when.
+    rules: approve::Rules,
+    rules_at: i64,
+    /// The prompt last judged, so each is judged (and answered) once.
+    judged: Option<String>,
 }
 
 impl Default for Hub {
@@ -129,6 +134,9 @@ impl Default for Hub {
             detector: Detector::default(),
             notifier: Notifier::default(),
             run: Run::default(),
+            rules: approve::Rules::default(),
+            rules_at: 0,
+            judged: None,
         }
     }
 }
@@ -198,6 +206,50 @@ impl Hub {
                 }
             }
         }
+    }
+
+    /// Answers a permission prompt on the screen when the rules allow what it asks, and
+    /// logs each prompt it judged. True when it answered.
+    fn auto_approve(&mut self, mut master: &File) -> bool {
+        if self.run.auto_approve == Some(false) {
+            return false;
+        }
+        let now = time::now_ms();
+        if now.saturating_sub(self.rules_at) > 2000 {
+            self.rules = approve::load();
+            self.rules_at = now;
+        }
+        if self.rules.allow.is_empty() {
+            return false;
+        }
+        let Some(ask) = approve::read_prompt(&screen::text(&self.screen)) else {
+            self.judged = None;
+            return false;
+        };
+        let label = ask.label();
+        if self.judged.as_deref() == Some(label.as_str()) {
+            return false;
+        }
+        self.judged = Some(label.clone());
+        let (action, why) = match approve::judge(&self.rules, &ask, Path::new(&self.run.cwd)) {
+            approve::Verdict::Allow(by) => ("approved", by.join(", ")),
+            approve::Verdict::Deny(rule) => ("denied", rule),
+            approve::Verdict::Ask(why) => ("asked", why),
+        };
+        let approved = action == "approved" && master.write_all(ask.yes.as_bytes()).is_ok();
+        let line = serde_json::json!({
+            "at": now, "kind": ask.kind, "subject": ask.subject,
+            "action": if action == "approved" && !approved { "failed" } else { action },
+            "why": why,
+        });
+        let _ = fsx::append_private(
+            &self.run.dir().join("approvals.jsonl"),
+            &format!("{line}\n"),
+        );
+        if approved {
+            crate::plugins::hook("approved", &self.run.id, &label);
+        }
+        approved
     }
 
     fn title(&self) -> String {
@@ -513,7 +565,15 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         // caused it (each saves run.json).
         let record = h.detector.take_record();
         h.set_status(record);
-        h.apply(change);
+        if h.auto_approve(master) {
+            // Answered for you: not waiting after all, and no one needs to hear about it.
+            let cleared = h.detector.answered();
+            if h.run.waiting.is_some() {
+                h.apply(cleared);
+            }
+        } else {
+            h.apply(change);
+        }
         if let Some(msg) = h.detector.take_limit() {
             h.limited(&msg);
         }
