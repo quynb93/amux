@@ -30,6 +30,8 @@ mod commands {
     #[cfg(unix)]
     pub mod slot;
     #[cfg(unix)]
+    pub mod team;
+    #[cfg(unix)]
     pub mod theme;
     #[cfg(unix)]
     pub mod usage;
@@ -104,6 +106,12 @@ Parallel runs (each CLI in the background, in its own terminal):
       Several attempts at one task, each in its own worktree (accounts or CLIs can differ)
   amux compare <task> [--no-test]          Test each attempt in a slot and rank them
   amux pick <run> [--land]                 Keep the best attempt (and land it); clear the others
+  amux lead [--workers <n>] [--worker <acct>]... <provider>[@name] -p <goal>
+      A lead agent that splits the goal, gives each part to a worker in its own worktree
+      (`amux spawn` from inside it), waits for them, reviews and lands their work
+  amux team [<lead>] [--json] | amux team wait [<lead>]
+      A team's workers: state, changes, tests and reports; wait blocks until one finishes
+  amux report <text...>                    From inside a run: what it did, for its lead
   amux note <text...>                      A decision every new run on this repo starts with
   amux notes [--rm <n>]                    List (or remove) this repo's notes
   amux broadcast <text...> [--note]        Tell every run working on this repo
@@ -267,6 +275,12 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "revive" => commands::runs::revive_cmd(rest),
         #[cfg(unix)]
         "phone" => commands::phone::phone_cmd(rest),
+        #[cfg(unix)]
+        "lead" => commands::team::lead_cmd(rest),
+        #[cfg(unix)]
+        "team" => commands::team::team_cmd(rest),
+        #[cfg(unix)]
+        "report" => commands::team::report_cmd(rest),
         #[cfg(unix)]
         "theme" | "themes" => commands::theme::theme_cmd(rest),
         #[cfg(unix)]

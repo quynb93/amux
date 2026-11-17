@@ -25,6 +25,8 @@ struct SpawnOpts {
     adopt: Option<String>,
     /// One of several attempts at the same task (`amux try`).
     group: Option<String>,
+    /// Starts a team lead that may have this many workers (`amux lead`).
+    workers: Option<u32>,
     /// Flag the run after this long working without changing a file, or alive at all.
     stall: Option<u64>,
     max_time: Option<u64>,
@@ -71,6 +73,15 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--dir" | "-C" => o.dir = Some(value()?),
             "--adopt" => o.adopt = Some(value()?),
             "--group" => o.group = Some(value()?),
+            "--workers" => {
+                o.workers = Some(
+                    value()?
+                        .parse()
+                        .ok()
+                        .filter(|n| (1..=32).contains(n))
+                        .ok_or_else(|| anyhow!("--workers is a number from 1 to 32"))?,
+                )
+            }
             "--stall" | "--max-time" => {
                 let v = value()?;
                 let ms = crate::work::guards::parse_duration(&v).ok_or_else(|| {
@@ -195,6 +206,24 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         return m.run(&rest, dir);
     }
     let (o, acct_ref, args) = parse_spawn(argv)?;
+    // An easy mistake, for people and agents alike: amux's options after the account go
+    // to the CLI instead.
+    if let Some(f) = args.iter().find(|a| {
+        [
+            "--prompt",
+            "--worktree",
+            "--name",
+            "--branch",
+            "--base",
+            "--dir",
+        ]
+        .contains(&a.as_str())
+    }) {
+        eprintln!(
+            "amux: {f} comes after the account, so it goes to the CLI, not to amux. \
+             Put amux's options first: amux spawn {f} … {acct_ref}"
+        );
+    }
     if let Some(n) = &o.name {
         if !valid_name(n) {
             bail!("Run names use letters, digits, '.', '_' and '-'.");
@@ -226,10 +255,19 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         }
         None => std::env::current_dir()?,
     };
+    // Started from inside a run: it's that run's worker, within its team's limits.
+    let lead = match o.adopt {
+        Some(_) => None,
+        None => crate::commands::team::lead_for_spawn()?,
+    };
     let mut args = args.to_vec();
     if let Some(p) = o.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        // The repo's shared decisions (`amux note`) come first.
-        let p = format!("{}{p}", crate::work::notes::preamble(&cwd));
+        // The repo's shared decisions (`amux note`) come first; a worker is told how to
+        // report back at the end.
+        let mut p = format!("{}{p}", crate::work::notes::preamble(&cwd));
+        if let Some(l) = &lead {
+            p.push_str(&crate::commands::team::worker_postscript(l));
+        }
         match &spec.prompt_args {
             Some(t) => args.extend(crate::launch::fill_args(t, &[("prompt", &p)])),
             None => args.push(p),
@@ -249,6 +287,8 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         limit_patterns: spec.limit_patterns.clone(),
         guard: Some(crate::work::guards::Guard::from_config(o.stall, o.max_time)),
         group: o.group.clone(),
+        lead: lead.clone(),
+        team: o.workers,
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));
