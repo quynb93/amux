@@ -53,6 +53,9 @@ pub struct Run {
     /// Prompt text that means the CLI is waiting for you (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_patterns: Vec<String>,
+    /// Text that means the account hit its usage limit (from the provider spec).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limit_patterns: Vec<String>,
     /// Set by the host while the CLI is waiting for you.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Waiting>,

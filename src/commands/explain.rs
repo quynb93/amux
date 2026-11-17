@@ -142,6 +142,7 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
                     Some("report") => "report",
                     Some("bell") => "bell",
                     Some("notification") => "notification",
+                    Some("limit") => "limit",
                     Some(_) => "pattern",
                     None => "unknown",
                 };
@@ -157,6 +158,10 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
                     }
                     "bell" => "The CLI rang the terminal bell, which CLIs do when they need you.".into(),
                     "notification" => format!("The CLI sent a notification: “{}”.", w.reason),
+                    "limit" => format!(
+                        "{} hit its usage limit: “{}”. `amux failover {}` continues the session under another account; `amux usage` shows them.",
+                        run.account, w.reason, run.id
+                    ),
                     "pattern" => format!(
                         "Its screen shows “{}”, one of the prompts this provider is watched for (waitingPatterns).",
                         w.reason

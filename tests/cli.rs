@@ -1651,3 +1651,101 @@ fn finds_overlapping_runs_and_lands_them_one_at_a_time() {
     );
     assert!(s.amux(&["ps", "--json"]).out.contains("\"kind\": \"land\""));
 }
+
+#[test]
+fn spots_usage_limits_and_moves_the_session_to_another_account() {
+    let s = Sandbox::new("limits");
+    // A CLI that says it hit its limit when asked to, keeps Claude-style sessions in the
+    // shared home, and resumes one with --resume <id>.
+    let bin = s.home.join("bin/limit-cli");
+    write(
+        &bin,
+        "#!/bin/sh\necho \"ARGS $*\"\nwhile read l; do echo \"got $l\"; \
+         [ \"$l\" = limit ] && echo \"You've hit your limit · resets 7pm (Asia/Saigon) /upgrade\"; done\n",
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = bin.to_str().unwrap().into();
+    c["providers"][0]["limitPatterns"] = serde_json::json!(["You've hit your limit"]);
+    c["providers"][0]["resumeArgs"] = serde_json::json!(["--resume", "{id}"]);
+    c["providers"][0]["sessions"] = "claude".into();
+    c["providers"][0]["sharedDirs"] = serde_json::json!(["projects"]);
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    s.amux(&["account", "add", "fake", "two", "--no-login"]);
+    s.amux(&["account", "default", "fake@one"]);
+    let r = s.amux(&["spawn", "--name", "lim", "fake"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "lim", "running");
+    // The session it is having, as Claude Code would have written it, in the run's folder.
+    let started: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/lim/run.json")).unwrap())
+            .unwrap();
+    let cwd = started["cwd"].as_str().unwrap().to_string();
+    let sid = "5e55a0b1-0000-4000-8000-000000000001";
+    write(
+        &s.shared.join(format!("projects/-x/{sid}.jsonl")),
+        &format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "cwd": cwd, "sessionId": sid,
+                "message": {"role": "user", "content": "build the login page"}})
+        ),
+    );
+
+    assert_eq!(s.amux(&["send", "lim", "limit"]).code, 0);
+    wait_ps(&s, "lim", "waiting");
+    let run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/lim/run.json")).unwrap())
+            .unwrap();
+    assert_eq!(run["waiting"]["source"], "limit");
+    assert_eq!(
+        run["waiting"]["reason"],
+        "You've hit your limit · resets 7pm (Asia/Saigon)"
+    );
+    let u = s.amux(&["usage"]).out;
+    assert!(
+        u.contains("fake@one") && u.contains("limited, resets in"),
+        "{u}"
+    );
+
+    // A new run that names no account skips the limited one.
+    let r = s.amux(&["spawn", "--name", "next", "fake"]);
+    assert!(
+        r.err.contains("fake@one is limited") && r.err.contains("using fake@two"),
+        "{}",
+        r.err
+    );
+
+    // Failover: the same session, under the other account, told to carry on.
+    let f = s.amux(&["failover", "lim"]);
+    assert_eq!(f.code, 0, "{}{}", f.out, f.err);
+    assert!(
+        f.out.contains("lim continues as lim-2 under fake@two"),
+        "{}",
+        f.out
+    );
+    let ps = s.amux(&["ps"]).out;
+    assert!(ps.contains(&format!("--resume {sid}")), "{ps}");
+    let mut log = String::new();
+    for _ in 0..100 {
+        log = s.amux(&["logs", "lim-2"]).out;
+        if log.contains("got The previous account hit its usage limit") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        log.contains("got The previous account hit its usage limit"),
+        "{log}"
+    );
+    assert_eq!(s.amux(&["usage", "--clear", "fake@one"]).code, 0);
+    assert!(
+        s.amux(&["usage"]).out.contains("fake@one     ok")
+            || !s.amux(&["usage"]).out.contains("limited, resets in")
+    );
+    for r in ["lim-2", "next"] {
+        s.amux(&["stop", r]);
+    }
+}

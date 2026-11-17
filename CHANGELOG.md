@@ -4,6 +4,15 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- **Usage limits across accounts.**
+  - When a run's CLI says its account hit its usage limit ("You've hit your limit · resets 7pm"), the run shows as waiting with that message, the account is marked limited until the reset time the message names, and a notification and the `limited` hook go out. The messages come from each provider's new `limitPatterns`, with defaults for Claude Code, Codex and Gemini CLI.
+  - `amux usage` lists each account, whether it is limited and until when, and its live runs. `--clear` forgets a limit that lifted early.
+  - `amux spawn <provider>` (no account named) skips a limited account for one that isn't.
+  - `amux failover <run> [--to <account>]` stops the run and resumes the same session, in the same folder and worktree, under another account, then tells the agent to carry on. With `"limits": { "onLimit": "failover" }` this happens as soon as the limit appears.
+  - Also in `amux ui` (`/usage`, `/failover`) and the phone app (accounts under Monitor, and "Move to another account").
+
 ## [0.7.0] - 2026-11-17
 
 Catch conflicts between parallel agents while they work, and land their branches one at a time.

@@ -66,6 +66,8 @@ enum Mode {
 pub struct Detector {
     /// (lowercased for matching, as written for messages)
     patterns: Vec<(String, String)>,
+    /// Usage-limit messages, lowercased (see `take_limit`).
+    limits: Vec<String>,
     text: Vec<u8>,
     osc: Vec<u8>,
     mode: Mode,
@@ -94,6 +96,7 @@ impl Detector {
                 .filter(|p| !p.is_empty())
                 .map(|p| (p.to_lowercase(), p.clone()))
                 .collect(),
+            limits: vec![],
             text: Vec::with_capacity(WINDOW * 2),
             osc: vec![],
             mode: Mode::Ground,
@@ -107,6 +110,43 @@ impl Detector {
             probed: false,
             since_signal: 0,
         }
+    }
+
+    /// Also watches for these usage-limit messages.
+    pub fn with_limits(mut self, limits: &[String]) -> Self {
+        self.limits = limits
+            .iter()
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_lowercase())
+            .collect();
+        self
+    }
+
+    /// The usage-limit message the CLI is showing, from where it starts (with the reset
+    /// time that usually follows), once: the text it was found in is dropped, so the
+    /// same message on screen isn't reported again.
+    pub fn take_limit(&mut self) -> Option<String> {
+        if self.limits.is_empty() {
+            return None;
+        }
+        let start = self.text.len().saturating_sub(WINDOW);
+        let text = String::from_utf8_lossy(&self.text[start..]).into_owned();
+        let lower = text.to_lowercase();
+        let at = self
+            .limits
+            .iter()
+            .filter_map(|p| lower.find(p.as_str()))
+            .min()?;
+        // Byte offsets from the lowercased copy only line up for ASCII; fall back to the
+        // start of the window otherwise.
+        let from = if lower.len() == text.len() && text.is_char_boundary(at) {
+            at
+        } else {
+            0
+        };
+        let msg: String = text[from..].chars().take(140).collect();
+        self.text.clear();
+        Some(msg.split("  ").next().unwrap_or(&msg).trim().to_string())
     }
 
     #[cfg(test)]

@@ -414,6 +414,15 @@ impl App {
                 argv.extend(args);
                 self.background_output(argv, format!("Plugin {name}"));
             }
+            Action::Usage => self.background_output(vec!["usage".into()], "Usage limits".into()),
+            Action::Failover(r) => {
+                if let Some((id, _)) = self.resolve_run(r) {
+                    self.background(
+                        vec!["failover".into(), id.clone()],
+                        format!("Moving {id} to another account"),
+                    );
+                }
+            }
             Action::Overlap => {
                 self.background_output(vec!["overlap".into()], "Overlapping runs".into())
             }

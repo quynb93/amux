@@ -362,6 +362,17 @@ async function loadMonitor() {
     if (who.length) d.append(el("div", "who", who.join("\n")));
     box.append(d);
   }
+  // Accounts that hit their usage limit, and until when.
+  try {
+    const us = await api("/api/usage");
+    box.append(el("h2", null, "Accounts"));
+    const rows = us.map((u) => {
+      if (!u.limit) return `${u.account}: ok · ${u.liveRuns} running`;
+      const mins = Math.max(0, Math.round((u.limit.resetsAt - Date.now()) / 60000));
+      return `✗ ${u.account}: limited, resets in ${Math.floor(mins / 60)}h ${mins % 60}m · ${u.liveRuns} running`;
+    });
+    box.append(el("div", "slot", rows.join("\n") || "No accounts."));
+  } catch (e) { /* older amux on the other side */ }
   // Runs on one repo whose changes would conflict, before anyone merges.
   try {
     const reps = await api("/api/overlap");

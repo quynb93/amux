@@ -58,6 +58,11 @@ amux pr parser-tests                            # push and open a PR (gh)
 amux checks parser-tests --send-failures        # failing CI back to it
 ```
 
+## Usage limits
+
+If a helper shows `waiting` with "hit your limit", its account ran out. `amux usage` shows
+which accounts have room; `amux failover <run>` resumes it under another one.
+
 ## Rules
 
 - Prefer `--worktree` for any helper that edits files.
