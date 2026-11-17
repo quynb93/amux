@@ -12,6 +12,7 @@ commands/        the CLI: parse arguments, call the core, print       ─┐
 ui/              amux ui: draw, keys, mouse, views; calls the core     ─┤ faces
 serve.rs         the phone web app; every action runs an amux command ─┘
 tls.rs           HTTPS for serve: plain-or-TLS connections, certificates, Tailscale
+palettes.rs      named color palettes, made into TUI roles (ui/theme.rs) and the app's CSS
 remote.rs        other machines: SSH, forwarding, the socket pipe
 plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:

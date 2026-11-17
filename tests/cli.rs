@@ -2419,3 +2419,77 @@ fn serves_the_phone_app_through_tailscale() {
     );
     assert!(open.err.contains("this machine only"), "{}", open.err);
 }
+
+#[test]
+fn themes_are_shared_by_the_tui_and_the_phone_app() {
+    let s = Sandbox::new("themes");
+    let list = s.amux(&["theme"]);
+    assert!(
+        list.out.contains("● default") && list.out.contains("○ catppuccin-mocha"),
+        "{}",
+        list.out
+    );
+    assert_ne!(s.amux(&["theme", "no-such-theme"]).code, 0);
+    assert_eq!(s.amux(&["theme", "dracula"]).code, 0);
+    let json: serde_json::Value = serde_json::from_str(&s.amux(&["theme", "--json"]).out).unwrap();
+    let d = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "dracula")
+        .unwrap();
+    assert_eq!(d["current"], true);
+    assert_eq!(d["swatch"][0], "#282a36");
+    // A theme file of your own extends a palette, and the phone app follows it.
+    write(
+        &s.amux_home.join("themes/mine.json"),
+        r##"{ "extends": "nord", "colors": { "accent": "#ff9e64" } }"##,
+    );
+    assert_eq!(s.amux(&["theme", "mine"]).code, 0);
+    let dump = s.amux(&["ui", "--dump", "--ansi", "--size", "10x80"]);
+    assert!(
+        dump.out.contains("48;2;46;52;64"),
+        "nord's background is painted"
+    );
+    assert!(dump.out.contains("255;158;100"), "the override applies");
+
+    let (mut srv, out) = start_serve(&s, &["--listen", "127.0.0.1:0"], &[]);
+    let link = out
+        .lines()
+        .find(|l| l.contains("?t="))
+        .unwrap()
+        .trim()
+        .to_string();
+    let (base, token) = link.split_once("/?t=").unwrap();
+    let css = curl(&[&format!("{base}/theme.css")]);
+    assert!(css.contains("--bg:#2e3440;"), "{css}");
+    let cookie = format!("Cookie: amux={token}");
+    let set = curl(&[
+        "-H",
+        &cookie,
+        "-H",
+        "X-Amux: 1",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        r#"{"name":"gruvbox-light"}"#,
+        &format!("{base}/api/theme"),
+    ]);
+    assert!(set.starts_with("HTTP/1.1 200"), "{set}");
+    assert!(curl(&[&format!("{base}/theme.css")]).contains("--bg:#fbf1c7;"));
+    let bad = curl(&[
+        "-H",
+        &cookie,
+        "-H",
+        "X-Amux: 1",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        r#"{"name":"../x"}"#,
+        &format!("{base}/api/theme"),
+    ]);
+    assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
+    let _ = srv.kill();
+    let _ = srv.wait();
+    assert_eq!(s.amux(&["theme", "default"]).code, 0);
+}

@@ -307,9 +307,14 @@ fn color(c: vt100::Color) -> Color {
 }
 
 fn cell_style(cell: &vt100::Cell) -> Style {
-    let mut s = Style::default()
-        .fg(color(cell.fgcolor()))
-        .bg(color(cell.bgcolor()));
+    // The CLI's default colors are left unset, so the theme's text and background show.
+    let mut s = Style::default();
+    if cell.fgcolor() != vt100::Color::Default {
+        s = s.fg(color(cell.fgcolor()));
+    }
+    if cell.bgcolor() != vt100::Color::Default {
+        s = s.bg(color(cell.bgcolor()));
+    }
     let mut m = Modifier::empty();
     if cell.bold() {
         m |= Modifier::BOLD;

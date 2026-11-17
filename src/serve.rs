@@ -225,6 +225,14 @@ fn handle(stream: &Conn, site: &Site) {
             )
         }
         "/icon.svg" => return respond(s, "200 OK", "image/svg+xml", &[], ICON.as_bytes()),
+        // The chosen theme's colors (`amux theme`); empty keeps the app's light/dark.
+        "/theme.css" => {
+            let css = crate::ui::theme::configured()
+                .and_then(|n| crate::ui::theme::palette_of(&n))
+                .map(|p| p.css())
+                .unwrap_or_default();
+            return respond(s, "200 OK", "text/css", &[], css.as_bytes());
+        }
         "/amux-cert.pem" if site.cert_pem.is_some() => {
             let pem = site.cert_pem.unwrap_or_default();
             return respond(s, "200 OK", "application/x-x509-ca-cert", &[], pem);
@@ -281,6 +289,11 @@ fn handle(stream: &Conn, site: &Site) {
         ("GET", "/api/slots") => reply_json(s, amux(&["slots", "--json"])),
         ("GET", "/api/overlap") => reply_json(s, amux(&["overlap", "--json"])),
         ("GET", "/api/usage") => reply_json(s, amux(&["usage", "--json"])),
+        ("GET", "/api/themes") => reply_json(s, amux(&["theme", "--json"])),
+        ("POST", "/api/theme") => match body["name"].as_str() {
+            Some(n) if crate::store::valid_name(n) => reply_text(s, amux(&["theme", n])),
+            _ => text(s, "400 Bad Request", "a theme name"),
+        },
         ("GET", "/api/machines") => {
             let m: Vec<serde_json::Value> = crate::remote::list()
                 .into_iter()

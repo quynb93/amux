@@ -4,6 +4,17 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-17
+
+Themes.
+
+### Added
+
+- **Fifteen popular palettes built in:** Catppuccin Mocha and Latte, Tokyo Night, Dracula, Gruvbox dark and light, Nord, Solarized dark and light, Rosé Pine and Rosé Pine Dawn, Kanagawa, Everforest, One Dark and GitHub Light. They paint their own background, also under popups and behind a run's screen, where the agent uses its default colors.
+- **`amux theme [<name>]`** lists the themes with a color swatch of each, or chooses one. `--json` for scripts.
+- **The phone app follows the theme**, and its Monitor tab has a theme picker that switches `amux ui` too. A theme file of your own (`~/.amux/themes/<name>.json`) that extends a palette carries over to the app.
+- A `background` role for theme files.
+
 ## [0.11.1] - 2026-11-17
 
 The phone app over HTTPS.

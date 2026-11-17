@@ -17,7 +17,9 @@
 //! { "ui": { "theme": "dark", "colors": { "accent": "#ff9e64" } } }
 //! ```
 //!
-//! `theme` names a built-in theme (`default`, `dark`, `light`, `mono`) or a file
+//! `theme` names a built-in theme (`default`, `dark`, `light`, `mono`, or a named palette
+//! such as `catppuccin-mocha`, `tokyo-night`, `dracula`, `gruvbox-dark`; see
+//! `crate::palettes`) or a file
 //! `~/.amux/themes/<name>.json` of the form `{ "extends": "dark", "colors": { … } }`.
 //! `colors` overrides single roles on top. With no theme set, `NO_COLOR` in the
 //! environment picks `mono`, and a light terminal background that supports truecolor
@@ -30,7 +32,8 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Every role a theme sets. Names are what `colors` uses.
-pub const ROLES: [&str; 19] = [
+pub const ROLES: [&str; 20] = [
+    "background",
     "text",
     "muted",
     "border",
@@ -52,7 +55,17 @@ pub const ROLES: [&str; 19] = [
     "error",
 ];
 
+/// amux's own themes; the named palettes (`crate::palettes`) are built in too.
 pub const BUILT_IN: [&str; 4] = ["default", "dark", "light", "mono"];
+
+/// Every built-in theme: amux's own, then the named palettes.
+pub fn built_in_names() -> Vec<&'static str> {
+    BUILT_IN
+        .iter()
+        .copied()
+        .chain(crate::palettes::ALL.iter().map(|p| p.name))
+        .collect()
+}
 
 /// Whether the terminal says its background is light: `COLORFGBG` is `fg;bg` (or
 /// `fg;default;bg`), and colors 7 and 9–15 are light.
@@ -64,6 +77,8 @@ pub fn light_background(colorfgbg: Option<&str>) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     pub name: String,
+    /// Painted under everything; empty keeps the terminal's own background.
+    pub background: Style,
     /// Body text: run names, the preview, dialogs.
     pub text: Style,
     /// Secondary text: details, hints, ages.
@@ -98,6 +113,7 @@ pub struct Theme {
 impl Theme {
     fn role_mut(&mut self, role: &str) -> Option<&mut Style> {
         Some(match role {
+            "background" => &mut self.background,
             "text" => &mut self.text,
             "muted" => &mut self.muted,
             "border" => &mut self.border,
@@ -140,6 +156,16 @@ impl Theme {
 
     /// A built-in theme by name.
     pub fn built_in(name: &str) -> Option<Theme> {
+        if !BUILT_IN.contains(&name) {
+            let p = crate::palettes::ALL.iter().find(|p| p.name == name)?;
+            let mut t = Theme::blank(name);
+            for (role, spec) in p.roles() {
+                if let (Some(slot), Ok(style)) = (t.role_mut(role), parse_style(&spec)) {
+                    *slot = style;
+                }
+            }
+            return Some(t);
+        }
         let specs: &[(&str, &str)] = match name {
             // The terminal's own 16 colors, so it suits light and dark terminals alike.
             // Color only where it means something: the accent and the states.
@@ -245,6 +271,7 @@ impl Theme {
         let s = Style::new();
         Theme {
             name: name.to_string(),
+            background: s,
             text: s,
             muted: s,
             border: s,
@@ -287,7 +314,7 @@ impl Theme {
         let text = std::fs::read_to_string(&file).map_err(|_| {
             format!(
                 "no theme \"{name}\" (built in: {}; or add {})",
-                BUILT_IN.join(", "),
+                built_in_names().join(", "),
                 paths::tildify(&file)
             )
         })?;
@@ -373,7 +400,8 @@ pub fn themes_dir() -> PathBuf {
 
 /// Built-in theme names, then the user's theme files, sorted.
 pub fn available() -> Vec<String> {
-    let mut v: Vec<String> = BUILT_IN.iter().map(|s| s.to_string()).collect();
+    let all = built_in_names();
+    let mut v: Vec<String> = all.iter().map(|s| s.to_string()).collect();
     let mut user: Vec<String> = std::fs::read_dir(themes_dir())
         .into_iter()
         .flatten()
@@ -381,7 +409,7 @@ pub fn available() -> Vec<String> {
         .filter_map(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
             let n = n.strip_suffix(".json")?.to_string();
-            (valid_name(&n) && !BUILT_IN.contains(&n.as_str())).then_some(n)
+            (valid_name(&n) && !all.contains(&n.as_str())).then_some(n)
         })
         .collect();
     user.sort();
@@ -454,6 +482,35 @@ fn parse_color(s: &str) -> Result<Color, String> {
         "bright-white" => Color::White,
         _ => return Err(format!("unknown color \"{s}\"")),
     })
+}
+
+/// The palette a theme is made from, following `extends` in theme files, for the phone
+/// app. None for `default` and `mono`, which use the terminal's (or browser's) own colors.
+pub fn palette_of(name: &str) -> Option<&'static crate::palettes::Palette> {
+    let mut name = name.to_string();
+    for _ in 0..5 {
+        if let Some(p) = crate::palettes::get(&name) {
+            return Some(p);
+        }
+        if BUILT_IN.contains(&name.as_str()) || !valid_name(&name) {
+            return None;
+        }
+        let text = std::fs::read_to_string(themes_dir().join(format!("{name}.json"))).ok()?;
+        let v: Value = serde_json::from_str(&text).ok()?;
+        name = v.get("extends")?.as_str()?.to_string();
+    }
+    None
+}
+
+/// The theme name config.json chooses, if any.
+pub fn configured() -> Option<String> {
+    store::load_config()
+        .ok()?
+        .extra
+        .get("ui")?
+        .get("theme")?
+        .as_str()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
