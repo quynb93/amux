@@ -215,7 +215,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             }
         }
     }
-    let (spec, env) = prepare(&acct)?;
+    let (spec, mut env) = prepare(&acct)?;
     let cwd = match &o.dir {
         Some(d) => {
             let p = paths::expand_home(d);
@@ -228,9 +228,11 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     };
     let mut args = args.to_vec();
     if let Some(p) = o.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        // The repo's shared decisions (`amux note`) come first.
+        let p = format!("{}{p}", crate::work::notes::preamble(&cwd));
         match &spec.prompt_args {
-            Some(t) => args.extend(crate::launch::fill_args(t, &[("prompt", p)])),
-            None => args.push(p.to_string()),
+            Some(t) => args.extend(crate::launch::fill_args(t, &[("prompt", &p)])),
+            None => args.push(p),
         }
     }
     let args = args.as_slice();
@@ -258,7 +260,27 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         } else if o.worktree {
             let (wt, start) = add_worktree(&cwd, &id, &o)?;
             run.cwd = start.to_string_lossy().into_owned();
+            let copied = crate::work::notes::copy_into(Path::new(&wt.repo), Path::new(&wt.path));
+            if !copied.is_empty() {
+                eprintln!("amux: copied {} into the worktree", copied.join(", "));
+            }
             run.worktree = Some(wt);
+        }
+        // A worktree run gets its own ports and compose project, so parallel dev servers
+        // don't fight over :3000.
+        if run.worktree.is_some() {
+            let taken: Vec<u16> = runs::list()
+                .iter()
+                .filter(|r| r.state().is_live())
+                .filter_map(|r| r.port)
+                .collect();
+            if let Some(port) = crate::work::notes::free_port_block(&taken) {
+                run.port = Some(port);
+                env.set.push(("PORT".into(), port.to_string()));
+                env.set.push(("AMUX_PORT".into(), port.to_string()));
+                env.set
+                    .push(("COMPOSE_PROJECT_NAME".into(), format!("amux-{}", run.id)));
+            }
         }
         runs::save(&run)?;
         log_launch(&acct, args, Path::new(&run.cwd));

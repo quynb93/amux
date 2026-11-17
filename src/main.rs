@@ -12,6 +12,8 @@ mod commands {
     pub mod github;
     pub mod maintenance;
     #[cfg(unix)]
+    pub mod notes;
+    #[cfg(unix)]
     pub mod overlap;
     #[cfg(unix)]
     pub mod plugin;
@@ -92,6 +94,9 @@ Parallel runs (each CLI in the background, in its own terminal):
       Several attempts at one task, each in its own worktree (accounts or CLIs can differ)
   amux compare <task> [--no-test]          Test each attempt in a slot and rank them
   amux pick <run> [--land]                 Keep the best attempt (and land it); clear the others
+  amux note <text...>                      A decision every new run on this repo starts with
+  amux notes [--rm <n>]                    List (or remove) this repo's notes
+  amux broadcast <text...> [--note]        Tell every run working on this repo
   amux overlap [<run>...] [--into <b>]     Which runs touch the same files, and which would conflict
   amux land <run>... [--into <b>] [--no-test] [--dry-run]
       Merge queue: rebase each run onto the branch, test it in a slot, fast-forward.
@@ -238,6 +243,12 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "gc" => commands::gc::gc_cmd(rest),
         #[cfg(unix)]
+        "note" => commands::notes::note_cmd(rest),
+        #[cfg(unix)]
+        "notes" => commands::notes::notes_cmd(rest),
+        #[cfg(unix)]
+        "broadcast" => commands::notes::broadcast_cmd(rest),
+        #[cfg(unix)]
         "try" => commands::attempts::try_cmd(rest),
         #[cfg(unix)]
         "compare" => commands::attempts::compare_cmd(rest),
@@ -253,7 +264,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" | "try"
-        | "compare" | "pick" => {
+        | "compare" | "pick" | "note" | "notes" | "broadcast" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

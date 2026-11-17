@@ -1953,3 +1953,119 @@ fn tries_a_task_several_times_compares_and_keeps_the_best() {
         p.out
     );
 }
+
+#[test]
+fn shares_notes_ports_and_env_files_between_parallel_runs() {
+    let s = Sandbox::new("share");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "a\n");
+    write(&repo.join(".gitignore"), ".env\n");
+    write(&repo.join(".env"), "API_KEY=local\n");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@x",
+            "commit",
+            "-qm",
+            "i",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let cli = s.home.join("bin/env-cli");
+    write(
+        &cli,
+        "#!/bin/sh\nfor a in \"$@\"; do echo \"ARG $a\"; done\necho \"PORT=$PORT COMPOSE=$COMPOSE_PROJECT_NAME\"\n\
+         while read l; do echo \"got $l\"; done\n",
+    );
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = cli.to_str().unwrap().into();
+    write(&cfg, &c.to_string());
+
+    let n = s.amux_with(&["note", "use", "zod,", "not", "yup"], &[], Some(&repo));
+    assert_eq!(n.code, 0, "{}", n.err);
+    assert!(s
+        .amux_with(&["notes"], &[], Some(&repo))
+        .out
+        .contains("1. use zod, not yup"));
+    assert!(
+        repo.join(".git/amux/notes.jsonl").exists(),
+        "kept in the git folder, never committed"
+    );
+    for name in ["p1", "p2"] {
+        let r = s.amux_with(
+            &[
+                "spawn",
+                "--name",
+                name,
+                "--worktree",
+                "--prompt",
+                "add a schema",
+                "fake",
+            ],
+            &[],
+            Some(&repo),
+        );
+        assert_eq!(r.code, 0, "{}", r.err);
+        assert!(r.err.contains("copied .env into the worktree"), "{}", r.err);
+    }
+    wait_ps(&s, "p1", "running");
+    wait_ps(&s, "p2", "running");
+    let p1 = wait_peek(&s, "p1", "PORT=");
+    assert!(
+        p1.contains("ARG Decisions for this repo that every agent here follows:"),
+        "{p1}"
+    );
+    assert!(p1.contains("- use zod, not yup"), "{p1}");
+    assert!(p1.contains("PORT=41000 COMPOSE=amux-p1"), "{p1}");
+    assert!(s
+        .amux(&["peek", "p2"])
+        .out
+        .contains("PORT=41010 COMPOSE=amux-p2"));
+    assert_eq!(
+        fs::read_to_string(s.amux_home.join("worktrees/repo-p1/.env")).unwrap(),
+        "API_KEY=local\n"
+    );
+
+    let b = s.amux_with(
+        &["broadcast", "main", "changed:", "rebase", "--note"],
+        &[],
+        Some(&repo),
+    );
+    assert!(b.out.contains("Sent to p1, p2, and noted"), "{}", b.out);
+    for name in ["p1", "p2"] {
+        let mut seen = String::new();
+        for _ in 0..100 {
+            seen = s.amux(&["peek", name]).out;
+            if seen.contains("got main changed: rebase") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(seen.contains("got main changed: rebase"), "{seen}");
+        s.amux(&["stop", name]);
+    }
+    assert!(s
+        .amux_with(&["notes"], &[], Some(&repo))
+        .out
+        .contains("2. main changed: rebase"));
+    assert_eq!(
+        s.amux_with(&["notes", "--rm", "1"], &[], Some(&repo)).code,
+        0
+    );
+}

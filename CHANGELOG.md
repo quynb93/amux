@@ -4,7 +4,18 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-17
+
+Agents working in parallel can now be run against each other and the best kept, and they share decisions instead of colliding on ports and env files.
+
 ### Added
+
+- **Shared notes for a repo.** `amux note "use zod, not yup"` adds a decision that every new run on the repo starts its prompt with. The notes live in the repo's git folder (`.git/amux/notes.jsonl`), so every worktree sees them and they're never committed. `amux notes [--rm <n>]` lists or removes them.
+- **`amux broadcast <text> [--note]`** sends a message to every live run on the repo (for example "main changed: rebase before you push"). `--note` also keeps it as a note for new runs.
+- **No more collisions between parallel dev servers.**
+  - Each worktree run gets its own block of ten ports (`PORT` and `AMUX_PORT`, starting at 41000) and its own `COMPOSE_PROJECT_NAME`.
+  - `.env`, `.env.local` and `.env.development.local` are copied from the main checkout into new worktrees, which otherwise start without them. Plain files only, never through symlinks, and never over an existing file.
+  - Change the copied files with `"worktree": { "copy": [...] }`, or turn ports off with `"ports": false`.
 
 - **Best of N.** `amux try 3 claude -p "<task>" --name fix` starts several attempts at one task, each in its own worktree. `amux try claude@work,codex@me …` gives each attempt its own account or CLI.
   - `amux compare fix` runs each attempt's tests in a test slot and ranks them: passing first, then the smaller change (fewer files, fewer lines). It also shows commits and time, and recommends one (`--json` for scripts, `/compare` in `amux ui`).
