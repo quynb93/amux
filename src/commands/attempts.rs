@@ -119,7 +119,7 @@ fn shortstat(s: &str) -> (usize, usize) {
     (num("insertion"), num("deletion"))
 }
 
-fn measure(run: &Run, test: bool) -> Attempt {
+pub fn measure(run: &Run, test: bool) -> Attempt {
     let now = crate::time::now_ms();
     let (kind, label) = crate::runs::state::run_kind(run, now);
     let mut a = Attempt {

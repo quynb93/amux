@@ -24,12 +24,13 @@ commit, push and let CI run it (`amux verify $AMUX_RUN --push`), or tell the use
 ## Start helpers
 
 ```sh
-amux spawn --worktree --name parser-tests claude -p "add tests for src/parser.rs"
-amux spawn --worktree --name review codex -p "review the diff on branch amux/parser-tests"
+amux spawn --worktree --name parser-tests --prompt "add tests for src/parser.rs" claude
+amux spawn --worktree --name review --prompt "review the diff on branch amux/parser-tests" codex
 amux ps --json                                  # every run: state, branch, verify, PR
 ```
 
 Each `--worktree` run gets its own branch `amux/<name>`, so helpers never edit your files.
+amux's options go before the account; anything after it goes to the agent's CLI.
 
 ## Steer them and wait
 
@@ -68,6 +69,14 @@ start: amux gives each run its own.
 
 For a risky or ambiguous task, try it more than once and keep the best:
 `amux try 3 claude -p "…" --name x`, then `amux compare x` and `amux pick x-N --land`.
+
+## Run a team
+
+Runs you start from inside a run are your workers: `amux team` lists them (state, files
+changed, tests, their reports) and `amux team wait` blocks until the next one finishes or
+needs you, then prints what it reported. Loop on it instead of polling. A worker ends with
+`amux report "<what it did, how it checked, what's left>"`. Workers can't start workers.
+To hand a whole goal to a lead agent: `amux lead --workers 3 claude -p "<goal>"`.
 
 ## Usage limits
 

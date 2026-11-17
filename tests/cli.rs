@@ -2493,3 +2493,148 @@ fn themes_are_shared_by_the_tui_and_the_phone_app() {
     let _ = srv.wait();
     assert_eq!(s.amux(&["theme", "default"]).code, 0);
 }
+
+#[test]
+fn a_lead_runs_a_team_of_workers() {
+    let s = Sandbox::new("team");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    write(&repo.join("a.txt"), "x\n");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &["commit", "-qm", "init"],
+    ] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    let chat = ("FAKE_CHAT", "1");
+    assert_ne!(s.amux(&["lead", "fake"]).code, 0, "a lead needs a goal");
+    let r = s.amux_with(
+        &[
+            "lead",
+            "--name",
+            "t",
+            "--workers",
+            "2",
+            "fake",
+            "-p",
+            "build the thing",
+        ],
+        &[chat],
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "t", "running");
+    let mut logs = String::new();
+    eventually("the lead's prompt", || {
+        logs = s.amux(&["logs", "t"]).out;
+        logs.contains("build the thing")
+    });
+    assert!(
+        logs.contains("You are the lead of an amux team named t"),
+        "{logs}"
+    );
+    assert!(logs.contains("build the thing"));
+
+    // The lead's shell starts workers: each in its own worktree, told how to report.
+    let as_lead = [chat, ("AMUX_RUN", "t")];
+    for w in ["t-a", "t-b"] {
+        let r = s.amux_with(
+            &[
+                "spawn",
+                "--worktree",
+                "--name",
+                w,
+                "--prompt",
+                "do a part",
+                "fake",
+            ],
+            &as_lead,
+            Some(&repo),
+        );
+        assert_eq!(r.code, 0, "{}", r.err);
+    }
+    wait_ps(&s, "t-a", "running");
+    let mut wl = String::new();
+    for _ in 0..60 {
+        wl = s.amux(&["logs", "t-a"]).out;
+        if wl.contains("amux report") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        wl.contains("amux report"),
+        "{wl}\n{}",
+        fs::read_to_string(s.amux_home.join("runs/t-a/run.json")).unwrap_or_default()
+    );
+    let full = s.amux_with(&["spawn", "--name", "t-c", "fake"], &as_lead, Some(&repo));
+    assert!(
+        full.code != 0 && full.err.contains("its limit"),
+        "{}",
+        full.err
+    );
+    let nested = s.amux_with(
+        &["spawn", "--name", "t-d", "fake"],
+        &[("AMUX_RUN", "t-a")],
+        Some(&repo),
+    );
+    assert!(
+        nested.code != 0 && nested.err.contains("workers don't start workers"),
+        "{}",
+        nested.err
+    );
+    assert_ne!(
+        s.amux_with(&["lead", "fake", "-p", "x"], &[("AMUX_RUN", "t")], None)
+            .code,
+        0
+    );
+
+    // A worker reports and ends; the lead hears about it once.
+    let rep = s.amux_with(
+        &["report", "did part a; tests pass"],
+        &[("AMUX_RUN", "t-a")],
+        None,
+    );
+    assert!(rep.out.contains("Reported to t"), "{}", rep.out);
+    s.amux(&["send", "t-a", "quit"]);
+    wait_ps(&s, "t-a", "exited 7");
+    let tick = [("AMUX_TEAM_TICK_MS", "100")];
+    let w = s.amux_with(&["team", "wait", "t", "--timeout", "10"], &tick, None);
+    assert_eq!(w.code, 0, "{}{}", w.out, w.err);
+    assert!(
+        w.out.contains("== t-a ended") && w.out.contains("did part a; tests pass"),
+        "{}",
+        w.out
+    );
+    assert!(w.out.contains("Still working: t-b"), "{}", w.out);
+    let again = s.amux_with(&["team", "wait", "t", "--timeout", "1"], &tick, None);
+    assert_eq!(again.code, 124, "nothing new: {}", again.out);
+
+    // From the lead's shell, `amux team` needs no name.
+    let t = s.amux_with(&["team"], &[("AMUX_RUN", "t")], None);
+    assert!(
+        t.out.contains("t (fake@one") && t.out.contains("up to 2 at once"),
+        "{}",
+        t.out
+    );
+    assert!(
+        t.out.contains("t-b") && t.out.contains("did part a"),
+        "{}",
+        t.out
+    );
+    let j: serde_json::Value = serde_json::from_str(&s.amux(&["team", "t", "--json"]).out).unwrap();
+    assert_eq!(j["maxWorkers"], 2);
+    assert_eq!(j["workers"].as_array().unwrap().len(), 2);
+    for r in ["t-b", "t"] {
+        s.amux(&["stop", r]);
+    }
+}

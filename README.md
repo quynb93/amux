@@ -287,7 +287,7 @@ A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `def
 Runs can be steered without attaching, so a script, or an agent, can start helpers and pick up their results:
 
 ```sh
-amux spawn --worktree --name tests claude@work -p "add tests for the parser"
+amux spawn --worktree --name tests --prompt "add tests for the parser" claude@work
 amux send tests "also cover empty input"        # types it in and presses Enter
 amux send tests --wait "now run them"           # …and waits for the turn to end
 amux wait tests --until waiting --timeout 600   # or: idle (default), exited. 124 on timeout
@@ -347,6 +347,22 @@ amux pick login-2 --land # keep it, land it; stop and clear away the others
 ```
 
 The other attempts' branches are always kept, and so is any worktree that still holds uncommitted work.
+
+### A lead agent and its team
+
+Hand a whole goal to one agent, and it runs a team: it splits the goal into parts, starts a worker agent for each in its own worktree, waits for them, reviews their work and lands it.
+
+```sh
+amux lead --name auth --workers 3 claude@work -p "move login to OAuth: backend, UI and tests"
+amux lead --worker claude@work --worker codex@me claude@work -p "…"   # workers on these accounts
+amux team auth          # the workers: state, files and lines changed, tests, what each reported
+amux team wait auth     # block until the next worker finishes or needs help, and print its report
+```
+
+- **The lead is told how.** Its prompt starts with instructions for running the team with amux commands: `spawn --worktree` for each part, `team wait` instead of polling, `diff`, `verify --test`, `overlap` and `land` to review and merge, and `send` to answer a worker.
+- **Workers report back.** Any run started from inside a run is its worker (`lead` in `ps --json`). Its prompt ends with how to finish: commit, then `amux report "<what it did, how it checked, what's left>"`. `team wait` shows the lead that report, or what the worker is asking and the end of its screen.
+- **It can't run away.** A lead has at most `--workers` going at once (3 by default), and workers can't start workers of their own. Each worker is still a normal run: slots, guards, usage-limit failover and phone notifications all apply.
+- The same commands work for any agent you start yourself: from inside a run, `amux spawn` makes workers and `amux team wait` waits for them.
 
 ### Usage limits
 
@@ -618,6 +634,9 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
+| `amux lead [--name <team>] [--workers <n>] [--worker <acct>]… <cli>[@name] -p <goal>` | Start a lead agent that splits the goal and runs a team of workers. |
+| `amux team [<lead>] [--json]`, `amux team wait [<lead>] [--timeout <secs>]` | A team's workers and their reports; block until the next one finishes or needs help. |
+| `amux report <text…>` | From inside a run: what it did, for its lead. |
 | `amux theme [<name>] [--json]` | List the themes with swatches, or choose one for `amux ui` and the phone app. |
 | `amux serve [--listen <host:port>] [--tls \| --cert <pem> --key <pem> \| --tailscale] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. Over HTTPS with `--tls`, your certificate, or Tailscale. |
 | `amux phone ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. |
@@ -690,7 +709,7 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 Shipped: parallel runs with waiting detection, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
 1. **Web push from the phone app**, now that it can be served over HTTPS.
-2. **Messaging between sessions.** An MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
+2. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.
 3. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
 4. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
 

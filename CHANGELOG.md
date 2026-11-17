@@ -4,6 +4,22 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-17
+
+A lead agent that runs a team.
+
+### Added
+
+- **`amux lead <acct> -p <goal>`** starts a lead agent. Its prompt tells it how to run a team with amux: split the goal into parts, start a worker for each in its own worktree, wait for them, review, test and land their work. `--workers <n>` caps how many it has going at once (3 by default), and `--worker <acct>` picks the workers' accounts.
+- **Workers.** A run started from inside a run is that run's worker (`lead` in `ps --json`), and its prompt ends with how to report back. Workers can't start workers of their own.
+- **`amux report <text>`**, from inside a run, records what it did for its lead.
+- **`amux team [<lead>]`** lists a lead's workers with their state, changes, test results and reports. **`amux team wait`** blocks until the next worker finishes its turn, needs an answer or ends, then prints its report (or what it's asking and the end of its screen), each change once. It returns 124 after `--timeout` (9 minutes by default), so an agent can loop on it instead of polling.
+- `amux spawn` warns when amux's own options (`--prompt`, `--worktree`, `--name`…) come after the account, where they'd go to the CLI.
+
+### Fixed
+
+- Examples in the agent skill and the README passed the prompt after the account (`claude -p …`), which starts Claude in one-shot print mode instead of as a helper that can be steered.
+
 ## [0.11.2] - 2026-11-17
 
 Themes.

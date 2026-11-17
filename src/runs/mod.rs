@@ -64,6 +64,12 @@ pub struct Run {
     /// Attempts at the same task started together (`amux try`), compared and picked as one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// The run that started this one (`amux spawn` from inside a run): its team's lead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
+    /// For a lead (`amux lead`): how many workers it may have going at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<u32>,
     /// Text that means the account hit its usage limit (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_patterns: Vec<String>,
