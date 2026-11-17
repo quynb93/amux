@@ -37,6 +37,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Shared notes and separate ports](#shared-notes-and-separate-ports)
   - [Best of N](#best-of-n)
   - [Usage limits](#usage-limits)
+  - [After a restart](#after-a-restart)
   - [Runaway and stuck agents](#runaway-and-stuck-agents)
   - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
@@ -357,6 +358,20 @@ amux failover fix-login         # the same session, same worktree, under another
 - **`failover`** resumes the run's session (`claude --resume <id>`, `codex resume <id>`) under another account of the same CLI, in the same folder and worktree, and tells the agent to carry on. Set `"limits": { "onLimit": "failover" }` in `~/.amux/config.json` to do it automatically, or keep the default (`wait`), where the CLI waits for the reset itself.
 - The messages amux watches for are each provider's `limitPatterns`. Add your own in `config.json` if a CLI words them differently.
 - Check that moving work between accounts is allowed by your provider's terms.
+
+### After a restart
+
+A restart ends every run. Other tools bring back the layout at best. amux brings back the work: each run resumes the session it was having, in the same worktree, under the same name, and the agent is told to carry on.
+
+```sh
+amux revive              # list runs lost in a restart (or a crash)
+amux revive --all        # bring them all back; or name them: amux revive fix-login
+amux revive --at-login   # do it by itself after every restart (LaunchAgent / systemd user unit)
+```
+
+- **How it resumes:** through each CLI's own `resumeArgs` (`claude --resume <id>`, `codex resume <id>`, `gemini --resume <id>`), using the newest session in the run's folder since it started.
+- **No session found:** `--fresh` starts that run again with its original command.
+- **Login item:** waits 30 seconds after login so the network can come up, and logs to `~/.amux/revive.log`. Run `--at-login` again if your `PATH` changes. `--no-at-login` removes it.
 
 ### Runaway and stuck agents
 

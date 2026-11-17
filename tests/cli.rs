@@ -2069,3 +2069,87 @@ fn shares_notes_ports_and_env_files_between_parallel_runs() {
         0
     );
 }
+
+#[test]
+fn revives_a_run_lost_in_a_restart_with_its_session() {
+    let s = Sandbox::new("revive");
+    let bin = s.home.join("bin/chat-cli");
+    write(
+        &bin,
+        "#!/bin/sh\necho \"ARGS $*\"\nwhile read l; do echo \"got $l\"; done\n",
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = bin.to_str().unwrap().into();
+    c["providers"][0]["resumeArgs"] = serde_json::json!(["--resume", "{id}"]);
+    c["providers"][0]["sessions"] = "claude".into();
+    c["providers"][0]["sharedDirs"] = serde_json::json!(["projects"]);
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    assert_eq!(s.amux(&["spawn", "--name", "rv", "fake"]).code, 0);
+    wait_ps(&s, "rv", "running");
+    let run_json = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/rv/run.json")).unwrap())
+            .unwrap()
+    };
+    let cwd = run_json()["cwd"].as_str().unwrap().to_string();
+    let sid = "7e57a0b1-0000-4000-8000-000000000002";
+    write(
+        &s.shared.join(format!("projects/-x/{sid}.jsonl")),
+        &format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "cwd": cwd, "sessionId": sid,
+                "message": {"role": "user", "content": "build the cart page"}})
+        ),
+    );
+    // The power goes: host and CLI end without a word.
+    let (host, cli) = (
+        run_json()["hostPid"].as_i64().unwrap(),
+        run_json()["pid"].as_i64().unwrap(),
+    );
+    for p in [host, cli] {
+        let _ = Command::new("kill").args(["-9", &p.to_string()]).status();
+    }
+    wait_ps(&s, "rv", "lost");
+    let listed = s.amux(&["revive"]).out;
+    assert!(
+        listed.contains("rv") && listed.contains("revive --all"),
+        "{listed}"
+    );
+    assert!(s.amux(&["explain", "rv"]).out.contains("amux revive rv"));
+    let dry = s.amux(&["revive", "rv", "--dry-run"]);
+    assert!(
+        dry.out
+            .contains(&format!("would run {} --resume {sid}", bin.display())),
+        "{}",
+        dry.out
+    );
+
+    let r = s.amux(&["revive", "--all"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(r.out.contains("resumed and told to carry on"), "{}", r.out);
+    wait_ps(&s, "rv", "running");
+    assert_eq!(run_json()["args"], serde_json::json!(["--resume", sid]));
+    let logs = s.amux(&["logs", "rv"]).out;
+    assert!(logs.contains("resuming its session"), "{logs}");
+    assert!(
+        logs.contains("got The computer restarted while you were working"),
+        "{logs}"
+    );
+    s.amux(&["stop", "rv"]);
+
+    // The login item that does it after every restart.
+    let i = s.amux(&["revive", "--at-login"]);
+    assert_eq!(i.code, 0, "{}", i.err);
+    let item = if cfg!(target_os = "macos") {
+        s.home.join("Library/LaunchAgents/dev.amux.revive.plist")
+    } else {
+        s.home.join(".config/systemd/user/amux-revive.service")
+    };
+    let text = fs::read_to_string(&item).unwrap();
+    assert!(text.contains("revive") && text.contains("--all"), "{text}");
+    assert_eq!(s.amux(&["revive", "--no-at-login"]).code, 0);
+    assert!(!item.exists());
+}

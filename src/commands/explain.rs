@@ -114,11 +114,19 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
         }
         State::Lost => {
             source = "host";
+            let restarted = crate::runs::boot_time().is_some_and(|b| run.started_at < b);
+            why.push(if restarted {
+                "The computer restarted after it started, which ended it without recording an exit.".to_string()
+            } else {
+                format!(
+                    "Its host process{} is gone without recording an exit: it was killed.",
+                    run.host_pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                )
+            });
             why.push(format!(
-                "Its host process{} is gone without recording an exit: the run was killed, or the computer restarted.",
-                run.host_pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                "`amux revive {0}` resumes its session in the same place; `amux logs {0}` shows what it printed.",
+                run.id
             ));
-            why.push(format!("`amux logs {}` shows what it printed.", run.id));
         }
         State::Exited(code) => {
             source = "exit";
@@ -344,6 +352,16 @@ mod tests {
         assert_eq!((e.label.as_str(), e.source), ("stopped", "exit"));
         assert!(e.why[0].contains("SIGTERM"));
         assert!(explain(&r, &State::Exited(2), None, NOW).why[0].contains("code 2"));
-        assert!(explain(&r, &State::Lost, None, NOW).why[0].contains("pid 10"));
+        // Started before the machine last booted: lost in a restart. After: killed.
+        let old = Run {
+            started_at: 0,
+            ..r.clone()
+        };
+        assert!(explain(&old, &State::Lost, None, NOW).why[0].contains("restarted"));
+        let recent = Run {
+            started_at: crate::time::now_ms(),
+            ..r.clone()
+        };
+        assert!(explain(&recent, &State::Lost, None, NOW).why[0].contains("pid 10"));
     }
 }

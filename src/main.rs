@@ -10,6 +10,8 @@ mod commands {
     pub mod gc;
     #[cfg(unix)]
     pub mod github;
+    #[cfg(unix)]
+    pub mod login_item;
     pub mod maintenance;
     #[cfg(unix)]
     pub mod notes;
@@ -111,6 +113,8 @@ Parallel runs (each CLI in the background, in its own terminal):
       List a run's review comments, or send the pending ones to its agent as one message
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
   amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
+  amux revive [<run>...] [--all] [--fresh] Bring back runs lost in a restart: same name, worktree
+                                           and session (--resume); --at-login does it after each restart
   amux gc [--dry-run]                      End processes finished runs left behind (dev servers…)
   amux ui                                  Watch, attach to, start and stop runs in one screen
   amux verify <run> [--test [--command <cmd>] | --push | --send-failures]
@@ -243,6 +247,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "gc" => commands::gc::gc_cmd(rest),
         #[cfg(unix)]
+        "revive" => commands::runs::revive_cmd(rest),
+        #[cfg(unix)]
         "note" => commands::notes::note_cmd(rest),
         #[cfg(unix)]
         "notes" => commands::notes::notes_cmd(rest),
@@ -264,7 +270,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" | "try"
-        | "compare" | "pick" | "note" | "notes" | "broadcast" => {
+        | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

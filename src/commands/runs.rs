@@ -627,6 +627,22 @@ pub fn stop_cmd(argv: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// Once a resumed session is up (it printed since `since`) and has gone quiet, asks it to
+/// go on where it stopped. Gives up after 40 seconds.
+fn nudge_when_ready(name: &str, since: i64, msg: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let Ok(r) = runs::load(name) else { continue };
+        let printed = last_output(&r).filter(|t| *t >= since - 1_000);
+        let quiet = printed.is_some_and(|t| time::now_ms() - t > 2_500);
+        if r.state() == State::Running && quiet {
+            return crate::runs::client::send_text(&r, msg, true).is_ok();
+        }
+    }
+    false
+}
+
 /// The session a run was having, so another account can resume it: the newest session of
 /// its CLI in its folder that was active since the run started.
 fn session_of(run: &Run) -> Option<String> {
@@ -713,22 +729,13 @@ pub fn failover_cmd(argv: &[String]) -> Result<i32> {
         target.id(),
     ];
     args.extend(crate::launch::fill_args(&resume, &[("id", &session)]));
+    let since = time::now_ms();
     spawn_cmd(&args)?;
-    // Once the resumed session is up and quiet, ask it to go on where it stopped.
-    let deadline = Instant::now() + Duration::from_secs(40);
-    while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(500));
-        let Ok(r) = runs::load(&name) else { continue };
-        let quiet = last_output(&r).is_some_and(|t| time::now_ms() - t > 2_500);
-        if r.state() == State::Running && quiet {
-            let _ = crate::runs::client::send_text(
-                &r,
-                "The previous account hit its usage limit, so this session continues under another account. Please carry on with the task where you left off.",
-                true,
-            );
-            break;
-        }
-    }
+    nudge_when_ready(
+        &name,
+        since,
+        "The previous account hit its usage limit, so this session continues under another account. Please carry on with the task where you left off.",
+    );
     println!(
         "{} continues as {name} under {} (session {session}, same folder{}).",
         run.id,
@@ -740,6 +747,195 @@ pub fn failover_cmd(argv: &[String]) -> Result<i32> {
         }
     );
     Ok(0)
+}
+
+const REVIVE_USAGE: &str =
+    "amux revive [<run>...] [--all] [--fresh] [--dry-run] | --at-login | --no-at-login";
+
+/// What reviving one run did.
+#[derive(Debug)]
+pub struct Revived {
+    pub run: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// Brings a lost run back in place: same name, folder, worktree, ports, group and guards.
+/// Its CLI resumes the session it was having (or, with `fresh`, starts again with the
+/// command it was started with), and is told why once it's up.
+pub fn revive_one(run: &Run, fresh: bool, dry: bool) -> Revived {
+    let out = |ok: bool, detail: String| Revived {
+        run: run.id.clone(),
+        ok,
+        detail,
+    };
+    if run.state() != State::Lost {
+        return out(false, "it isn't lost".into());
+    }
+    let provider = run
+        .account
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let (acct, spec) = match (
+        resolve_account(&run.account),
+        crate::store::get_provider(&provider),
+    ) {
+        (Ok(a), Ok(s)) => (a, s),
+        _ => return out(false, format!("its account {} is gone", run.account)),
+    };
+    if !Path::new(&run.cwd).is_dir() {
+        return out(
+            false,
+            format!("its folder {} is gone", tildify(Path::new(&run.cwd))),
+        );
+    }
+    let args = match (session_of(run), &spec.resume_args) {
+        (Some(id), Some(t)) => crate::launch::fill_args(t, &[("id", &id)]),
+        _ if fresh => run.args.clone(),
+        (None, _) => {
+            return out(
+                false,
+                "no session of it to resume (--fresh starts it again)".into(),
+            )
+        }
+        (Some(_), None) => {
+            return out(
+                false,
+                format!("{provider} has no resumeArgs (--fresh starts it again)"),
+            )
+        }
+    };
+    if dry {
+        return out(true, format!("would run {} {}", run.bin, args.join(" ")));
+    }
+    let (_, mut env) = match prepare(&acct) {
+        Ok(p) => p,
+        Err(e) => return out(false, format!("{e:#}")),
+    };
+    if let Some(port) = run.port {
+        env.set.push(("PORT".into(), port.to_string()));
+        env.set.push(("AMUX_PORT".into(), port.to_string()));
+        env.set
+            .push(("COMPOSE_PROJECT_NAME".into(), format!("amux-{}", run.id)));
+    }
+    let mut r = run.clone();
+    r.args = args;
+    r.started_at = time::now_ms();
+    r.host_pid = None;
+    r.pid = None;
+    r.exit_code = None;
+    r.ended_at = None;
+    r.error = None;
+    r.waiting = None;
+    r.status = None;
+    r.queued = None;
+    // What it printed before goes on in the same log, after a marker.
+    let _ = fsx::append_private(
+        &r.dir().join("output.log"),
+        "\r\n\x1b[2m--- amux: the run was lost (restart); resuming its session ---\x1b[0m\r\n",
+    );
+    let started = runs::save(&r).and_then(|_| start_host(&r, &env));
+    if let Err(e) = started {
+        return out(false, format!("{e:#}"));
+    }
+    let since = r.started_at;
+    let told = nudge_when_ready(
+        &r.id,
+        since,
+        "The computer restarted while you were working, and amux resumed this session. Please check where you were (git status, the last steps) and carry on with the task.",
+    );
+    out(
+        true,
+        format!(
+            "resumed{}",
+            if told {
+                " and told to carry on"
+            } else {
+                " (it didn't settle in time to be told)"
+            }
+        ),
+    )
+}
+
+/// `amux revive`: brings runs lost in a restart (or a crash of their host) back. With
+/// `--at-login`, installs a login item that does it after every restart.
+pub fn revive_cmd(argv: &[String]) -> Result<i32> {
+    match argv.first().map(String::as_str) {
+        Some("--at-login") => return crate::commands::login_item::install(),
+        Some("--no-at-login") => return crate::commands::login_item::uninstall(),
+        _ => {}
+    }
+    let all = argv.iter().any(|a| a == "--all");
+    let fresh = argv.iter().any(|a| a == "--fresh");
+    let dry = argv.iter().any(|a| a == "--dry-run" || a == "-n");
+    let quiet = argv.iter().any(|a| a == "--quiet");
+    // After a restart the network may still be coming up: the login item waits a bit.
+    if let Some(i) = argv.iter().position(|a| a == "--after") {
+        let ms = crate::work::guards::parse_duration(need(argv.get(i + 1), REVIVE_USAGE)?)
+            .ok_or_else(|| anyhow!("--after takes a time such as 30s."))?;
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    let named: Vec<&String> = argv
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || argv[i - 1] != "--after"))
+        .map(|(_, a)| a)
+        .collect();
+    if let Some(f) = argv.iter().find(|a| {
+        a.starts_with('-')
+            && !matches!(
+                a.as_str(),
+                "--all" | "--fresh" | "--dry-run" | "-n" | "--quiet" | "--after"
+            )
+    }) {
+        bail!("Unknown option {f}. Usage: {REVIVE_USAGE}");
+    }
+    let targets: Vec<Run> = if named.is_empty() {
+        let lost: Vec<Run> = runs::list()
+            .into_iter()
+            .filter(|r| r.state() == State::Lost)
+            .collect();
+        if !all && !lost.is_empty() {
+            for r in &lost {
+                println!(
+                    "{}  {}  lost {}",
+                    r.id,
+                    r.account,
+                    if r.lost_in_restart() {
+                        "in a restart"
+                    } else {
+                        "(its host died)"
+                    }
+                );
+            }
+            println!("\n`amux revive --all` brings them back, or name them: amux revive <run>...");
+            return Ok(0);
+        }
+        lost
+    } else {
+        named.iter().map(|n| runs::find(n)).collect::<Result<_>>()?
+    };
+    if targets.is_empty() {
+        if !quiet {
+            println!("No lost runs.");
+        }
+        return Ok(0);
+    }
+    let done: Vec<Revived> = targets.iter().map(|r| revive_one(r, fresh, dry)).collect();
+    let rows: Vec<Vec<String>> = done
+        .iter()
+        .map(|d| {
+            vec![
+                d.run.clone(),
+                if d.ok { "✓".into() } else { "✗".into() },
+                d.detail.clone(),
+            ]
+        })
+        .collect();
+    println!("{}", table(&["RUN", "", "DETAIL"], &rows));
+    Ok(if done.iter().all(|d| d.ok) { 0 } else { 1 })
 }
 
 pub fn rm_cmd(argv: &[String]) -> Result<i32> {
