@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 
 /// Every event a phone can be told about.
-pub const EVENTS: [&str; 6] = [
-    "waiting", "stalled", "limited", "exited", "verify", "checks",
+pub const EVENTS: [&str; 7] = [
+    "waiting", "stalled", "limited", "exited", "verify", "checks", "schedule",
 ];
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]

@@ -2832,3 +2832,213 @@ fn update_installs_the_latest_release() {
         "upgrade amux"
     );
 }
+
+#[test]
+fn works_on_github_issues_and_runs_commands_on_a_schedule() {
+    let s = Sandbox::new("issues");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "x");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let remote = s.home.join("remote.git");
+    assert!(Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&remote)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["remote", "add", "origin"])
+        .arg(&remote)
+        .status()
+        .unwrap()
+        .success());
+    // A stand-in for the GitHub CLI with two open issues labeled bug.
+    let gh = s.home.join("bin/gh");
+    let issue = |n: u32, t: &str| {
+        format!("{{\"number\":{n},\"title\":\"{t}\",\"body\":\"Steps for {n}.\",\"url\":\"https://github.com/o/r/issues/{n}\"}}")
+    };
+    write(
+        &gh,
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1 $2\" in\n\
+             'issue view') [ \"$3\" = 12 ] && echo '{i12}' && exit 0; [ \"$3\" = 13 ] && echo '{i13}' && exit 0; echo 'no such issue' >&2; exit 1;;\n\
+             'issue list') echo '[{i13},{i12}]';;\n\
+             'pr view') [ -f {st} ] && echo '{{\"url\":\"https://github.com/o/r/pull/7\",\"number\":7,\"state\":\"OPEN\"}}' && exit 0; echo 'no pull requests found' >&2; exit 1;;\n\
+             'pr create') touch {st};;\n\
+             esac\n",
+            log = s.home.join("gh-log").display(),
+            st = s.home.join("gh-pr").display(),
+            i12 = issue(12, "Crash on empty input"),
+            i13 = issue(13, "Typo in help"),
+        ),
+    );
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = [
+        ("AMUX_GH", gh.to_str().unwrap()),
+        ("AMUX_SCHEDULE_TICK_MS", "100"),
+    ];
+    let run_args = |id: &str| -> Vec<String> {
+        let j: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(s.amux_home.join("runs").join(id).join("run.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(j["worktree"]["branch"], format!("amux/{id}"));
+        serde_json::from_value(j["args"].clone()).unwrap()
+    };
+
+    // One issue, by number: its own worktree, the issue as the prompt, and a PR that fixes it.
+    let r = s.amux_with(
+        &[
+            "spawn",
+            "--issue",
+            "#12",
+            "--prompt",
+            "Keep it small.",
+            "fake",
+        ],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("started issue-12"), "{}", r.err);
+    let args = run_args("issue-12");
+    assert!(
+        args[0].starts_with("Work on GitHub issue #12: Crash on empty input"),
+        "{args:?}"
+    );
+    assert!(
+        args[0].contains("Steps for 12.") && args[0].contains("Keep it small."),
+        "{args:?}"
+    );
+    let ps = s.amux(&["ps", "--json"]).out;
+    assert!(ps.contains("\"issue\": 12"), "{ps}");
+    let pr = s.amux_with(&["pr", "issue-12"], &env, None);
+    assert_eq!(pr.code, 0, "{}", pr.err);
+    let log = fs::read_to_string(s.home.join("gh-log")).unwrap();
+    assert!(log.contains("--body Fixes #12"), "{log}");
+    let bad = s.amux_with(&["spawn", "--issue", "99", "fake"], &env, Some(&repo));
+    assert!(bad.err.contains("no such issue"), "{}", bad.err);
+    assert!(!s.amux_home.join("runs/issue-99").exists());
+
+    // Intake: a run for each open issue that has none yet, once.
+    let dry = s.amux_with(
+        &["intake", "--label", "bug", "--dry-run", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert!(
+        dry.out.contains("Would start issue-12") && dry.out.contains("Would start issue-13"),
+        "{}",
+        dry.out
+    );
+    let r = s.amux_with(&["intake", "--label", "bug", "fake"], &env, Some(&repo));
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(
+        r.out.contains("Started issue-13: #13 Typo in help"),
+        "{}",
+        r.out
+    );
+    assert!(
+        !r.out.contains("issue-12:"),
+        "12 has a run already: {}",
+        r.out
+    );
+    assert!(run_args("issue-13")[0].contains("issue #13"));
+    let log = fs::read_to_string(s.home.join("gh-log")).unwrap();
+    assert!(
+        log.contains("issue list --state open") && log.contains("--label bug"),
+        "{log}"
+    );
+    let again = s.amux_with(&["intake", "--label", "bug", "fake"], &env, Some(&repo));
+    assert!(
+        again.out.contains("No new open issues labeled bug"),
+        "{}",
+        again.out
+    );
+
+    // Schedules: checked when added, run by a background scheduler, and logged.
+    for (when, cmd) in [("soon", "ps"), ("every 1s", "ui")] {
+        let r = s.amux_with(&["schedule", "add", "x", when, cmd], &env, None);
+        assert_ne!(r.code, 0, "{when} {cmd}");
+    }
+    let r = s.amux_with(
+        &["schedule", "add", "tick", "every 1s", "amux", "ps"],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("Scheduled tick: amux ps"), "{}", r.out);
+    let r = s.amux_with(
+        &["schedule", "add", "bad", "every 1s", "stop", "nope"],
+        &env,
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let wait_for = |what: &dyn Fn(&str) -> bool| {
+        for _ in 0..100 {
+            let out = s.amux_with(&["schedule"], &env, None).out;
+            if what(&out) {
+                return out;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("{}", s.amux_with(&["schedule"], &env, None).out);
+    };
+    wait_for(&|o| {
+        o.lines()
+            .any(|l| l.starts_with("tick") && l.contains("ok "))
+            && o.lines()
+                .any(|l| l.starts_with("bad") && l.contains("exit 1"))
+    });
+    let log = s.amux_with(&["schedule", "log", "tick"], &env, None).out;
+    assert!(log.contains("amux ps") && log.contains("issue-13"), "{log}");
+    let json = s.amux_with(&["schedule", "--json"], &env, None).out;
+    assert!(
+        json.contains("\"nextAt\"") && json.contains(&format!("\"dir\": \"{}\"", repo.display())),
+        "{json}"
+    );
+
+    // Paused, it stops; run by hand, it runs in the foreground; removed, the scheduler ends.
+    s.amux_with(&["schedule", "pause", "tick"], &env, None);
+    assert!(s
+        .amux_with(&["schedule"], &env, None)
+        .out
+        .contains("paused"));
+    let now = s.amux_with(&["schedule", "run", "tick"], &env, None);
+    assert_eq!(now.code, 0);
+    assert!(now.out.contains("issue-12"), "{}", now.out);
+    s.amux_with(&["schedule", "rm", "tick"], &env, None);
+    s.amux_with(&["schedule", "rm", "bad"], &env, None);
+    for _ in 0..50 {
+        let log = fs::read_to_string(s.amux_home.join("scheduler.log")).unwrap_or_default();
+        if log.contains("scheduler exits") {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("the scheduler is still going");
+}

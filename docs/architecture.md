@@ -17,12 +17,15 @@ remote.rs        other machines: SSH, forwarding, the socket pipe
 plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:
                    slots (machine limits), verify (tests or push), github (PR, CI),
-                   review (diff and line comments). Nothing here prints.
+                   issues (GitHub issues as prompts), review (diff and line comments).
+                   Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
                    screen, attach, notify (desktop), push (phone: ntfy, Pushover, webhook)
 git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   foundations
 ```
+
+`commands/schedule.rs` also holds the scheduler, `amux __scheduler`: one process (it holds `scheduler.lock`) that starts each schedule's amux command when it's due. `main.rs` starts it on any command when schedules exist and it isn't running.
 
 Remote runs reuse everything: `runs::client::connect("gpu:x")` returns a socket that `remote.rs` bridges to `amux __pipe x` over SSH. Previews, typing and attaching work on them unchanged. `serve.rs` keeps to the CLI's commands on purpose, so the phone can't do anything the CLI can't.
 
@@ -140,6 +143,9 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `tls/self-<id>.pem`, `.key` | `amux serve --tls` | Self-signed certificates, one per set of addresses (key mode 0600) |
 | `serve.json` | `amux serve` | The address it last listened on, for links in phone notifications |
 | `phone.json`, `phone-sent.json`, `phone.log` | `amux phone`, `amux __push` | Where phone notifications go (mode 0600), when each run and event was last sent, and failed sends |
+| `schedules.json`, `schedules.lock`, `schedules/<name>.log` | `amux schedule`, `amux __scheduler` | Schedules and how each last went (edited under the lock), and each one's output |
+| `scheduler.lock`, `scheduler.log` | `amux __scheduler` | Held with `flock(2)` by the one scheduler while it runs; when it started and stopped |
+| `intake.json` | `amux intake` | Issue numbers already started, per repo, so none starts twice |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
 
