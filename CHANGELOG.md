@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-17
+
+Usage limits no longer stop the work: amux spots them, routes new runs to accounts with room, and moves a limited run's session to another account. Runs that work without getting anywhere are flagged, and processes finished runs leave behind are cleaned up.
+
 ### Added
 
 - **Guards against runaway and stuck agents.**
