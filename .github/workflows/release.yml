@@ -103,6 +103,12 @@ jobs:
           "$prefix/bin/amux" --version
           ls -l dist
 
+      # After the npm step, whose dist/amux-*.tar.gz loop must not see the bottles.
+      - name: Build the Homebrew bottles
+        run: |
+          sh scripts/homebrew-bottles.sh "$(node -p 'require("./npm/package.json").version')" dist
+          ls -l dist/*.bottle.tar.gz
+
       - name: Extract release notes from CHANGELOG.md
         run: |
           version="$(node -p 'require("./npm/package.json").version')"

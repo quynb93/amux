@@ -9,9 +9,15 @@ dir="$2"
 base="https://github.com/quynb93/amux/releases/download/v$version"
 
 sha() {
-  file="$dir/amux-$1.tar.gz.sha256"
+  file="$dir/$1.sha256"
   [ -s "$file" ] || { echo "missing $file" >&2; exit 1; }
   cut -d' ' -f1 <"$file"
+}
+
+# Bottles from scripts/homebrew-bottles.sh, so brew pours the binary instead of treating
+# the formula as a source build (which needs up-to-date Command Line Tools).
+bottle() {
+  echo "    sha256 cellar: :any_skip_relocation, $1: \"$(sha "amux-$version.$1.bottle.tar.gz")\""
 }
 
 cat <<EOF
@@ -20,25 +26,33 @@ class Amux < Formula
   homepage "https://github.com/quynb93/amux"
   license "MIT"
 
+  bottle do
+    root_url "$base"
+$(bottle arm64_big_sur)
+$(bottle big_sur)
+$(bottle arm64_linux)
+$(bottle x86_64_linux)
+  end
+
   on_macos do
     on_arm do
       url "$base/amux-aarch64-apple-darwin.tar.gz"
-      sha256 "$(sha aarch64-apple-darwin)"
+      sha256 "$(sha amux-aarch64-apple-darwin.tar.gz)"
     end
     on_intel do
       url "$base/amux-x86_64-apple-darwin.tar.gz"
-      sha256 "$(sha x86_64-apple-darwin)"
+      sha256 "$(sha amux-x86_64-apple-darwin.tar.gz)"
     end
   end
 
   on_linux do
     on_arm do
       url "$base/amux-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "$(sha aarch64-unknown-linux-musl)"
+      sha256 "$(sha amux-aarch64-unknown-linux-musl.tar.gz)"
     end
     on_intel do
       url "$base/amux-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "$(sha x86_64-unknown-linux-musl)"
+      sha256 "$(sha amux-x86_64-unknown-linux-musl.tar.gz)"
     end
   end
 
