@@ -6,6 +6,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ### Added
 
+- **Guards against runaway and stuck agents.**
+  - Each run's host takes a fingerprint of the run's files (HEAD and uncommitted changes) every minute. A run that keeps working with no change for the `stall` time (30 minutes by default) is flagged under "needs you" as `stalled: working 34m with no change to its files`, with a notification and the `stalled` hook. It clears when the files change.
+  - `maxTime` flags runs that have been alive too long.
+  - `onStall` can also `interrupt` (press Esc, which ends the agent's turn) or `stop` the run.
+  - Set these in `"limits"` in config.json, or per run with `amux spawn --stall 20m --max-time 2h` ("0" turns one off).
+- **`amux gc [--dry-run]`** ends processes that finished runs left behind: dev servers, watchers, test runners. They're found by the run's process group, by `AMUX_RUN` in their environment (Linux), or by working inside the run's own worktree. It never matches by folder for runs without a worktree. Also `/gc` in `amux ui`.
 - **Usage limits across accounts.**
   - When a run's CLI says its account hit its usage limit ("You've hit your limit · resets 7pm"), the run shows as waiting with that message, the account is marked limited until the reset time the message names, and a notification and the `limited` hook go out. The messages come from each provider's new `limitPatterns`, with defaults for Claude Code, Codex and Gemini CLI.
   - `amux usage` lists each account, whether it is limited and until when, and its live runs. `--clear` forgets a limit that lifted early.

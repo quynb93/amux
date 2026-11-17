@@ -1749,3 +1749,107 @@ fn spots_usage_limits_and_moves_the_session_to_another_account() {
         s.amux(&["stop", r]);
     }
 }
+
+#[test]
+fn flags_a_run_that_works_without_changing_anything_and_cleans_up_leftovers() {
+    let s = Sandbox::new("guards");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "a\n");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@x",
+            "commit",
+            "-qm",
+            "i",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    // Busy forever, changing nothing.
+    let busy = s.home.join("bin/busy");
+    write(
+        &busy,
+        "#!/bin/sh\nwhile true; do echo thinking; sleep 0.2; done\n",
+    );
+    fs::set_permissions(&busy, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = busy.to_str().unwrap().into();
+    write(&cfg, &c.to_string());
+    let tick = [("AMUX_GUARD_TICK_MS", "200")];
+    let r = s.amux_with(
+        &[
+            "spawn",
+            "--name",
+            "loop",
+            "--worktree",
+            "--stall",
+            "1s",
+            "fake",
+        ],
+        &tick,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "loop", "waiting");
+    let run = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/loop/run.json")).unwrap())
+            .unwrap()
+    };
+    assert_eq!(run()["waiting"]["source"], "stall");
+    assert!(run()["waiting"]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("stalled: working"));
+    assert!(s
+        .amux(&["explain", "loop"])
+        .out
+        .contains("watchdog flagged it"));
+    // Its files change: the flag goes.
+    write(&s.amux_home.join("worktrees/repo-loop/a.txt"), "changed\n");
+    wait_ps(&s, "loop", "running");
+    assert!(run().get("waiting").is_none());
+    s.amux(&["stop", "loop"]);
+
+    // A CLI that starts a server in the background and exits leaves it running.
+    let leaky = s.home.join("bin/leaky");
+    write(
+        &leaky,
+        // Detached into a session of its own, as daemons and some dev servers do, so the
+        // end of the run's terminal doesn't take it along.
+        "#!/bin/sh\nperl -e 'use POSIX; fork and exit; setsid(); open STDIN, \"</dev/null\"; open STDOUT, \">/dev/null\"; open STDERR, \">&STDOUT\"; sleep 345' &\necho started a server\nsleep 0.5\n",
+    );
+    fs::set_permissions(&leaky, fs::Permissions::from_mode(0o755)).unwrap();
+    c["providers"][0]["bin"] = leaky.to_str().unwrap().into();
+    write(&cfg, &c.to_string());
+    let r = s.amux_with(
+        &["spawn", "--name", "leak", "--worktree", "fake"],
+        &[],
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "leak", "exited 0");
+    let dry = s.amux(&["gc", "--dry-run"]);
+    assert!(
+        dry.out.contains("leak") && dry.out.contains("perl -e use POSIX"),
+        "{}",
+        dry.out
+    );
+    let gc = s.amux(&["gc"]);
+    assert!(gc.out.contains("Ended 1 process"), "{}", gc.out);
+    assert!(s.amux(&["gc"]).out.contains("Nothing left behind"));
+}

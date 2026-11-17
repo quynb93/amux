@@ -414,6 +414,7 @@ impl App {
                 argv.extend(args);
                 self.background_output(argv, format!("Plugin {name}"));
             }
+            Action::Gc => self.background_output(vec!["gc".into()], "Leftover processes".into()),
             Action::Usage => self.background_output(vec!["usage".into()], "Usage limits".into()),
             Action::Failover(r) => {
                 if let Some((id, _)) = self.resolve_run(r) {

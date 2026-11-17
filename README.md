@@ -35,6 +35,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Driving runs from scripts and agents](#driving-runs-from-scripts-and-agents)
   - [Reviewing a run's changes](#reviewing-a-runs-changes)
   - [Usage limits](#usage-limits)
+  - [Runaway and stuck agents](#runaway-and-stuck-agents)
   - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
   - [Other machines](#other-machines)
@@ -323,6 +324,19 @@ amux failover fix-login         # the same session, same worktree, under another
 - **`failover`** resumes the run's session (`claude --resume <id>`, `codex resume <id>`) under another account of the same CLI, in the same folder and worktree, and tells the agent to carry on. Set `"limits": { "onLimit": "failover" }` in `~/.amux/config.json` to do it automatically, or keep the default (`wait`), where the CLI waits for the reset itself.
 - The messages amux watches for are each provider's `limitPatterns`. Add your own in `config.json` if a CLI words them differently.
 - Check that moving work between accounts is allowed by your provider's terms.
+
+### Runaway and stuck agents
+
+An agent can keep "working" for an hour without getting anywhere, using up your window while it does. Every run's host checks every minute whether the run's files (its commit and uncommitted changes) have changed. A run that works for 30 minutes with no change is flagged `stalled`. It shows under "needs you" with a notification, and the flag goes as soon as its files change.
+
+```json
+{ "limits": { "stall": "30m", "maxTime": "4h", "onStall": "notify" } }
+```
+
+- `stall` and `maxTime` take times like `20m` or `2h`, and `0` turns one off. Set them per run with `amux spawn --stall 20m --max-time 2h`.
+- `onStall` is `notify` (the default), `interrupt` (press Esc, which ends the agent's turn) or `stop` (end the run).
+- `~/.amux/hooks/on-stalled` runs when a run is flagged.
+- **`amux gc`** ends what finished runs left behind, such as a dev server still holding a port. It finds processes still in the run's process group, ones carrying the run's `AMUX_RUN` (on Linux), and ones working inside the run's own worktree. `--dry-run` lists them first.
 
 ### Landing parallel runs
 

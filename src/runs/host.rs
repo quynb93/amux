@@ -111,6 +111,8 @@ struct Hub {
     /// The end of the output so far, for an escape sequence or character the last chunk
     /// cut in two (see `screen::unfinished`).
     tail: Vec<u8>,
+    /// When the CLI last printed something, for the stall watchdog.
+    last_out: i64,
     detector: Detector,
     notifier: Notifier,
     /// The host's copy of run.json, which it alone writes while the run is alive.
@@ -123,6 +125,7 @@ impl Default for Hub {
             clients: Vec::new(),
             screen: screen::new_parser(24, 80, 0),
             tail: Vec::new(),
+            last_out: 0,
             detector: Detector::default(),
             notifier: Notifier::default(),
             run: Run::default(),
@@ -329,6 +332,16 @@ fn host(id: &str) -> Result<i32> {
         });
     }
 
+    {
+        let (master, hub) = (master.clone(), hub.clone());
+        let guard = run
+            .guard
+            .clone()
+            .unwrap_or_else(|| crate::work::guards::Guard::from_config(None, None));
+        let (cwd, started) = (PathBuf::from(&run.cwd), run.started_at);
+        std::thread::spawn(move || watchdog(&hub, &master, guard, &cwd, started, pid));
+    }
+
     let status = child.wait()?;
     let code = status
         .code()
@@ -356,6 +369,91 @@ fn host(id: &str) -> Result<i32> {
         let _ = c.stream.shutdown(std::net::Shutdown::Both);
     }
     Ok(code)
+}
+
+/// Flags the run when it works without changing its files for too long, or runs past its
+/// time limit, and acts on it as configured (see work/guards.rs). Ends with the run.
+fn watchdog(
+    hub: &Mutex<Hub>,
+    master: &File,
+    guard: crate::work::guards::Guard,
+    cwd: &std::path::Path,
+    started: i64,
+    pid: u32,
+) {
+    use crate::work::guards::{fingerprint, Verdict, Watch};
+    if guard.stall_ms == 0 && guard.max_ms == 0 {
+        return;
+    }
+    // Tests make it tick faster.
+    let tick = std::env::var("AMUX_GUARD_TICK_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000u64);
+    let action = guard.action.clone();
+    let mut w = Watch::new(guard, time::now_ms());
+    loop {
+        std::thread::sleep(Duration::from_millis(tick));
+        let now = time::now_ms();
+        let working = {
+            let h = lock(hub);
+            if h.run.exit_code.is_some() {
+                return;
+            }
+            let reported = h.run.status.as_ref().map(|s| s.state.as_str());
+            match reported {
+                Some("working") => true,
+                Some(_) => false,
+                // No reports: printing in the last seconds means busy.
+                // Its own stall flag doesn't count as waiting on you.
+                None => {
+                    now - h.last_out < 10_000
+                        && h.run
+                            .waiting
+                            .as_ref()
+                            .is_none_or(|w| w.source.as_deref() == Some("stall"))
+                }
+            }
+        };
+        let print = fingerprint(cwd);
+        let reason = match w.tick(now, working, print, started) {
+            Verdict::Stalled(r) | Verdict::Overtime(r) => r,
+            Verdict::Recovered => {
+                let mut h = lock(hub);
+                if h.run.waiting.as_ref().and_then(|w| w.source.as_deref()) == Some("stall") {
+                    h.run.waiting = None;
+                    let _ = save(&h.run);
+                }
+                continue;
+            }
+            Verdict::Fine => continue,
+        };
+        {
+            let mut h = lock(hub);
+            h.run.waiting = Some(Waiting {
+                reason: reason.clone(),
+                since: now,
+                source: Some("stall".into()),
+            });
+            let _ = save(&h.run);
+            crate::plugins::hook("stalled", &h.run.id, &reason);
+            if !h.attached() {
+                let title = h.title();
+                let id = h.run.id.clone();
+                h.notifier.send(&id, "stalled", &title, &reason);
+            }
+        }
+        match action.as_str() {
+            // Esc stops the agent's current turn in Claude Code and Codex.
+            "interrupt" => {
+                let _ = (&*master).write_all(b"\x1b");
+            }
+            "stop" => unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            },
+            _ => {}
+        }
+    }
 }
 
 /// Appends to output.log, moving it to output.log.1 once it passes LOG_ROTATE.
@@ -404,6 +502,7 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         log.write(chunk);
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
         h.screen.process(chunk);
+        h.last_out = time::now_ms();
         h.tail.extend_from_slice(chunk);
         let keep = h.tail.len().saturating_sub(screen::TAIL);
         h.tail.drain(..keep);

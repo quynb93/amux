@@ -53,6 +53,10 @@ pub struct Run {
     /// Prompt text that means the CLI is waiting for you (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_patterns: Vec<String>,
+    /// When to flag the run as stalled or over time (work/guards.rs). Absent from runs of
+    /// amux before 0.8, which get the configured guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<crate::work::guards::Guard>,
     /// Text that means the account hit its usage limit (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_patterns: Vec<String>,
