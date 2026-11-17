@@ -21,6 +21,8 @@ struct SpawnOpts {
     name: Option<String>,
     /// Start in this folder instead of the current one.
     dir: Option<String>,
+    /// Continue in this run's folder and worktree, instead of a new one (failover).
+    adopt: Option<String>,
     /// A first prompt, passed the way the provider takes one (its `promptArgs`).
     prompt: Option<String>,
     worktree: bool,
@@ -62,6 +64,7 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--worktree" | "-w" => o.worktree = true,
             "--attach" | "-a" => o.attach = true,
             "--dir" | "-C" => o.dir = Some(value()?),
+            "--adopt" => o.adopt = Some(value()?),
             "--prompt" => {
                 // A prompt may start with anything but "-", like any value here.
                 o.prompt = Some(value()?)
@@ -180,7 +183,21 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             bail!("Run names use letters, digits, '.', '_' and '-'.");
         }
     }
-    let acct = resolve_account(acct_ref)?;
+    let mut acct = resolve_account(acct_ref)?;
+    // No account named: one that hasn't hit its usage limit, if there is one.
+    if !acct_ref.contains('@') {
+        if let Some(l) = crate::work::limits::of(&acct.id()) {
+            if let Some(other) = crate::work::limits::pick(&acct.provider, &acct.id()) {
+                eprintln!(
+                    "amux: {} is limited ({}); using {} instead",
+                    acct.id(),
+                    l.reason,
+                    other.id()
+                );
+                acct = other;
+            }
+        }
+    }
     let (spec, env) = prepare(&acct)?;
     let cwd = match &o.dir {
         Some(d) => {
@@ -210,11 +227,16 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         cwd: cwd.to_string_lossy().into_owned(),
         started_at: time::now_ms(),
         waiting_patterns: spec.waiting_patterns.clone(),
+        limit_patterns: spec.limit_patterns.clone(),
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));
     let started = (|| -> Result<()> {
-        if o.worktree {
+        if let Some(old) = &o.adopt {
+            let old = runs::find(old)?;
+            run.cwd = old.cwd.clone();
+            run.worktree = old.worktree.clone();
+        } else if o.worktree {
             let (wt, start) = add_worktree(&cwd, &id, &o)?;
             run.cwd = start.to_string_lossy().into_owned();
             run.worktree = Some(wt);
@@ -561,6 +583,121 @@ pub fn stop_cmd(argv: &[String]) -> Result<i32> {
             run.id
         ),
     }
+    Ok(0)
+}
+
+/// The session a run was having, so another account can resume it: the newest session of
+/// its CLI in its folder that was active since the run started.
+fn session_of(run: &Run) -> Option<String> {
+    let provider = run.account.split('@').next()?;
+    let spec = crate::store::get_provider(provider).ok()?;
+    crate::sessions::list_sessions(&spec, None)
+        .into_iter()
+        .filter(|s| s.cwd.as_deref() == Some(run.cwd.as_str()))
+        .filter(|s| s.updated_at >= run.started_at - 60_000)
+        .max_by_key(|s| s.updated_at)
+        .map(|s| s.id)
+}
+
+const FAILOVER_USAGE: &str = "amux failover <run> [--to <provider>@<name>]";
+
+/// `amux failover <run>`: the run's account hit its usage limit (or you want it on another
+/// one): stop it, resume the same session under another account in the same folder and
+/// worktree, and tell the agent to carry on.
+pub fn failover_cmd(argv: &[String]) -> Result<i32> {
+    let mut to = None;
+    let mut id = None;
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--to" => to = Some(need(it.next(), FAILOVER_USAGE)?.to_string()),
+            f if f.starts_with('-') => bail!("Unknown option {f}. Usage: {FAILOVER_USAGE}"),
+            r => id = Some(r.to_string()),
+        }
+    }
+    let run = runs::find(need(id.as_ref(), FAILOVER_USAGE)?)?;
+    let provider = run
+        .account
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let target = match &to {
+        Some(t) => resolve_account(t)?,
+        None => crate::work::limits::pick(&provider, &run.account).ok_or_else(|| {
+            anyhow!("No other {provider} account without a usage limit. `amux usage` shows them; add one with `amux account add {provider} <name>`.")
+        })?,
+    };
+    if target.provider != provider {
+        bail!(
+            "{} is a {provider} run; it can only continue under another {provider} account.",
+            run.id
+        );
+    }
+    if target.id() == run.account {
+        bail!("{} already runs as {}.", run.id, run.account);
+    }
+    let spec = crate::store::get_provider(&provider)?;
+    let session = session_of(&run).ok_or_else(|| {
+        anyhow!(
+            "Can't find {}'s session to resume (no {provider} session in {} since it started).",
+            run.id,
+            tildify(Path::new(&run.cwd))
+        )
+    })?;
+    let resume = spec.resume_args.clone().ok_or_else(|| {
+        anyhow!("{provider} has no resumeArgs, so its sessions can't be resumed.")
+    })?;
+    if run.state().is_live() {
+        signal(&run, libc::SIGTERM)?;
+        if wait_exit(&run.id, Duration::from_secs(10)).is_none() {
+            let _ = signal(&run, libc::SIGKILL);
+            wait_exit(&run.id, Duration::from_secs(3));
+        }
+    }
+    // A name next to the old one: fix-login → fix-login-2.
+    let base = run
+        .id
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .trim_end_matches('-');
+    let name = (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|n| !runs::run_dir(n).exists())
+        .expect("a free name");
+    let mut args = vec![
+        "--name".to_string(),
+        name.clone(),
+        "--adopt".into(),
+        run.id.clone(),
+        target.id(),
+    ];
+    args.extend(crate::launch::fill_args(&resume, &[("id", &session)]));
+    spawn_cmd(&args)?;
+    // Once the resumed session is up and quiet, ask it to go on where it stopped.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let Ok(r) = runs::load(&name) else { continue };
+        let quiet = last_output(&r).is_some_and(|t| time::now_ms() - t > 2_500);
+        if r.state() == State::Running && quiet {
+            let _ = crate::runs::client::send_text(
+                &r,
+                "The previous account hit its usage limit, so this session continues under another account. Please carry on with the task where you left off.",
+                true,
+            );
+            break;
+        }
+    }
+    println!(
+        "{} continues as {name} under {} (session {session}, same folder{}).",
+        run.id,
+        target.id(),
+        if run.worktree.is_some() {
+            " and worktree"
+        } else {
+            ""
+        }
+    );
     Ok(0)
 }
 

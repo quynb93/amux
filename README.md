@@ -34,6 +34,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Parallel runs](#parallel-runs)
   - [Driving runs from scripts and agents](#driving-runs-from-scripts-and-agents)
   - [Reviewing a run's changes](#reviewing-a-runs-changes)
+  - [Usage limits](#usage-limits)
   - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
   - [Other machines](#other-machines)
@@ -307,6 +308,21 @@ amux comments tests --send     # one message: file:line, the line, and your note
 ```
 
 Comments are kept in `runs/<id>/review.json` until sent, so a review can be written over time.
+
+### Usage limits
+
+Subscription accounts run out: Claude Code's five-hour and weekly windows, Codex's and Gemini's quotas. amux knows every account you have, so a limit doesn't have to stop the work:
+
+```sh
+amux usage                      # which accounts are limited, until when, and their runs
+amux failover fix-login         # the same session, same worktree, under another account
+```
+
+- A run whose CLI says it hit its limit shows `waiting` with the message, and the account is marked limited until the reset time the message names. You get a notification, and `~/.amux/hooks/on-limited` runs.
+- `amux spawn claude` (no account named) skips limited accounts.
+- **`failover`** resumes the run's session (`claude --resume <id>`, `codex resume <id>`) under another account of the same CLI, in the same folder and worktree, and tells the agent to carry on. Set `"limits": { "onLimit": "failover" }` in `~/.amux/config.json` to do it automatically, or keep the default (`wait`), where the CLI waits for the reset itself.
+- The messages amux watches for are each provider's `limitPatterns`. Add your own in `config.json` if a CLI words them differently.
+- Check that moving work between accounts is allowed by your provider's terms.
 
 ### Landing parallel runs
 

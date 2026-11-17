@@ -53,6 +53,10 @@ pub struct ProviderSpec {
     /// runs match it (case-insensitively) to show "waiting" and send a notification.
     #[serde(default)]
     pub waiting_patterns: Vec<String>,
+    /// Text the CLI shows when the account has hit its usage limit. A run that shows it is
+    /// marked waiting, and its account limited until the reset time the text names.
+    #[serde(default)]
+    pub limit_patterns: Vec<String>,
     /// Env var that points the CLI at another API endpoint (a gateway or relay). It only
     /// redirects where requests go; it never changes organization-managed policy.
     pub base_url_env: Option<String>,
@@ -115,6 +119,9 @@ pub fn builtin() -> Vec<Value> {
             ],
             // Permission and confirmation dialogs.
             "waitingPatterns": ["Do you want to", "Enter to confirm"],
+            // "You've hit your limit · resets 7pm (Asia/Saigon)", and while it waits:
+            // "Usage limit reached · continuing automatically at 12:10pm".
+            "limitPatterns": ["You've hit your limit", "Usage limit reached", "limit reached · limit resets"],
             "baseUrlEnv": "ANTHROPIC_BASE_URL",
             // Documented user opt-outs. CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC also turns
             // off auto-update and /bug. Managed (enterprise) settings still take precedence.
@@ -141,6 +148,7 @@ pub fn builtin() -> Vec<Value> {
             "tokenEnv": "OPENAI_API_KEY",
             "conflictingEnv": ["CODEX_HOME"],
             "waitingPatterns": ["Would you like to run", "Would you like to make the following edits", "Yes, proceed"],
+            "limitPatterns": ["You've hit your usage limit", "usage limit has been reached"],
             "baseUrlEnv": "OPENAI_BASE_URL",
             "sessions": "codex"
         }),
@@ -159,6 +167,7 @@ pub fn builtin() -> Vec<Value> {
             "tokenEnv": "GEMINI_API_KEY",
             "conflictingEnv": ["GEMINI_CLI_HOME"],
             "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"],
+            "limitPatterns": ["exhausted your daily quota", "Quota exceeded for quota metric"],
             "sessions": "gemini"
         }),
     ]

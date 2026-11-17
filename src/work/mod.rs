@@ -3,6 +3,7 @@
 //! reviewing its changes (`review`). Nothing here prints; `commands/` and `ui/` show it.
 
 pub mod github;
+pub mod limits;
 pub mod overlap;
 pub mod review;
 pub mod slots;

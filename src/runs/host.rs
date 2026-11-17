@@ -157,6 +157,46 @@ impl Hub {
         let _ = save(&self.run);
     }
 
+    /// The account hit its usage limit: the run waits (with the CLI's message), the
+    /// account is marked limited until the reset, and, with `onLimit: failover`, the run
+    /// moves to another account by itself.
+    fn limited(&mut self, msg: &str) {
+        let l = crate::work::limits::record(&self.run.account, msg, Some(&self.run.id));
+        self.run.waiting = Some(Waiting {
+            reason: l.reason.clone(),
+            since: time::now_ms(),
+            source: Some("limit".into()),
+        });
+        let _ = save(&self.run);
+        crate::plugins::hook("limited", &self.run.id, &l.reason);
+        if !self.attached() {
+            let msg = format!("{} hit its usage limit: {}", self.run.account, l.reason);
+            self.notifier
+                .send(&self.run.id, "limited", &self.title(), &msg);
+        }
+        if crate::work::limits::on_limit() == "failover" {
+            if let Ok(exe) = std::env::current_exe() {
+                use std::os::unix::process::CommandExt;
+                let mut c = Command::new(exe);
+                c.args(["failover", &self.run.id])
+                    .env("AMUX_NO_UPDATE_CHECK", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                // Its own session: failover stops this run, which ends this host.
+                unsafe {
+                    c.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+                if let Ok(mut child) = c.spawn() {
+                    std::thread::spawn(move || child.wait());
+                }
+            }
+        }
+    }
+
     fn title(&self) -> String {
         format!("amux: {} ({})", self.run.id, self.run.account)
     }
@@ -265,7 +305,7 @@ fn host(id: &str) -> Result<i32> {
 
     let master = Arc::new(File::from(master));
     let hub = Arc::new(Mutex::new(Hub {
-        detector: Detector::new(&run.waiting_patterns),
+        detector: Detector::new(&run.waiting_patterns).with_limits(&run.limit_patterns),
         notifier: Notifier::from_config(),
         run: run.clone(),
         screen: screen::new_parser(run.rows.max(1), run.cols.max(1), 0),
@@ -375,6 +415,9 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         let record = h.detector.take_record();
         h.set_status(record);
         h.apply(change);
+        if let Some(msg) = h.detector.take_limit() {
+            h.limited(&msg);
+        }
         // Tell the CLI that this terminal understands OSC 7501, so it reports its state.
         // Only live output gets here, never a replay, so each probe is answered once.
         let probed = h.detector.take_probe();
