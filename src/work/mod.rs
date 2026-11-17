@@ -5,6 +5,7 @@
 pub mod github;
 pub mod guards;
 pub mod limits;
+pub mod notes;
 pub mod overlap;
 pub mod review;
 pub mod slots;

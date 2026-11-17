@@ -57,6 +57,9 @@ pub struct Run {
     /// amux before 0.8, which get the configured guard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<crate::work::guards::Guard>,
+    /// The first of its block of ports (PORT, AMUX_PORT), for a worktree run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     /// Attempts at the same task started together (`amux try`), compared and picked as one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,

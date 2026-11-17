@@ -58,6 +58,12 @@ amux pr parser-tests                            # push and open a PR (gh)
 amux checks parser-tests --send-failures        # failing CI back to it
 ```
 
+## Shared decisions
+
+`amux notes` shows decisions every agent on this repo follows; `amux note "<decision>"`
+adds one when you make a choice others must respect. Use `$PORT` for any server you
+start: amux gives each run its own.
+
 ## Several attempts
 
 For a risky or ambiguous task, try it more than once and keep the best:

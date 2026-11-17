@@ -34,6 +34,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Parallel runs](#parallel-runs)
   - [Driving runs from scripts and agents](#driving-runs-from-scripts-and-agents)
   - [Reviewing a run's changes](#reviewing-a-runs-changes)
+  - [Shared notes and separate ports](#shared-notes-and-separate-ports)
   - [Best of N](#best-of-n)
   - [Usage limits](#usage-limits)
   - [Runaway and stuck agents](#runaway-and-stuck-agents)
@@ -310,6 +311,20 @@ amux comments tests --send     # one message: file:line, the line, and your note
 ```
 
 Comments are kept in `runs/<id>/review.json` until sent, so a review can be written over time.
+
+### Shared notes and separate ports
+
+Parallel runs on one repo don't know what the others decided, and their dev servers all want port 3000:
+
+```sh
+amux note "use zod, not yup; the public API is frozen"     # every new run here starts with it
+amux notes                                                 # list; --rm <n> removes one
+amux broadcast "main changed: rebase before you push" --note   # tell the running ones too
+```
+
+- Notes are kept in the repo's git folder (`.git/amux/notes.jsonl`), so every worktree sees them and they're never committed.
+- Each worktree run gets its own `PORT` and `AMUX_PORT` (a block of ten from 41000) and its own `COMPOSE_PROJECT_NAME`. Most dev servers pick up `PORT`.
+- New worktrees get the main checkout's `.env`, `.env.local` and `.env.development.local`, which git doesn't carry. Change the list with `"worktree": { "copy": [".env", "config/local.yml"] }`, or turn ports off with `"worktree": { "ports": false }`.
 
 ### Best of N
 
