@@ -1,6 +1,6 @@
 {
   "name": "@quynb/amux",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Run Claude Code, Codex and Gemini CLI with many accounts over one shared home",
   "license": "MIT",
   "author": "quynb93",

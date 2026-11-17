@@ -5,6 +5,8 @@ mod commands {
     #[cfg(unix)]
     pub mod explain;
     #[cfg(unix)]
+    pub mod gc;
+    #[cfg(unix)]
     pub mod github;
     pub mod maintenance;
     #[cfg(unix)]
@@ -71,7 +73,7 @@ Accounts:
   amux account rm <provider>@<name> [--purge]
 
 Parallel runs (each CLI in the background, in its own terminal):
-  amux spawn [--on <machine>[:<dir>]] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
+  amux spawn [--on <machine>[:<dir>]] [--stall <30m>] [--max-time <4h>] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
       --on starts it on another machine; then name it <machine>:<run> anywhere a run goes.
   amux ps [--json]                         List runs and whether each is working or idle
@@ -98,6 +100,7 @@ Parallel runs (each CLI in the background, in its own terminal):
       List a run's review comments, or send the pending ones to its agent as one message
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
   amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
+  amux gc [--dry-run]                      End processes finished runs left behind (dev servers…)
   amux ui                                  Watch, attach to, start and stop runs in one screen
   amux verify <run> [--test [--command <cmd>] | --push | --send-failures]
       Check a finished run's work: run its tests here (waiting for a test slot),
@@ -227,6 +230,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "failover" => commands::runs::failover_cmd(rest),
         #[cfg(unix)]
+        "gc" => commands::gc::gc_cmd(rest),
+        #[cfg(unix)]
         "land" => commands::overlap::land_cmd(rest),
         #[cfg(unix)]
         "comment" => commands::review::comment_cmd(rest),
@@ -235,7 +240,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(not(unix))]
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
-        | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" => {
+        | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

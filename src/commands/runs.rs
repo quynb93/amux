@@ -23,6 +23,9 @@ struct SpawnOpts {
     dir: Option<String>,
     /// Continue in this run's folder and worktree, instead of a new one (failover).
     adopt: Option<String>,
+    /// Flag the run after this long working without changing a file, or alive at all.
+    stall: Option<u64>,
+    max_time: Option<u64>,
     /// A first prompt, passed the way the provider takes one (its `promptArgs`).
     prompt: Option<String>,
     worktree: bool,
@@ -65,6 +68,17 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--attach" | "-a" => o.attach = true,
             "--dir" | "-C" => o.dir = Some(value()?),
             "--adopt" => o.adopt = Some(value()?),
+            "--stall" | "--max-time" => {
+                let v = value()?;
+                let ms = crate::work::guards::parse_duration(&v).ok_or_else(|| {
+                    anyhow!("{flag} takes a time such as 30m or 2h, not \"{v}\".")
+                })?;
+                if flag == "--stall" {
+                    o.stall = Some(ms);
+                } else {
+                    o.max_time = Some(ms);
+                }
+            }
             "--prompt" => {
                 // A prompt may start with anything but "-", like any value here.
                 o.prompt = Some(value()?)
@@ -228,6 +242,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         started_at: time::now_ms(),
         waiting_patterns: spec.waiting_patterns.clone(),
         limit_patterns: spec.limit_patterns.clone(),
+        guard: Some(crate::work::guards::Guard::from_config(o.stall, o.max_time)),
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));
