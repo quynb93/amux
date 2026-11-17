@@ -1871,3 +1871,85 @@ fn flags_a_run_that_works_without_changing_anything_and_cleans_up_leftovers() {
     assert!(gc.out.contains("Ended 1 process"), "{}", gc.out);
     assert!(s.amux(&["gc"]).out.contains("Nothing left behind"));
 }
+
+#[test]
+fn tries_a_task_several_times_compares_and_keeps_the_best() {
+    let s = Sandbox::new("attempts");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "broken\n");
+    write(&repo.join("Makefile"), "test:\n\tgrep -q fixed a.txt\n");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let t = s.amux_with(
+        &["try", "3", "fake", "-p", "fix a.txt", "--name", "fix"],
+        &[],
+        Some(&repo),
+    );
+    assert_eq!(t.code, 0, "{}", t.err);
+    for n in ["fix-1", "fix-2", "fix-3"] {
+        wait_ps(&s, n, "exited");
+    }
+    let wt = |n: &str| s.amux_home.join(format!("worktrees/repo-{n}"));
+    // fix-1: small and right. fix-2: right, but touches more. fix-3: wrong.
+    write(&wt("fix-1").join("a.txt"), "fixed\n");
+    git(&wt("fix-1"), &["commit", "-qam", "fix"]);
+    write(&wt("fix-2").join("a.txt"), "fixed\n");
+    write(&wt("fix-2").join("extra.txt"), "1\n2\n3\n");
+    git(&wt("fix-2"), &["add", "."]);
+    git(&wt("fix-2"), &["commit", "-qm", "fix and more"]);
+    write(&wt("fix-3").join("a.txt"), "still broken\n");
+
+    let c = s.amux(&["compare", "fix"]);
+    assert_eq!(c.code, 0, "{}", c.err);
+    let first = c.out.lines().nth(1).unwrap_or_default();
+    assert!(
+        first.starts_with("★") && first.contains("fix-1") && first.contains("passed"),
+        "{}",
+        c.out
+    );
+    let j: serde_json::Value =
+        serde_json::from_str(&s.amux(&["compare", "fix", "--json"]).out).unwrap();
+    let order: Vec<&str> = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["run"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["fix-1", "fix-2", "fix-3"]);
+    assert_eq!(j[2]["tests"], "failed");
+
+    let who = [
+        ("GIT_AUTHOR_NAME", "t"),
+        ("GIT_AUTHOR_EMAIL", "t@example.com"),
+        ("GIT_COMMITTER_NAME", "t"),
+        ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ];
+    let p = s.amux_with(&["pick", "fix-1", "--land"], &who, None);
+    assert_eq!(p.code, 0, "{}{}", p.out, p.err);
+    assert!(p.out.contains("fix-1: landed"), "{}", p.out);
+    assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "fixed\n");
+    let ps = s.amux(&["ps"]).out;
+    assert!(!ps.contains("fix-2"), "clean losers are gone: {ps}");
+    assert!(
+        p.out.contains("kept worktree") || ps.contains("fix-3"),
+        "uncommitted work is never deleted: {}{ps}",
+        p.out
+    );
+}

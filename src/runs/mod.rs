@@ -57,6 +57,9 @@ pub struct Run {
     /// amux before 0.8, which get the configured guard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<crate::work::guards::Guard>,
+    /// Attempts at the same task started together (`amux try`), compared and picked as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Text that means the account hit its usage limit (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_patterns: Vec<String>,

@@ -23,6 +23,8 @@ struct SpawnOpts {
     dir: Option<String>,
     /// Continue in this run's folder and worktree, instead of a new one (failover).
     adopt: Option<String>,
+    /// One of several attempts at the same task (`amux try`).
+    group: Option<String>,
     /// Flag the run after this long working without changing a file, or alive at all.
     stall: Option<u64>,
     max_time: Option<u64>,
@@ -68,6 +70,7 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--attach" | "-a" => o.attach = true,
             "--dir" | "-C" => o.dir = Some(value()?),
             "--adopt" => o.adopt = Some(value()?),
+            "--group" => o.group = Some(value()?),
             "--stall" | "--max-time" => {
                 let v = value()?;
                 let ms = crate::work::guards::parse_duration(&v).ok_or_else(|| {
@@ -243,6 +246,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         waiting_patterns: spec.waiting_patterns.clone(),
         limit_patterns: spec.limit_patterns.clone(),
         guard: Some(crate::work::guards::Guard::from_config(o.stall, o.max_time)),
+        group: o.group.clone(),
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));

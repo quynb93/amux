@@ -4,6 +4,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- **Best of N.** `amux try 3 claude -p "<task>" --name fix` starts several attempts at one task, each in its own worktree. `amux try claude@work,codex@me …` gives each attempt its own account or CLI.
+  - `amux compare fix` runs each attempt's tests in a test slot and ranks them: passing first, then the smaller change (fewer files, fewer lines). It also shows commits and time, and recommends one (`--json` for scripts, `/compare` in `amux ui`).
+  - `amux pick fix-2 --land` keeps the winner and lands it through the merge queue. The other attempts are stopped and removed. Their branches are kept, and so are any worktrees holding uncommitted work.
+
 ## [0.8.0] - 2026-11-17
 
 Usage limits no longer stop the work: amux spots them, routes new runs to accounts with room, and moves a limited run's session to another account. Runs that work without getting anywhere are flagged, and processes finished runs leave behind are cleaned up.

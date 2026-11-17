@@ -58,6 +58,11 @@ amux pr parser-tests                            # push and open a PR (gh)
 amux checks parser-tests --send-failures        # failing CI back to it
 ```
 
+## Several attempts
+
+For a risky or ambiguous task, try it more than once and keep the best:
+`amux try 3 claude -p "…" --name x`, then `amux compare x` and `amux pick x-N --land`.
+
 ## Usage limits
 
 If a helper shows `waiting` with "hit your limit", its account ran out. `amux usage` shows
