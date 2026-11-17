@@ -58,7 +58,7 @@ form#new button { width:100%; margin-top:8px; }
 .meter { height:8px; border-radius:4px; background:var(--card); overflow:hidden; margin:4px 0 10px; }
 .meter i { display:block; height:100%; background:var(--work); }
 .meter i.hot { background:var(--bad); }
-.slot { background:var(--card); border-radius:12px; padding:10px 12px; margin:6px 0; }
+.slot { background:var(--card); border-radius:12px; padding:10px 12px; margin:6px 0; white-space:pre-wrap; }
 .slot .top { display:flex; justify-content:space-between; }
 .slot .who { color:var(--muted); font-size:13px; margin-top:4px; white-space:pre-wrap; }
 footer#tabs { position:fixed; left:0; right:0; bottom:0; display:flex; background:var(--bg); border-top:1px solid var(--line); padding:6px 8px calc(6px + env(safe-area-inset-bottom)); z-index:3; }

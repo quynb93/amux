@@ -50,6 +50,11 @@ use theme::Theme;
 use views::View;
 
 /// How often run.json files are re-read.
+/// Results a background thread fills in, and whether no thread is working on them.
+type Shared<T> = std::sync::Arc<std::sync::Mutex<(T, bool)>>;
+
+/// How often parallel runs are checked for conflicts with each other.
+const CONFLICTS_EVERY: Duration = Duration::from_secs(20);
 /// How often runs on other machines are fetched.
 const REMOTE_EVERY: Duration = Duration::from_secs(2);
 const RELOAD_EVERY: Duration = Duration::from_millis(500);
@@ -359,6 +364,10 @@ struct App {
     /// Runs on other machines from their last fetch, and whether no fetch is running.
     remote: std::sync::Arc<std::sync::Mutex<(Vec<serde_json::Value>, bool)>>,
     remote_at: Option<Instant>,
+    /// For each run, what its changes conflict with (other runs, its target branch), from
+    /// a check in the background (`amux overlap`); and whether no check is running.
+    conflicts: Shared<HashMap<String, Vec<String>>>,
+    conflicts_at: Option<Instant>,
     /// Where each tile and board card was drawn, and its run, for the mouse.
     panes: Vec<(Rect, usize)>,
     cards: Vec<(Rect, usize)>,
@@ -410,6 +419,8 @@ impl App {
             panes: Vec::new(),
             remote: std::sync::Arc::new(std::sync::Mutex::new((vec![], true))),
             remote_at: None,
+            conflicts: std::sync::Arc::new(std::sync::Mutex::new((HashMap::new(), true))),
+            conflicts_at: None,
             cards: Vec::new(),
         }
     }
@@ -491,6 +502,7 @@ impl App {
             }
         }
         self.refresh_checks();
+        self.refresh_conflicts();
         let ids: HashSet<&str> = self.rows.iter().map(|r| r.run.id.as_str()).collect();
         self.unseen.retain(|id| ids.contains(id.as_str()));
         self.last_kind.retain(|id, _| ids.contains(id.as_str()));

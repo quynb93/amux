@@ -4,6 +4,11 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- **Catch conflicts between parallel runs before they merge.** `amux overlap` shows which runs touch the same files, and whether their changes would actually conflict with each other or with the branch they land in. Uncommitted work counts too. The merges happen in memory (`git merge-tree`), so nothing on disk changes. `--check` exits 1 on a conflict, and `--json` prints it all for scripts. `amux ui` marks runs that conflict (`✗ conflicts with …`) in the list and on the board, and the phone app lists overlaps under Monitor.
+- **`amux land <run>...`, a local merge queue.** One run at a time, it rebases onto the target branch (the main checkout's, or `--into`), runs the tests in a test slot, and fast-forwards the branch, so each run lands on top of the ones before it. A run with uncommitted work, a conflict or failing tests is skipped, and its agent is told exactly what to fix (`--no-tell` to stay quiet). It never force-moves the branch or overwrites uncommitted work in the main checkout. `--dry-run` says what would land. In `amux ui` use `/land`; in the phone app, "Land into its branch".
+
 ## [0.6.1] - 2026-11-17
 
 The first published release with these changes. The v0.6.0 tag was never released: its release check found the screen bug fixed below.

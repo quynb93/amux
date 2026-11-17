@@ -1559,3 +1559,95 @@ fn plugins_hooks_and_the_agent_skill() {
         i.out
     );
 }
+
+#[test]
+fn finds_overlapping_runs_and_lands_them_one_at_a_time() {
+    let s = Sandbox::new("land");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("f.txt"), "one\ntwo\nthree\n");
+    write(&repo.join("g.txt"), "g\n");
+    let git = |dir: &Path, args: &[&str]| -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    for n in ["a", "b", "c"] {
+        let r = s.amux_with(
+            &["spawn", "--name", n, "--worktree", "fake"],
+            &[],
+            Some(&repo),
+        );
+        assert_eq!(r.code, 0, "{}", r.err);
+    }
+    let wt = |n: &str| s.amux_home.join(format!("worktrees/repo-{n}"));
+    // a and b change the same line: a committed, b not yet. c changes another file.
+    write(&wt("a").join("f.txt"), "one\nTWO from a\nthree\n");
+    git(&wt("a"), &["commit", "-qam", "a"]);
+    write(&wt("b").join("f.txt"), "one\nTWO from b\nthree\n");
+    write(&wt("c").join("g.txt"), "g from c\n");
+    git(&wt("c"), &["commit", "-qam", "c"]);
+
+    let o = s.amux(&["overlap"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("✗ a ↔ b: conflict in f.txt"), "{}", o.out);
+    assert!(
+        !o.out.contains("c ↔"),
+        "c touches nothing the others do: {}",
+        o.out
+    );
+    assert_eq!(s.amux(&["overlap", "--check"]).code, 1);
+    assert_eq!(
+        git(&wt("b"), &["status", "--porcelain"]).trim(),
+        "M f.txt",
+        "nothing changed on disk"
+    );
+
+    // a and c land, c rebased onto a; b is skipped until it commits, then conflicts.
+    // Landing rebases, which writes commits as someone (CI machines have no git identity).
+    let who = [
+        ("GIT_AUTHOR_NAME", "t"),
+        ("GIT_AUTHOR_EMAIL", "t@example.com"),
+        ("GIT_COMMITTER_NAME", "t"),
+        ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ];
+    let l = s.amux_with(&["land", "a", "c", "--no-test"], &who, None);
+    assert_eq!(l.code, 0, "{}{}", l.out, l.err);
+    assert!(l.out.contains("landed"), "{}", l.out);
+    assert_eq!(
+        fs::read_to_string(repo.join("f.txt")).unwrap(),
+        "one\nTWO from a\nthree\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("g.txt")).unwrap(),
+        "g from c\n"
+    );
+    let b = s.amux_with(&["land", "b", "--no-test"], &who, None);
+    assert_eq!(b.code, 1);
+    assert!(b.out.contains("uncommitted"), "{}", b.out);
+    git(&wt("b"), &["commit", "-qam", "b"]);
+    let b = s.amux_with(&["land", "b", "--no-test", "--json"], &who, None);
+    let v: serde_json::Value = serde_json::from_str(&b.out).unwrap();
+    assert_eq!(v[0]["outcome"], "conflict");
+    assert!(v[0]["detail"].as_str().unwrap().contains("f.txt"));
+    assert_eq!(
+        fs::read_to_string(repo.join("f.txt")).unwrap(),
+        "one\nTWO from a\nthree\n",
+        "main untouched"
+    );
+    assert!(s.amux(&["ps", "--json"]).out.contains("\"kind\": \"land\""));
+}

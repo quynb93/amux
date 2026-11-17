@@ -248,6 +248,7 @@ fn handle(stream: TcpStream, token: &str) {
         ("GET", "/api/runs") => reply_json(s, amux(&["ps", "--json"])),
         ("GET", "/api/accounts") => reply_json(s, amux(&["account", "list", "--json"])),
         ("GET", "/api/slots") => reply_json(s, amux(&["slots", "--json"])),
+        ("GET", "/api/overlap") => reply_json(s, amux(&["overlap", "--json"])),
         ("GET", "/api/machines") => {
             let m: Vec<serde_json::Value> = crate::remote::list()
                 .into_iter()
@@ -373,6 +374,14 @@ fn run_action(s: &TcpStream, method: &str, id: &str, action: &str, body: &serde_
             )
         }
         ("POST", "push") => reply_text(s, amux(&["verify", id, "--push"])),
+        ("POST", "land") => {
+            detach(&["land", id]);
+            text(
+                s,
+                "202 Accepted",
+                "Landing: rebase, test in a slot, fast-forward. The run shows how it went.",
+            )
+        }
         ("POST", "send-failures") => reply_text(s, amux(&["verify", id, "--send-failures"])),
         ("POST", "pr") => {
             let draft = body["draft"].as_bool() == Some(true);

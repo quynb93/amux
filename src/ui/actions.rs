@@ -4,6 +4,61 @@
 use super::*;
 
 impl App {
+    /// Checks, in the background and every so often, whether runs working on the same repo
+    /// would conflict, so the list can warn before anyone merges. Only while two or more
+    /// runs with worktrees are alive; at once for --dump.
+    pub(super) fn refresh_conflicts(&mut self) {
+        let parallel = self
+            .rows
+            .iter()
+            .filter(|r| r.kind.is_live() && r.run.worktree.is_some() && !r.run.id.contains(':'))
+            .count();
+        if parallel < 2 {
+            return;
+        }
+        let compute = || -> HashMap<String, Vec<String>> {
+            let mut m: HashMap<String, Vec<String>> = HashMap::new();
+            for rep in crate::work::overlap::reports(None, &[]).unwrap_or_default() {
+                for c in &rep.runs {
+                    if !c.conflicts_with_target.is_empty() {
+                        m.entry(c.run.clone()).or_default().push(rep.target.clone());
+                    }
+                }
+                for p in rep.pairs.iter().filter(|p| !p.conflicts.is_empty()) {
+                    m.entry(p.a.clone()).or_default().push(p.b.clone());
+                    m.entry(p.b.clone()).or_default().push(p.a.clone());
+                }
+            }
+            m
+        };
+        if !self.guard {
+            *self.conflicts.lock().unwrap_or_else(|e| e.into_inner()) = (compute(), true);
+            return;
+        }
+        let due = self
+            .conflicts_at
+            .is_none_or(|t| t.elapsed() >= CONFLICTS_EVERY);
+        let idle = self.conflicts.lock().map(|c| c.1).unwrap_or(false);
+        if due && idle {
+            self.conflicts_at = Some(Instant::now());
+            if let Ok(mut c) = self.conflicts.lock() {
+                c.1 = false;
+            }
+            let shared = self.conflicts.clone();
+            std::thread::spawn(move || {
+                let m = compute();
+                *shared.lock().unwrap_or_else(|e| e.into_inner()) = (m, true);
+            });
+        }
+    }
+
+    /// What a run's changes conflict with, for the list and the board.
+    pub(super) fn conflict_note(&self, id: &str) -> Option<String> {
+        let c = self.conflicts.lock().ok()?;
+        let with = c.0.get(id)?;
+        Some(format!("✗ conflicts with {}", with.join(", ")))
+    }
+
     /// Switches to `v`, or back to the list if it is showing already.
     pub(super) fn toggle_view(&mut self, v: View) {
         self.view = if self.view == v { View::List } else { v };
@@ -358,6 +413,17 @@ impl App {
                 }
                 argv.extend(args);
                 self.background_output(argv, format!("Plugin {name}"));
+            }
+            Action::Overlap => {
+                self.background_output(vec!["overlap".into()], "Overlapping runs".into())
+            }
+            Action::Land(r) => {
+                if let Some((id, _)) = self.resolve_run(r) {
+                    self.background_output(
+                        vec!["land".into(), id.clone()],
+                        format!("Landing {id}"),
+                    );
+                }
             }
             Action::Diff(r) => {
                 if let Some((id, _)) = self.resolve_run(r) {

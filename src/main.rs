@@ -8,6 +8,8 @@ mod commands {
     pub mod github;
     pub mod maintenance;
     #[cfg(unix)]
+    pub mod overlap;
+    #[cfg(unix)]
     pub mod plugin;
     #[cfg(unix)]
     pub mod review;
@@ -80,6 +82,10 @@ Parallel runs (each CLI in the background, in its own terminal):
       Block until the runs need you, finish their turn (default) or exit; 124 on timeout
   amux events [<run>...] [--text]          Stream state, verify and PR changes as JSON lines
   amux diff <run> [--stat]                 What a run changed since its worktree started
+  amux overlap [<run>...] [--into <b>]     Which runs touch the same files, and which would conflict
+  amux land <run>... [--into <b>] [--no-test] [--dry-run]
+      Merge queue: rebase each run onto the branch, test it in a slot, fast-forward.
+      A run that conflicts or fails is skipped and its agent told what to fix.
   amux pr <run> [--draft] [--base <b>]     Push a run's branch and open its pull request (gh)
   amux checks <run> [--send-failures]      Its PR's CI checks; failures can go to the agent
   amux comment <run> <file>:<line> <note>  A review comment on a line the run changed
@@ -210,13 +216,17 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "checks" => commands::github::checks_cmd(rest),
         #[cfg(unix)]
+        "overlap" => commands::overlap::overlap_cmd(rest),
+        #[cfg(unix)]
+        "land" => commands::overlap::land_cmd(rest),
+        #[cfg(unix)]
         "comment" => commands::review::comment_cmd(rest),
         #[cfg(unix)]
         "comments" => commands::review::comments_cmd(rest),
         #[cfg(not(unix))]
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
-        | "comment" | "comments" => {
+        | "overlap" | "land" | "comment" | "comments" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

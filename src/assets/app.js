@@ -362,6 +362,21 @@ async function loadMonitor() {
     if (who.length) d.append(el("div", "who", who.join("\n")));
     box.append(d);
   }
+  // Runs on one repo whose changes would conflict, before anyone merges.
+  try {
+    const reps = await api("/api/overlap");
+    const rows = [];
+    for (const rep of reps) {
+      for (const c of rep.runs) {
+        if (c.conflictsWithTarget.length) rows.push(`✗ ${c.run} conflicts with ${rep.target}: ${c.conflictsWithTarget.join(", ")}`);
+      }
+      for (const p of rep.pairs) {
+        rows.push(p.conflicts.length ? `✗ ${p.a} ↔ ${p.b}: conflict in ${p.conflicts.join(", ")}` : `${p.a} ↔ ${p.b}: both change ${p.shared.join(", ")}, merge cleanly`);
+      }
+    }
+    box.append(el("h2", null, "Overlaps"));
+    box.append(el("div", "slot", rows.length ? rows.join("\n") : "No two runs touch the same files."));
+  } catch (e) { /* no worktree runs, or not a repo */ }
   const machines = new Map([["This computer", runs.filter((r) => !r.machine)]]);
   for (const r of runs.filter((r) => r.machine)) {
     if (!machines.has(r.machine)) machines.set(r.machine, []);
