@@ -1843,7 +1843,15 @@ fn flags_a_run_that_works_without_changing_anything_and_cleans_up_leftovers() {
     );
     assert_eq!(r.code, 0, "{}", r.err);
     wait_ps(&s, "leak", "exited 0");
-    let dry = s.amux(&["gc", "--dry-run"]);
+    // The daemon detaches in the background; give it a moment to be there.
+    let mut dry = s.amux(&["gc", "--dry-run"]);
+    for _ in 0..50 {
+        if dry.out.contains("leak") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        dry = s.amux(&["gc", "--dry-run"]);
+    }
     // On failure, show what the system says about the leftover.
     let evidence = || {
         let ps = Command::new("sh")
