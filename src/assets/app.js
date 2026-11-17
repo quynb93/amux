@@ -414,7 +414,16 @@ function listen() {
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
-refresh();
+// A tapped phone notification opens its run: /#run=<id>.
+function openFromLink() {
+  const m = location.hash.match(/^#run=(.+)$/);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname);
+  showTab("runs"); runView = "screen"; openRun(decodeURIComponent(m[1]));
+}
+window.addEventListener("hashchange", openFromLink);
+
+refresh().then(openFromLink, openFromLink);
 listen();
 setInterval(refresh, 5000);
 setInterval(() => { if (current && runView === "screen" && !document.hidden) loadScreen(); }, 1500);

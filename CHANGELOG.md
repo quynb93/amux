@@ -4,6 +4,19 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-17
+
+Your phone hears from amux even when the app is closed.
+
+### Added
+
+- **`amux phone`** sends notifications to your phone through ntfy (ntfy.sh with a topic nobody will guess, or your own server with a token), Pushover, or any webhook (Slack and Discord ones work as is).
+  - You're told when a run is waiting for you, stalled, hit a usage limit or ended, and when its tests or CI checks pass or fail. `amux phone events` picks which.
+  - A tap opens the run in the phone app (`amux serve`, at the address it last listened on, or `amux phone open <url>`). The link never carries the token.
+  - `amux phone brief on` sends only run names and events, never what the agents said. `amux phone test` checks it; `amux phone off` stops it.
+  - Sent by a short-lived `amux __push` process, so a slow network never holds up a run, and at most once a minute per run and event. Failures go to `~/.amux/phone.log`.
+- The phone app opens a run from a link (`/#run=<name>`).
+
 ## [0.10.0] - 2026-11-17
 
 Runs survive a restart: amux brings them back where they were, with the session they were having.

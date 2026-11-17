@@ -257,7 +257,9 @@ pub fn refresh_checks(run: &Run) -> Result<(PullRequest, Vec<Check>)> {
     let before = load(&run.id).map(|p| p.checks);
     write_json(&pr_file(&run.id), &pr)?;
     if before.as_deref() != Some(pr.checks.as_str()) {
-        crate::plugins::hook("checks", &run.id, &format!("{} {}", pr.checks, pr.url));
+        let msg = format!("{} {}", pr.checks, pr.url);
+        crate::plugins::hook("checks", &run.id, &msg);
+        crate::runs::push::send("checks", &run.id, &format!("amux: {} CI", run.id), &msg);
     }
     Ok((pr, checks))
 }

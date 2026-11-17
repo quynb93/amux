@@ -12,6 +12,7 @@ pub mod detect;
 pub mod host;
 pub mod notify;
 pub mod program;
+pub mod push;
 pub mod screen;
 pub mod state;
 
