@@ -8,6 +8,16 @@ version="${1#v}"
 dir="$2"
 base="https://github.com/quynb93/amux/releases/download/v$version"
 
+# Fail before printing anything when a checksum is missing: inside $(...) an exit
+# would only end the subshell and leave an empty sha256 in the formula.
+for f in \
+  "amux-$version.arm64_big_sur.bottle.tar.gz" "amux-$version.big_sur.bottle.tar.gz" \
+  "amux-$version.arm64_linux.bottle.tar.gz" "amux-$version.x86_64_linux.bottle.tar.gz" \
+  amux-aarch64-apple-darwin.tar.gz amux-x86_64-apple-darwin.tar.gz \
+  amux-aarch64-unknown-linux-musl.tar.gz amux-x86_64-unknown-linux-musl.tar.gz; do
+  [ -s "$dir/$f.sha256" ] || { echo "missing $dir/$f.sha256 (run scripts/homebrew-bottles.sh first)" >&2; exit 1; }
+done
+
 sha() {
   file="$dir/$1.sha256"
   [ -s "$file" ] || { echo "missing $file" >&2; exit 1; }
