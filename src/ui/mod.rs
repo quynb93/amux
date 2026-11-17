@@ -1091,7 +1091,7 @@ mod tests {
             });
         }
         app.set_index(Some(0));
-        for name in theme::BUILT_IN {
+        for name in theme::built_in_names() {
             app.theme = Theme::built_in(name).unwrap();
             let modes = [
                 Mode::Normal,

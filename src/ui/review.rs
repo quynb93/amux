@@ -8,7 +8,7 @@ use crate::work::review::{self, Comment, DiffLine, LineKind};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 pub struct ReviewView {
@@ -279,7 +279,7 @@ impl ReviewView {
     }
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
-        f.render_widget(Clear, area);
+        super::draw::clear(f, area, t);
         let pending = self.pending();
         let title = format!(
             " Review {} · {} file{} · {} comment{} to send ",

@@ -64,3 +64,8 @@ form#new button { width:100%; margin-top:8px; }
 footer#tabs { position:fixed; left:0; right:0; bottom:0; display:flex; background:var(--bg); border-top:1px solid var(--line); padding:6px 8px calc(6px + env(safe-area-inset-bottom)); z-index:3; }
 footer#tabs button { flex:1; background:transparent; color:var(--muted); }
 footer#tabs button.on { color:var(--accent); font-weight:600; }
+.themes { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; }
+.themes button { display:flex; align-items:center; gap:8px; text-align:left; background:var(--card); color:var(--fg); border:2px solid transparent; border-radius:10px; padding:8px; font:inherit; font-size:14px; }
+.themes button.on { border-color:var(--accent); }
+.themes .sw { display:inline-flex; gap:2px; padding:4px 5px; border-radius:6px; border:1px solid var(--line); min-width:46px; min-height:12px; }
+.themes .sw i { width:7px; height:7px; border-radius:50%; display:inline-block; }

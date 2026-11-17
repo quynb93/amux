@@ -252,10 +252,14 @@ Press **`/`** for the command palette. Type part of a command and its argument c
 | `/theme [name]` | List themes, or switch and save one |
 | `/help`, `/quit` | |
 
-**Themes.** There are four built in:
+**Themes.** amux's own four:
 - `default` uses your terminal's own colors, so it suits light and dark terminals.
 - `dark` and `light` are tuned for contrast on truecolor terminals.
 - `mono` uses no color, and is picked automatically when `NO_COLOR` is set.
+
+And fifteen popular palettes, which paint their own background: `catppuccin-mocha`, `tokyo-night`, `dracula`, `gruvbox-dark`, `nord`, `solarized-dark`, `rose-pine`, `kanagawa`, `everforest`, `one-dark`, and light ones `catppuccin-latte`, `gruvbox-light`, `solarized-light`, `rose-pine-dawn`, `github-light`.
+
+`amux theme` lists them with a swatch of each, and `amux theme <name>` chooses one. The phone app (`amux serve`) follows the same theme, and its Monitor tab can switch it too.
 
 A light terminal background that reports itself (`COLORFGBG`, with truecolor) gets `light` automatically. Pick one with `/theme`, or in `~/.amux/config.json`. Change single colors there, or make your own theme in `~/.amux/themes/<name>.json`:
 
@@ -264,10 +268,10 @@ A light terminal background that reports itself (`COLORFGBG`, with truecolor) ge
 ```
 
 ```json
-{ "extends": "dark", "colors": { "selection": "on #2d3149", "done": "green" } }
+{ "extends": "dracula", "colors": { "selection": "on #2d3149", "done": "green" } }
 ```
 
-A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `default`…), plus `bold`, `dim`, `italic`, `underline` or `reverse`, and `on <color>` for the background. The roles are `text`, `muted`, `border`, `title`, `accent`, `key`, `selection`, `header`, `input`, `starting`, `working`, `waiting`, `idle`, `done`, `failed`, `lost`, `stopped`, `success` and `error`. `/theme` lists them too.
+A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `default`…), plus `bold`, `dim`, `italic`, `underline` or `reverse`, and `on <color>` for the background. The roles are `background`, `text`, `muted`, `border`, `title`, `accent`, `key`, `selection`, `header`, `input`, `starting`, `working`, `waiting`, `idle`, `done`, `failed`, `lost`, `stopped`, `success` and `error`. `/theme` lists them too.
 
 - **STATE** is `waiting <time>` when the CLI is asking you something: a permission or confirmation prompt, a terminal bell, or a notification it sent to the terminal. Otherwise it is `running` while the CLI prints and `idle <time>` once it has been quiet for a few seconds. Typing into the run clears `waiting`.
 - **Self-reported state.** CLIs that report their own state with OSC 7501 (Codex, and Claude Code 2.1.295 and later) get exact states: `waiting` with the CLI's own message ("approve Write: a.rs"), `running`, `idle` once the turn is done, and `error`. amux answers Claude Code's request to report. For other CLIs, amux falls back to the prompt text in `waitingPatterns` and to output timing.
@@ -614,6 +618,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
+| `amux theme [<name>] [--json]` | List the themes with swatches, or choose one for `amux ui` and the phone app. |
 | `amux serve [--listen <host:port>] [--tls \| --cert <pem> --key <pem> \| --tailscale] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. Over HTTPS with `--tls`, your certificate, or Tailscale. |
 | `amux phone ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. |
 | `amux providers` | List providers, shared homes and private entries. |

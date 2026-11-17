@@ -30,6 +30,8 @@ mod commands {
     #[cfg(unix)]
     pub mod slot;
     #[cfg(unix)]
+    pub mod theme;
+    #[cfg(unix)]
     pub mod usage;
     #[cfg(unix)]
     pub mod verify;
@@ -38,6 +40,8 @@ mod fsx;
 mod git;
 mod launch;
 mod overlay;
+#[cfg(unix)]
+mod palettes;
 mod paths;
 #[cfg(unix)]
 mod plugins;
@@ -121,6 +125,8 @@ Parallel runs (each CLI in the background, in its own terminal):
                                            and session (--resume); --at-login does it after each restart
   amux gc [--dry-run]                      End processes finished runs left behind (dev servers…)
   amux ui                                  Watch, attach to, start and stop runs in one screen
+  amux theme [<name>]                      List themes (Catppuccin, Tokyo Night, Dracula, Gruvbox,
+                                           Nord, Solarized…) or choose one for amux ui and the phone app
   amux verify <run> [--test [--command <cmd>] | --push | --send-failures]
       Check a finished run's work: run its tests here (waiting for a test slot),
       or push its branch so CI runs them. With neither, says which is better now.
@@ -262,6 +268,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "phone" => commands::phone::phone_cmd(rest),
         #[cfg(unix)]
+        "theme" | "themes" => commands::theme::theme_cmd(rest),
+        #[cfg(unix)]
         "note" => commands::notes::note_cmd(rest),
         #[cfg(unix)]
         "notes" => commands::notes::notes_cmd(rest),
@@ -283,7 +291,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" | "try"
-        | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" | "phone" => {
+        | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" | "phone" | "theme"
+        | "themes" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

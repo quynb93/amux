@@ -63,6 +63,7 @@ fn width_of(spans: &[Span]) -> usize {
 impl App {
     pub(super) fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        f.render_widget(Block::new().style(self.theme.background), area);
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(3),
@@ -622,7 +623,7 @@ fn draw_palette(f: &mut Frame, area: Rect, t: &Theme, p: &PaletteState) {
     let items = palette::items(&p.input, &p.ctx);
     let visible = items.len().clamp(1, 10) as u16;
     let r = top(area, 78, visible + 4);
-    f.render_widget(Clear, r);
+    clear(f, r, t);
     let block = panel(t, t.accent)
         .title(span(" Commands ", t.title))
         .title_bottom(border_hints(
@@ -694,7 +695,7 @@ fn draw_output(f: &mut Frame, area: Rect, t: &Theme, o: &OutputView) {
         .unwrap_or(u16::MAX)
         .saturating_add(4);
     let r = top(area, w, h);
-    f.render_widget(Clear, r);
+    clear(f, r, t);
     let block = panel(t, t.accent)
         .title(span(format!(" {} ", o.title), t.title))
         .title_bottom(border_hints(t, &[("↑↓", "scroll"), ("Esc", "close")]));
@@ -713,7 +714,7 @@ fn draw_output(f: &mut Frame, area: Rect, t: &Theme, o: &OutputView) {
 
 fn draw_spawn(f: &mut Frame, area: Rect, t: &Theme, form: &SpawnForm) {
     let r = centered(area, 72, if form.worktree { 11 } else { 10 });
-    f.render_widget(Clear, r);
+    clear(f, r, t);
     let block = panel(t, t.accent)
         .title(span(" New run ", t.title))
         .title_bottom(border_hints(
@@ -837,7 +838,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
 
 fn draw_help(f: &mut Frame, area: Rect, t: &Theme) {
     let r = centered(area, 72, HELP_KEYS.len() as u16 + 8);
-    f.render_widget(Clear, r);
+    clear(f, r, t);
     let mut lines = vec![Line::from("")];
     for (k, what) in HELP_KEYS {
         lines.push(Line::from(vec![
@@ -890,6 +891,12 @@ fn tail_fit(s: &str, max: usize) -> String {
     let keep = max.saturating_sub(1);
     let tail: String = s.chars().skip(n - keep).collect();
     format!("…{tail}")
+}
+
+/// Clears `r` for a popup, down to the theme's background.
+pub(super) fn clear(f: &mut Frame, r: Rect, t: &Theme) {
+    f.render_widget(Clear, r);
+    f.render_widget(Block::new().style(t.background), r);
 }
 
 #[cfg(test)]

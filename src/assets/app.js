@@ -388,6 +388,7 @@ async function loadMonitor() {
     box.append(el("h2", null, "Overlaps"));
     box.append(el("div", "slot", rows.length ? rows.join("\n") : "No two runs touch the same files."));
   } catch (e) { /* no worktree runs, or not a repo */ }
+  await themeSection(box);
   const machines = new Map([["This computer", runs.filter((r) => !r.machine)]]);
   for (const r of runs.filter((r) => r.machine)) {
     if (!machines.has(r.machine)) machines.set(r.machine, []);
@@ -400,6 +401,46 @@ async function loadMonitor() {
     box.append(el("div", "slot", `${name}: ${live} running${need ? `, ${need} need you` : ""}, ${rs.length - live} done`));
   }
 }
+
+// ---- themes --------------------------------------------------------------------------
+// The same themes as `amux ui` (`amux theme`): choosing one here chooses it there too.
+let themes = null;
+async function themeSection(box) {
+  if (!themes) { try { themes = await api("/api/themes"); } catch (e) { return; } }
+  box.append(el("h2", null, "Theme"));
+  const grid = el("div", "themes");
+  for (const t of themes) {
+    const b = el("button", t.current ? "on" : "");
+    const sw = el("span", "sw");
+    if (t.swatch.length) {
+      sw.style.background = t.swatch[0];
+      for (const c of t.swatch.slice(1)) { const d = el("i"); d.style.background = c; sw.append(d); }
+    } else {
+      sw.textContent = t.name === "mono" ? "Aa" : "auto";
+    }
+    b.append(sw, el("span", null, t.name));
+    b.onclick = async () => {
+      try { await api("/api/theme", { name: t.name }); } catch (e) { alert(e.message); return; }
+      themes = null;
+      reloadTheme();
+      loadMonitor();
+    };
+    grid.append(b);
+  }
+  box.append(grid);
+}
+function reloadTheme() {
+  const link = $("#theme-css");
+  link.onload = paintChrome;
+  link.href = `/theme.css?${Date.now()}`;
+}
+// The phone's status bar follows the theme's background.
+function paintChrome() {
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (bg) document.querySelector('meta[name="theme-color"]').setAttribute("content", bg);
+}
+$("#theme-css").onload = paintChrome;
+paintChrome();
 
 // ---- live updates --------------------------------------------------------------------
 // Changes on this computer arrive at once over Server-Sent Events; everything (including
