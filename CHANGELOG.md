@@ -4,6 +4,17 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-17
+
+The phone app over HTTPS.
+
+### Added
+
+- **`amux serve --tailscale`** serves the app at `https://<machine>.<tailnet>.ts.net` with a real certificate, through `tailscale serve`, to your own devices only. amux itself listens on 127.0.0.1, and Tailscale stops serving when amux stops.
+- **`amux serve --tls`** serves HTTPS itself with a self-signed certificate (made once with `openssl`, kept in `~/.amux/tls/`) and prints its fingerprint. The phone can install it from `/amux-cert.pem` so the browser stops warning.
+- **`amux serve --cert <pem> --key <pem>`** serves HTTPS with your own certificate (`tailscale cert`, mkcert, Let's Encrypt).
+- Over HTTPS the login cookie is marked `Secure`. Phone notifications link to the HTTPS address.
+
 ## [0.11.0] - 2026-11-17
 
 Your phone hears from amux even when the app is closed.

@@ -5,17 +5,21 @@
 //!
 //! It is reached with a secret token: the link `amux serve` prints sets it as a cookie
 //! once. By default it listens on this machine only (127.0.0.1); reach it from a phone
-//! through something private such as Tailscale, a VPN or an SSH tunnel. It has no TLS,
-//! so `--listen 0.0.0.0:…` on an open network would show the token to anyone listening.
+//! through something private such as Tailscale, a VPN or an SSH tunnel. `--tailscale`
+//! puts it behind Tailscale's HTTPS, with a real certificate; `--tls` serves HTTPS itself
+//! (self-signed, or `--cert`/`--key`). Plain HTTP on an open network would show the token
+//! to anyone listening.
 //!
 //! Every action runs the same `amux` commands the CLI has (`ps --json`, `peek`, `send`,
 //! `send --key`, `stop`), so runs on other machines work too, and there is one code path.
 
+use crate::tls::Conn;
 use crate::{fsx, paths};
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 const HTML: &str = include_str!("assets/app.html");
@@ -68,7 +72,7 @@ struct Request {
     body: Vec<u8>,
 }
 
-fn read_request(stream: &TcpStream) -> Result<Request> {
+fn read_request(stream: &Conn) -> Result<Request> {
     let mut r = BufReader::new(stream.take((MAX_HEAD + MAX_BODY) as u64));
     let mut line = String::new();
     r.read_line(&mut line)?;
@@ -131,7 +135,7 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
     Ok(req)
 }
 
-fn respond(mut s: &TcpStream, status: &str, ctype: &str, extra: &[(&str, String)], body: &[u8]) {
+fn respond(mut s: &Conn, status: &str, ctype: &str, extra: &[(&str, String)], body: &[u8]) {
     let mut head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\
          Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
@@ -146,7 +150,7 @@ fn respond(mut s: &TcpStream, status: &str, ctype: &str, extra: &[(&str, String)
     let _ = s.write_all(body);
 }
 
-fn text(s: &TcpStream, status: &str, msg: &str) {
+fn text(s: &Conn, status: &str, msg: &str) {
     respond(s, status, "text/plain; charset=utf-8", &[], msg.as_bytes());
 }
 
@@ -181,13 +185,34 @@ fn run_id(s: &str) -> Option<String> {
     ok.then_some(id)
 }
 
-fn handle(stream: TcpStream, token: &str) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
-    let Ok(req) = read_request(&stream) else {
-        return text(&stream, "400 Bad Request", "bad request");
+/// How this server is reached: its token, and whether over HTTPS (so the cookie is
+/// marked Secure).
+struct Site {
+    token: String,
+    https: bool,
+    /// The self-signed certificate, offered at /amux-cert.pem to install on the phone.
+    cert_pem: Option<&'static [u8]>,
+}
+
+fn accept(tcp: TcpStream, site: &Site, tls: Option<&Arc<rustls::ServerConfig>>) {
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(30)));
+    let conn = match tls {
+        Some(cfg) => match Conn::tls(tcp, cfg) {
+            Ok(c) => c,
+            Err(_) => return,
+        },
+        None => Conn::plain(tcp),
     };
-    let s = &stream;
+    handle(&conn, site);
+}
+
+fn handle(stream: &Conn, site: &Site) {
+    let token = site.token.as_str();
+    let Ok(req) = read_request(stream) else {
+        return text(stream, "400 Bad Request", "bad request");
+    };
+    let s = stream;
     // Public: what a phone fetches to install the app, which carries no secrets.
     match req.path.as_str() {
         "/manifest.webmanifest" => {
@@ -200,14 +225,20 @@ fn handle(stream: TcpStream, token: &str) {
             )
         }
         "/icon.svg" => return respond(s, "200 OK", "image/svg+xml", &[], ICON.as_bytes()),
+        "/amux-cert.pem" if site.cert_pem.is_some() => {
+            let pem = site.cert_pem.unwrap_or_default();
+            return respond(s, "200 OK", "application/x-x509-ca-cert", &[], pem);
+        }
         _ => {}
     }
     // The link `amux serve` printed: remember the token as a cookie, then drop it from
     // the address bar so it isn't saved in history or shown on screen.
     if let Some(t) = req.query.split('&').find_map(|p| p.strip_prefix("t=")) {
         if same(t, token) {
-            let cookie =
-                format!("amux={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000");
+            let secure = if site.https { "; Secure" } else { "" };
+            let cookie = format!(
+                "amux={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000{secure}"
+            );
             return respond(
                 s,
                 "303 See Other",
@@ -258,7 +289,7 @@ fn handle(stream: TcpStream, token: &str) {
             json_ok(s, &serde_json::Value::from(m))
         }
         ("GET", "/api/dirs") => json_ok(s, &serde_json::Value::from(known_dirs())),
-        ("GET", "/api/events") => events(stream.try_clone().ok()),
+        ("GET", "/api/events") => events(stream),
         ("POST", "/api/spawn") => match spawn_args(&body) {
             Ok(args) => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -280,7 +311,7 @@ fn handle(stream: TcpStream, token: &str) {
     }
 }
 
-fn json_ok(s: &TcpStream, v: &serde_json::Value) {
+fn json_ok(s: &Conn, v: &serde_json::Value) {
     respond(
         s,
         "200 OK",
@@ -290,7 +321,7 @@ fn json_ok(s: &TcpStream, v: &serde_json::Value) {
     )
 }
 
-fn reply_json(s: &TcpStream, (ok, out, err): (bool, String, String)) {
+fn reply_json(s: &Conn, (ok, out, err): (bool, String, String)) {
     if ok {
         respond(s, "200 OK", "application/json", &[], out.as_bytes())
     } else {
@@ -299,7 +330,7 @@ fn reply_json(s: &TcpStream, (ok, out, err): (bool, String, String)) {
 }
 
 /// The command's output, or the last line of its error as the reason.
-fn reply_text(s: &TcpStream, (ok, out, err): (bool, String, String)) {
+fn reply_text(s: &Conn, (ok, out, err): (bool, String, String)) {
     if ok {
         let mut all = out;
         all.push_str(&err);
@@ -342,7 +373,7 @@ fn detach(args: &[&str]) {
     }
 }
 
-fn run_action(s: &TcpStream, method: &str, id: &str, action: &str, body: &serde_json::Value) {
+fn run_action(s: &Conn, method: &str, id: &str, action: &str, body: &serde_json::Value) {
     let str_of = |k: &str| body[k].as_str().map(str::trim).filter(|v| !v.is_empty());
     match (method, action) {
         ("GET", "screen") => reply_text(s, amux(&["peek", id])),
@@ -494,9 +525,7 @@ fn known_dirs() -> Vec<String> {
 
 /// `GET /api/events`: Server-Sent Events from `amux events`, so the app updates the
 /// moment a run changes. Ends when the phone goes away.
-fn events(stream: Option<TcpStream>) {
-    let Some(mut s) = stream else { return };
-    let _ = s.set_write_timeout(Some(Duration::from_secs(30)));
+fn events(mut s: &Conn) {
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
                 X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n: hi\n\n";
     if s.write_all(head.as_bytes()).is_err() {
@@ -542,58 +571,154 @@ fn events(stream: Option<TcpStream>) {
     let _ = child.wait();
 }
 
-const USAGE: &str = "amux serve [--listen <host:port>] [--new-token]";
+const USAGE: &str =
+    "amux serve [--listen <host:port>] [--tls | --cert <pem> --key <pem> | --tailscale] [--new-token]";
+
+/// `--tailscale`: Tailscale serves https://<machine>.ts.net with a real certificate and
+/// passes requests to amux on this machine. Stops when amux does.
+fn start_tailscale(port: u16) -> Result<(String, std::process::Child)> {
+    let Some(bin) = crate::tls::tailscale_bin() else {
+        bail!("Tailscale isn't installed (tailscale.com/download), or use --tls.");
+    };
+    let name = crate::tls::tailscale_name(&bin)?;
+    let mut child = Command::new(&bin)
+        .args(["serve", "--https=443", &format!("http://127.0.0.1:{port}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not run tailscale serve")?;
+    // It fails at once when HTTPS isn't turned on for the tailnet.
+    for _ in 0..15 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(st) = child.try_wait()? {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_string(&mut err);
+            }
+            bail!(
+                "tailscale serve stopped ({st}): {}\nIt needs HTTPS certificates turned on for your tailnet (admin console → DNS → HTTPS Certificates).",
+                err.trim()
+            );
+        }
+    }
+    Ok((format!("https://{name}"), child))
+}
 
 pub fn serve_cmd(argv: &[String]) -> Result<i32> {
     let mut listen = "127.0.0.1:7878".to_string();
-    let mut renew = false;
+    let (mut renew, mut tls, mut tailscale) = (false, false, false);
+    let (mut cert, mut key) = (None, None);
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--listen" | "-l" => listen = crate::util::need(it.next(), USAGE)?.to_string(),
             "--new-token" => renew = true,
+            "--tls" => tls = true,
+            "--cert" => cert = Some(paths::expand_home(crate::util::need(it.next(), USAGE)?)),
+            "--key" => key = Some(paths::expand_home(crate::util::need(it.next(), USAGE)?)),
+            "--tailscale" => tailscale = true,
             _ => bail!("Unknown argument {a}. Usage: {USAGE}"),
         }
+    }
+    if cert.is_some() != key.is_some() {
+        bail!("--cert and --key go together.");
+    }
+    tls |= cert.is_some();
+    if tls && tailscale {
+        bail!("--tailscale brings its own HTTPS: leave out --tls, --cert and --key.");
     }
     let token = token(renew)?;
     let listener =
         TcpListener::bind(&listen).with_context(|| format!("could not listen on {listen}"))?;
     let addr = listener.local_addr()?;
-    let loopback = addr.ip().is_loopback();
-    let host = if addr.ip().is_unspecified() {
-        "<this machine's address>".to_string()
-    } else {
-        addr.to_string()
-    };
-    let port = addr.port();
-    println!("amux serve: open this on your phone, then add it to the home screen:\n");
-    if addr.ip().is_unspecified() {
-        println!("  http://{host}:{port}/?t={token}\n");
-    } else {
-        println!("  http://{host}/?t={token}\n");
+    let (ip, port) = (addr.ip(), addr.port());
+    if tailscale && !ip.is_loopback() {
+        bail!("With --tailscale, amux listens on this machine only (leave out --listen, or use 127.0.0.1:<port>).");
     }
-    if loopback {
+
+    let mut self_signed = None;
+    let config = if tls {
+        let (c, k) = match (cert, key) {
+            (Some(c), Some(k)) => (c, k),
+            _ => {
+                let names: Vec<String> = if ip.is_unspecified() || ip.is_loopback() {
+                    vec![]
+                } else {
+                    vec![ip.to_string()]
+                };
+                let pair = crate::tls::self_signed(&names)?;
+                self_signed = Some(pair.0.clone());
+                pair
+            }
+        };
+        Some(crate::tls::server_config(&c, &k)?)
+    } else {
+        None
+    };
+    let mut proxy = None;
+    let base = if tailscale {
+        let (url, child) = start_tailscale(port)?;
+        proxy = Some(child);
+        url
+    } else {
+        let scheme = if tls { "https" } else { "http" };
+        if ip.is_unspecified() {
+            format!("{scheme}://<this machine's address>:{port}")
+        } else {
+            format!("{scheme}://{addr}")
+        }
+    };
+
+    println!("amux serve: open this on your phone, then add it to the home screen:\n");
+    println!("  {base}/?t={token}\n");
+    if tailscale {
         println!(
-            "It listens on this machine only. From a phone, use Tailscale (`--listen <tailscale-ip>:{port}`)\n\
-             or an SSH tunnel. Anyone with the link can control your runs: keep it private."
+            "Served by Tailscale over HTTPS with a real certificate, to your tailnet's devices only.\n\
+             Anyone with the link can control your runs: keep it private."
+        );
+    } else if let Some(c) = &self_signed {
+        println!(
+            "HTTPS with a self-signed certificate: the browser warns once. Check the fingerprint is\n  {}\n\
+             To stop the warning, install {base}/amux-cert.pem on the phone and trust it\n\
+             (iOS: Settings → General → About → Certificate Trust Settings).",
+            crate::tls::fingerprint(c).unwrap_or_default()
+        );
+    } else if tls {
+        println!("HTTPS with your certificate.");
+    } else if ip.is_loopback() {
+        println!(
+            "It listens on this machine only. From a phone: `--tailscale` (HTTPS, nothing to set up\n\
+             if you use Tailscale), `--listen <address>:{port} --tls`, or an SSH tunnel.\n\
+             Anyone with the link can control your runs: keep it private."
         );
     } else {
         println!(
-            "Warning: no TLS. Use this only on a private network (Tailscale, VPN). The link is a password;\n\
-             `amux serve --new-token` replaces it."
+            "Warning: no TLS. Use this only on a private network, or add --tls (or --tailscale).\n\
+             The link is a password; `amux serve --new-token` replaces it."
         );
     }
     // So phone notifications can link to the run here (`amux phone`).
-    if !addr.ip().is_unspecified() {
+    if !ip.is_unspecified() {
         let _ = crate::store::write_json(
             &paths::AMUX_HOME.join("serve.json"),
-            &serde_json::json!({ "url": format!("http://{addr}") }),
+            &serde_json::json!({ "url": base }),
         );
     }
-    let token: &'static str = Box::leak(token.into_boxed_str());
+    let cert_pem: Option<&'static [u8]> = self_signed
+        .and_then(|c| std::fs::read(c).ok())
+        .map(|b| &*Box::leak(b.into_boxed_slice()));
+    let site: &'static Site = Box::leak(Box::new(Site {
+        token,
+        https: tls || tailscale,
+        cert_pem,
+    }));
+    let config: Option<&'static Arc<rustls::ServerConfig>> =
+        config.map(|c| &*Box::leak(Box::new(c)));
     for stream in listener.incoming().flatten() {
-        std::thread::spawn(move || handle(stream, token));
+        std::thread::spawn(move || accept(stream, site, config));
     }
+    drop(proxy);
     Ok(0)
 }
 

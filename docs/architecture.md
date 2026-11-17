@@ -11,6 +11,7 @@ main.rs          argument dispatch; `<machine>:<run>` is forwarded over SSH
 commands/        the CLI: parse arguments, call the core, print       ─┐
 ui/              amux ui: draw, keys, mouse, views; calls the core     ─┤ faces
 serve.rs         the phone web app; every action runs an amux command ─┘
+tls.rs           HTTPS for serve: plain-or-TLS connections, certificates, Tailscale
 remote.rs        other machines: SSH, forwarding, the socket pipe
 plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:
@@ -135,6 +136,7 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `machines.json` | `amux machine` | Other machines: name, SSH destination, amux path |
 | `plugins/`, `hooks/` | you | Plugins (`amux <name>`) and event hooks (`on-<event>`) |
 | `serve-token` | `amux serve` | The phone app's token (mode 0600) |
+| `tls/self-<id>.pem`, `.key` | `amux serve --tls` | Self-signed certificates, one per set of addresses (key mode 0600) |
 | `serve.json` | `amux serve` | The address it last listened on, for links in phone notifications |
 | `phone.json`, `phone-sent.json`, `phone.log` | `amux phone`, `amux __push` | Where phone notifications go (mode 0600), when each run and event was last sent, and failed sends |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |

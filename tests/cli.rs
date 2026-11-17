@@ -2276,3 +2276,146 @@ fn notifies_the_phone_when_a_run_needs_you() {
     assert!(s.amux(&["phone", "off"]).out.contains("off"));
     assert!(!s.amux_home.join("phone.json").exists());
 }
+
+/// Starts `amux serve` with `args` and returns it and the link it printed.
+fn start_serve(s: &Sandbox, args: &[&str], env: &[(&str, &str)]) -> (std::process::Child, String) {
+    use std::io::{BufRead, BufReader};
+    let mut srv = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .arg("serve")
+        .args(args)
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .envs(env.iter().copied())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(srv.stdout.take().unwrap());
+    let mut link = String::new();
+    let mut all = String::new();
+    let mut line = String::new();
+    while out.read_line(&mut line).unwrap_or(0) > 0 {
+        all.push_str(&line);
+        if line.contains("?t=") {
+            link = line.trim().to_string();
+        }
+        if line.contains("keep it private") || line.contains("Trust Settings") {
+            break;
+        }
+        line.clear();
+    }
+    assert!(!link.is_empty(), "{all}");
+    (srv, all)
+}
+
+fn curl(args: &[&str]) -> String {
+    let o = Command::new("curl")
+        .args(["-s", "-i", "-k", "--max-time", "10"])
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[test]
+fn serves_the_phone_app_over_https() {
+    let s = Sandbox::new("https");
+    let (mut srv, out) = start_serve(&s, &["--listen", "127.0.0.1:0", "--tls"], &[]);
+    let link = out
+        .lines()
+        .find(|l| l.contains("?t="))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(link.starts_with("https://127.0.0.1:"), "{out}");
+    assert!(out.contains("fingerprint"), "{out}");
+    let (base, token) = link.split_once("/?t=").unwrap();
+
+    let login = curl(&[&link]);
+    assert!(
+        login.starts_with("HTTP/1.1 303")
+            && login.contains("SameSite=Strict; Path=/; Max-Age=31536000; Secure"),
+        "{login}"
+    );
+    let runs = curl(&[
+        "-H",
+        &format!("Cookie: amux={token}"),
+        &format!("{base}/api/runs"),
+    ]);
+    assert!(runs.starts_with("HTTP/1.1 200"), "{runs}");
+    assert!(curl(&[&format!("{base}/api/runs")]).starts_with("HTTP/1.1 401"));
+    // The certificate is offered to install on the phone, and it is the one in use.
+    let pem = curl(&[&format!("{base}/amux-cert.pem")]);
+    assert!(pem.contains("BEGIN CERTIFICATE"), "{pem}");
+    // Plain HTTP gets nothing.
+    let plain = curl(&[&base.replace("https://", "http://")]);
+    assert!(!plain.contains("200 OK"), "{plain}");
+    let saved = fs::read_to_string(s.amux_home.join("serve.json")).unwrap();
+    assert!(saved.contains(base), "{saved}");
+    let _ = srv.kill();
+    let _ = srv.wait();
+
+    // Your own certificate, or none: --cert needs --key.
+    assert_ne!(s.amux(&["serve", "--cert", "/x.pem"]).code, 0);
+    assert_ne!(s.amux(&["serve", "--tls", "--tailscale"]).code, 0);
+}
+
+#[test]
+fn serves_the_phone_app_through_tailscale() {
+    let s = Sandbox::new("tailscale");
+    let ts = s.home.join("bin/tailscale");
+    let calls = s.home.join("ts-calls");
+    write(
+        &ts,
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\n  status) echo '{{\"Self\":{{\"DNSName\":\"box.tail1.ts.net.\"}}}}';;\n  serve) [ -n \"$TS_FAIL\" ] && {{ echo 'HTTPS is not enabled' >&2; exit 1; }}; sleep 5;;\nesac\n",
+            calls.display()
+        ),
+    );
+    fs::set_permissions(&ts, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = [("AMUX_TAILSCALE", ts.to_str().unwrap())];
+
+    let (mut srv, out) = start_serve(&s, &["--listen", "127.0.0.1:0", "--tailscale"], &env);
+    assert!(out.contains("https://box.tail1.ts.net/?t="), "{out}");
+    let called = fs::read_to_string(&calls).unwrap();
+    let port = called
+        .lines()
+        .find_map(|l| l.strip_prefix("serve --https=443 http://127.0.0.1:"))
+        .unwrap_or_else(|| panic!("{called}"));
+    // Tailscale passes requests on as plain HTTP; the cookie is still marked Secure.
+    let token = out
+        .split("?t=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let login = http(
+        &format!("127.0.0.1:{port}"),
+        &format!("GET /?t={token} HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+    assert!(login.contains("; Secure"), "{login}");
+    assert!(fs::read_to_string(s.amux_home.join("serve.json"))
+        .unwrap()
+        .contains("https://box.tail1.ts.net"));
+    let _ = srv.kill();
+    let _ = srv.wait();
+
+    let failed = s.amux_with(
+        &["serve", "--listen", "127.0.0.1:0", "--tailscale"],
+        &[env[0], ("TS_FAIL", "1")],
+        None,
+    );
+    assert_ne!(failed.code, 0);
+    assert!(
+        failed.err.contains("HTTPS is not enabled") && failed.err.contains("HTTPS Certificates"),
+        "{}",
+        failed.err
+    );
+    let open = s.amux_with(
+        &["serve", "--listen", "0.0.0.0:0", "--tailscale"],
+        &env,
+        None,
+    );
+    assert!(open.err.contains("this machine only"), "{}", open.err);
+}

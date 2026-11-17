@@ -446,12 +446,16 @@ amux send gpu:claude-1 "use the bigger batch"
 - **Monitor:** the machine's load and free memory, every slot with who holds it and who waits, and each machine's runs.
 
 ```sh
-amux serve                                    # prints http://127.0.0.1:7878/?t=<token>
-amux serve --listen 100.101.102.103:7878      # your Tailscale address, to reach it from the phone
+amux serve --tailscale                        # https://<this-mac>.<tailnet>.ts.net/?t=<token>, a real certificate
+amux serve --listen 192.168.1.20:7878 --tls   # HTTPS on your network, with a self-signed certificate
+amux serve --listen 0.0.0.0:7878 --cert c.pem --key k.pem   # your own certificate
+amux serve                                    # plain http://127.0.0.1:7878, for an SSH tunnel
 ```
 
-- The link holds a secret token. Opening it once stores the token in a cookie (HttpOnly, SameSite=Strict) and takes it out of the address bar. `--new-token` replaces it.
-- It listens on this machine only unless you say otherwise. It has no TLS, so reach it through something private: Tailscale, a VPN or an SSH tunnel.
+- **`--tailscale` is the easy way.** Tailscale serves the app over HTTPS with a real certificate for the machine's `ts.net` name, to your own devices only, and passes requests to amux on 127.0.0.1. It needs HTTPS certificates turned on for the tailnet (admin console → DNS), and stops when amux does.
+- **`--tls`** makes a self-signed certificate (with `openssl`, kept in `~/.amux/tls/`) and prints its fingerprint. The browser warns once. To stop the warning, open `/amux-cert.pem` on the phone, install it, and trust it (iOS: Settings → General → About → Certificate Trust Settings).
+- The link holds a secret token. Opening it once stores the token in a cookie (HttpOnly, SameSite=Strict, and Secure over HTTPS) and takes it out of the address bar. `--new-token` replaces it.
+- It listens on this machine only unless you say otherwise. Without HTTPS, reach it only through something private: Tailscale, a VPN or an SSH tunnel.
 - Every action runs the same command the CLI has (`ps --json`, `peek`, `send`, `spawn`, `verify`, `pr`, `comment`…), so runs on other machines work too, and the app can do nothing the CLI can't.
 - **From another laptop without Tailscale:** run `ssh -N -L 7878:127.0.0.1:7878 you@your-mac`, then open the link. Or skip the browser: `ssh you@your-mac` and run `amux ui`.
 
@@ -610,7 +614,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
-| `amux serve [--listen <host:port>] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. |
+| `amux serve [--listen <host:port>] [--tls \| --cert <pem> --key <pem> \| --tailscale] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. Over HTTPS with `--tls`, your certificate, or Tailscale. |
 | `amux phone ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. |
 | `amux providers` | List providers, shared homes and private entries. |
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
@@ -632,6 +636,7 @@ Commands never wait on the network. The notice comes from a cached result, which
   launches.jsonl       local log of launches: time, account, directory, arguments (mode 0600)
   update-check.json    cached result of the update check
   phone.json           where phone notifications go (`amux phone`, mode 0600)
+  tls/                 the self-signed certificate made by `amux serve --tls`
 ```
 
 | Variable | Effect |
@@ -677,9 +682,9 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, desktop and phone notifications, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
-1. **HTTPS for `amux serve`**, so the app works away from a private network and can use web push.
+1. **Web push from the phone app**, now that it can be served over HTTPS.
 2. **Messaging between sessions.** An MCP server so sessions can `list_peers`, `send_message` and `delegate_task`.
 3. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
 4. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.

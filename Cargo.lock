@@ -16,11 +16,13 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "amux"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "libc",
  "ratatui",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
