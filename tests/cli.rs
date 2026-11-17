@@ -1844,10 +1844,20 @@ fn flags_a_run_that_works_without_changing_anything_and_cleans_up_leftovers() {
     assert_eq!(r.code, 0, "{}", r.err);
     wait_ps(&s, "leak", "exited 0");
     let dry = s.amux(&["gc", "--dry-run"]);
+    // On failure, show what the system says about the leftover.
+    let evidence = || {
+        let ps = Command::new("sh")
+            .arg("-c")
+            .arg("ps -A -o pid=,pgid=,args= | grep 'sleep 345' | grep -v grep; for p in $(pgrep -f 'sleep 345'); do echo \"env $p:\"; tr '\\0' '\\n' < /proc/$p/environ 2>&1 | grep AMUX; ls -l /proc/$p/cwd 2>&1; done")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&ps.stdout).into_owned()
+    };
     assert!(
         dry.out.contains("leak") && dry.out.contains("perl -e use POSIX"),
-        "{}",
-        dry.out
+        "{}\n--- the system says:\n{}",
+        dry.out,
+        evidence()
     );
     let gc = s.amux(&["gc"]);
     assert!(gc.out.contains("Ended 1 process"), "{}", gc.out);
