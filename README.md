@@ -18,6 +18,10 @@ $ amux claude@personal              # same skills, plugins and sessions, differe
 $ amux resume 2f26fba2 --as claude@personal   # pick up a work session under the other account
 ```
 
+It also runs many agents at once, each in its own git worktree. You can watch them and type into them in one screen, and amux keeps them from overloading the machine. When they finish, it reviews their changes, catches conflicts between them, and lands, tests or ships the work. You can drive all of it from your phone, another laptop or another agent.
+
+![amux ui: three runs, one waiting for approval, with its live screen](<https://raw.githubusercontent.com/quynb93/amux/main/docs/images/amux-ui.png>)
+
 ## Contents
 
 - [Features](#features)
@@ -221,7 +225,9 @@ Or see them all at once with **`amux ui`**: a list of runs with their state, and
   ```json
   { "ui": { "layout": { "view": "tiles", "listWidth": 40, "listSide": "left", "maxTiles": 6 } } }
   ```
-- **Views.** **`b`** shows a board with a column per state: needs you, working, idle and done. Each run is a card, and ←→ and ↑↓ move between cards. **`t`** shows tiles: up to four live runs side by side, each a terminal you can click into and type into. `b` or `t` again goes back to the list, and `/view` switches too.
+- **Views.** ![The board view](<https://raw.githubusercontent.com/quynb93/amux/main/docs/images/amux-board.png>)
+
+  **`b`** shows a board with a column per state: needs you, working, idle and done. Each run is a card, and ←→ and ↑↓ move between cards. **`t`** shows tiles: up to four live runs side by side, each a terminal you can click into and type into. `b` or `t` again goes back to the list, and `/view` switches too.
 - **In the list**, letters are shortcuts: `a` gives the run the whole terminal, Tab jumps to the next run that is waiting for you, `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it. `?` lists every key. Quitting the UI leaves the runs going.
 
 Press **`/`** for the command palette. Type part of a command and its argument completes from your runs, accounts or themes:
@@ -348,6 +354,8 @@ amux send gpu:claude-1 "use the bigger batch"
 - `--amux <path>` on `machine add` points at amux there if it isn't on its PATH.
 
 ### On your phone
+
+<img src="https://raw.githubusercontent.com/quynb93/amux/main/docs/images/amux-phone.png" alt="amux serve on a phone: a run's screen with reply buttons" width="300" align="right">
 
 `amux serve` is a remote control for everything amux does, in a web app for a phone or another laptop's browser. Add it to the home screen to use it like an app.
 
