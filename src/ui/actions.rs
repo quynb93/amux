@@ -414,6 +414,10 @@ impl App {
                 argv.extend(args);
                 self.background_output(argv, format!("Plugin {name}"));
             }
+            Action::Compare(task) => self.background_output(
+                vec!["compare".into(), task.clone()],
+                format!("Attempts at {task}"),
+            ),
             Action::Gc => self.background_output(vec!["gc".into()], "Leftover processes".into()),
             Action::Usage => self.background_output(vec!["usage".into()], "Usage limits".into()),
             Action::Failover(r) => {

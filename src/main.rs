@@ -1,6 +1,8 @@
 mod commands {
     pub mod account;
     #[cfg(unix)]
+    pub mod attempts;
+    #[cfg(unix)]
     pub mod control;
     #[cfg(unix)]
     pub mod explain;
@@ -86,6 +88,10 @@ Parallel runs (each CLI in the background, in its own terminal):
       Block until the runs need you, finish their turn (default) or exit; 124 on timeout
   amux events [<run>...] [--text]          Stream state, verify and PR changes as JSON lines
   amux diff <run> [--stat]                 What a run changed since its worktree started
+  amux try <n> <acct> | <acct>,<acct>... -p <task> --name <task>
+      Several attempts at one task, each in its own worktree (accounts or CLIs can differ)
+  amux compare <task> [--no-test]          Test each attempt in a slot and rank them
+  amux pick <run> [--land]                 Keep the best attempt (and land it); clear the others
   amux overlap [<run>...] [--into <b>]     Which runs touch the same files, and which would conflict
   amux land <run>... [--into <b>] [--no-test] [--dry-run]
       Merge queue: rebase each run onto the branch, test it in a slot, fast-forward.
@@ -232,6 +238,12 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "gc" => commands::gc::gc_cmd(rest),
         #[cfg(unix)]
+        "try" => commands::attempts::try_cmd(rest),
+        #[cfg(unix)]
+        "compare" => commands::attempts::compare_cmd(rest),
+        #[cfg(unix)]
+        "pick" => commands::attempts::pick_cmd(rest),
+        #[cfg(unix)]
         "land" => commands::overlap::land_cmd(rest),
         #[cfg(unix)]
         "comment" => commands::review::comment_cmd(rest),
@@ -240,7 +252,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(not(unix))]
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
-        | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" => {
+        | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" | "try"
+        | "compare" | "pick" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

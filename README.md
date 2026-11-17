@@ -34,6 +34,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Parallel runs](#parallel-runs)
   - [Driving runs from scripts and agents](#driving-runs-from-scripts-and-agents)
   - [Reviewing a run's changes](#reviewing-a-runs-changes)
+  - [Best of N](#best-of-n)
   - [Usage limits](#usage-limits)
   - [Runaway and stuck agents](#runaway-and-stuck-agents)
   - [Landing parallel runs](#landing-parallel-runs)
@@ -309,6 +310,23 @@ amux comments tests --send     # one message: file:line, the line, and your note
 ```
 
 Comments are kept in `runs/<id>/review.json` until sent, so a review can be written over time.
+
+### Best of N
+
+Agents given the same task come back with different answers. Run a few, then keep the best on evidence instead of reading every diff:
+
+```sh
+amux try 3 claude -p "fix the flaky login test" --name login     # three attempts, own worktrees
+amux try claude@work,codex@me -p "…" --name login               # or one per account / CLI
+amux compare login       # tests each in a test slot, ranks: passing, then smallest change
+#     ATTEMPT  ACCOUNT      STATE  TESTS   FILES  LINES     COMMITS  TIME
+#  ★  login-2  claude@work  done   passed  2      +18 −4    1        6m
+#     login-1  claude@work  done   passed  5      +96 −30   3        9m
+#     login-3  codex@me     done   failed  1      +2 −2     1        4m
+amux pick login-2 --land # keep it, land it; stop and clear away the others
+```
+
+The other attempts' branches are always kept, and so is any worktree that still holds uncommitted work.
 
 ### Usage limits
 
