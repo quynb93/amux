@@ -1,6 +1,6 @@
 [package]
 name = "amux"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Run Claude Code, Codex and Gemini CLI with many accounts over one shared home"
@@ -17,6 +17,9 @@ url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# `amux serve --tls`: the same TLS library ureq already uses.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 # `amux ui`: the TUI, and a terminal emulator for the live preview of a run.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 vt100 = "0.18"

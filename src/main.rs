@@ -55,6 +55,8 @@ mod store;
 mod testutil;
 mod time;
 #[cfg(unix)]
+mod tls;
+#[cfg(unix)]
 mod ui;
 mod update;
 mod util;
@@ -143,7 +145,9 @@ Maintenance:
   amux doctor                              Check binaries, shared homes and overlays
   amux machine add <name> <user@host> | list | rm <name> | check <name>
                                            Machines reached over SSH, with amux installed
-  amux serve [--listen <host:port>]        amux on your phone: runs, screens, replies (web app)
+  amux serve [--listen <host:port>] [--tls | --tailscale]
+                                           amux on your phone: runs, screens, replies (web app);
+                                           --tailscale serves it over HTTPS on your tailnet
   amux phone ntfy|pushover|webhook|test|off   Notifications on your phone when a run needs you,
                                            stalls, hits a limit, ends, or its tests/CI finish
   amux skill [--install]                   The agent skill for running other agents with amux
