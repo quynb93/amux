@@ -101,7 +101,7 @@ npm install -g @quynb/amux
 cargo install --git https://github.com/quynb93/amux --locked
 ```
 
-To upgrade, run `amux update`. It prints the right command for how you installed amux: `brew upgrade amux`, the npm command, or the install script.
+To upgrade, run `amux update`. It installs the latest release the way you installed amux: it runs `brew upgrade amux` or the npm command for those installs, and otherwise downloads the release for your machine, checks its SHA-256, and swaps the binary in place. Runs already going keep the old version until they restart. `amux update --check` only says whether there is a new version. (amux 0.11.4 and older only print the command, so run the install script once to get this.)
 
 **Upgrading from 0.1.x.** Versions 0.1.x ran on Node.js. The binary releases replace them, and your accounts and settings in `~/.amux` carry over unchanged. If you installed 0.1.0 or 0.1.1 with npm, run `npm uninstall -g amux` first, because those were packaged as `amux` rather than `@quynb/amux`.
 
@@ -610,7 +610,7 @@ Like Claude Code and Codex, amux tells you when a new release is out:
 Update available: amux 0.1.0 → 0.2.0  Run `amux update` or see https://github.com/quynb93/amux/releases/latest
 ```
 
-Commands never wait on the network. The notice comes from a cached result, which a background process refreshes from GitHub releases at most once a day. `amux update` checks right away and prints the install command. Set `AMUX_NO_UPDATE_CHECK=1` to turn the check off. It is also skipped in CI and when output is not a terminal.
+Commands never wait on the network. The notice comes from a cached result, which a background process refreshes from GitHub releases at most once a day. `amux update` checks right away and installs the new version (`--check` only prints how). Set `AMUX_NO_UPDATE_CHECK=1` to turn the check off. It is also skipped in CI and when output is not a terminal.
 
 ## Command reference
 
@@ -646,7 +646,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
 | `amux doctor` | Check binaries, shared homes and overlays. |
-| `amux update` | Check for a newer amux release. |
+| `amux update [--check]` | Install the latest amux release, or with `--check` only look for one. |
 | `amux --version`, `amux help` | |
 
 ## Files and environment

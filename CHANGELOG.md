@@ -4,6 +4,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-11-17
+
+### Changed
+
+- `amux update` now installs the latest release instead of printing a command. Homebrew and npm installs are upgraded by `brew upgrade amux` or `npm install -g`. Other installs download the release archive for this machine, check it against the published SHA-256, make sure the new binary runs and reports the expected version, and rename it over the old one, so a failed or tampered download changes nothing. `amux update --check` keeps the old behavior.
+
 ## [0.11.4] - 2026-11-17
 
 Fixes from running a real lead with Claude Code: it split a two-module task between two workers, then reviewed, tested and landed their work in about two minutes.

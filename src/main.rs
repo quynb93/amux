@@ -166,7 +166,7 @@ Maintenance:
                                            stalls, hits a limit, ends, or its tests/CI finish
   amux skill [--install]                   The agent skill for running other agents with amux
   amux plugin list | new <name> | run <name>   Plugins (`amux <name>`) and hooks (~/.amux/hooks)
-  amux update                              Check for a newer amux release
+  amux update [--check]                    Install the latest amux release (--check: only look)
   amux --version
 
 Docs: https://github.com/quynb93/amux#readme
@@ -197,7 +197,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
             println!("{HELP}");
             return Ok(0);
         }
-        Some("update") => return Ok(update::update_cmd()),
+        Some("update") => return Ok(update::update_cmd(rest)),
         _ => {}
     }
 
