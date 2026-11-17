@@ -29,6 +29,7 @@ jobs:
         run: |
           sh -n scripts/install.sh
           sh -n scripts/homebrew-formula.sh
+          sh -n scripts/homebrew-bottles.sh
 
   msrv:
     name: Minimum Rust version

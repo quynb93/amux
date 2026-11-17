@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+
+- `brew install quynb93/tap/amux` and `brew upgrade amux` no longer fail with "Your Command Line Tools are too outdated". Releases now publish Homebrew bottles, so brew pours the prebuilt binary instead of treating the formula as a source build.
+
 ## [0.11.7] - 2026-11-17
 
 ### Added
