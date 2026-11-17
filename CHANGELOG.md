@@ -4,6 +4,14 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-11-17
+
+### Added
+
+- `amux spawn --issue <n>`: a GitHub issue (number, `#n` or URL, read with `gh`) becomes the run's first prompt, in its own worktree on `amux/issue-<n>`. `--prompt` adds your own instructions. `amux pr` opens its pull request with `Fixes #<n>`.
+- `amux intake [--label <l>] [--limit <n>] [--dry-run]`: a run for each new open issue (with the label), oldest first, each started once.
+- `amux schedule`: run any amux command by itself, `every 30m`, `daily 9:00`, `weekdays 9:00`, `mondays 9:00` or on a cron line, in local time, from the folder it was added in. `schedule run` runs one now, `log` shows what it printed, and `pause`, `resume` and `rm` manage them. A background scheduler starts them, comes back with any amux command, and exits when no schedules are left. A failed scheduled command sends a `schedule` phone notification.
+
 ## [0.11.5] - 2026-11-17
 
 ### Changed

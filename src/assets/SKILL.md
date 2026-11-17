@@ -78,6 +78,14 @@ needs you, then prints what it reported. Loop on it instead of polling. A worker
 `amux report "<what it did, how it checked, what's left>"`. Workers can't start workers.
 To hand a whole goal to a lead agent: `amux lead --workers 3 claude -p "<goal>"`.
 
+## Issues and schedules
+
+`amux spawn --issue 42 claude` works on GitHub issue #42 in its own worktree; its PR says
+`Fixes #42`. `amux intake --label <l> claude` starts one run per new open issue with the
+label. `amux schedule add <name> "weekdays 9:00" <amux command...>` runs a command by
+itself (`every 1h`, cron lines too); `amux schedule` lists them. Only schedule what the user
+asked for.
+
 ## Usage limits
 
 If a helper shows `waiting` with "hit your limit", its account ran out. `amux usage` shows

@@ -11,6 +11,8 @@ mod commands {
     #[cfg(unix)]
     pub mod github;
     #[cfg(unix)]
+    pub mod intake;
+    #[cfg(unix)]
     pub mod login_item;
     pub mod maintenance;
     #[cfg(unix)]
@@ -25,6 +27,8 @@ mod commands {
     pub mod review;
     #[cfg(unix)]
     pub mod runs;
+    #[cfg(unix)]
+    pub mod schedule;
     pub mod sessions;
     pub mod skill;
     #[cfg(unix)]
@@ -90,6 +94,7 @@ Accounts:
 
 Parallel runs (each CLI in the background, in its own terminal):
   amux spawn [--on <machine>[:<dir>]] [--stall <30m>] [--max-time <4h>] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
+      --issue <n>: work on a GitHub issue (its own worktree; the PR says it fixes it)
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
       --on starts it on another machine; then name it <machine>:<run> anywhere a run goes.
   amux ps [--json]                         List runs and whether each is working or idle
@@ -132,6 +137,10 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux revive [<run>...] [--all] [--fresh] Bring back runs lost in a restart: same name, worktree
                                            and session (--resume); --at-login does it after each restart
   amux gc [--dry-run]                      End processes finished runs left behind (dev servers…)
+  amux schedule add <name> \"<when>\" <amux command...> | rm | run | pause | resume | log
+      Run an amux command by itself: \"every 1h\", \"weekdays 9:00\", or cron (\"0 9 * * 1-5\")
+  amux intake [--label <l>] [--limit <n>] <provider>[@name]
+      A run for each new open GitHub issue (with the label), e.g. on a schedule
   amux ui                                  Watch, attach to, start and stop runs in one screen
   amux theme [<name>]                      List themes (Catppuccin, Tokyo Night, Dracula, Gruvbox,
                                            Nord, Solarized…) or choose one for amux ui and the phone app
@@ -187,6 +196,9 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         // Internal: sends one phone notification (runs/push.rs).
         #[cfg(unix)]
         Some("__push") => return Ok(runs::push::main(rest)),
+        // Internal: starts schedules when they're due (commands/schedule.rs).
+        #[cfg(unix)]
+        Some("__scheduler") => return Ok(commands::schedule::main()),
         #[cfg(unix)]
         Some("__slot-hook") => return Ok(commands::slot::hook_main()),
         Some("--version" | "-v" | "version") => {
@@ -202,6 +214,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
     }
 
     update::check_for_updates();
+    #[cfg(unix)]
+    commands::schedule::ensure_running();
     let cmd = cmd.unwrap_or_default();
     // `amux <cmd> <machine>:<run>`: the same command, on that machine.
     #[cfg(unix)]
@@ -279,6 +293,10 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "lead" => commands::team::lead_cmd(rest),
         #[cfg(unix)]
         "team" => commands::team::team_cmd(rest),
+        #[cfg(unix)]
+        "schedule" | "schedules" => commands::schedule::schedule_cmd(rest),
+        #[cfg(unix)]
+        "intake" => commands::intake::intake_cmd(rest),
         #[cfg(unix)]
         "report" => commands::team::report_cmd(rest),
         #[cfg(unix)]

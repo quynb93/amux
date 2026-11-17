@@ -75,7 +75,7 @@ fn gh(dir: &Path) -> Command {
 }
 
 /// Runs gh and returns its stdout, with a readable error when gh is missing or fails.
-fn gh_out(dir: &Path, args: &[&str], ok_codes: &[i32]) -> Result<String> {
+pub(crate) fn gh_out(dir: &Path, args: &[&str], ok_codes: &[i32]) -> Result<String> {
     let out = gh(dir).args(args).output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow!("This needs the GitHub CLI: install it from https://cli.github.com and run `gh auth login`.")
@@ -164,6 +164,13 @@ pub fn open_pr(run: &Run, draft: bool, base: Option<&str>) -> Result<Opened> {
             }
             if let Some(b) = base {
                 args.extend(["--base", b]);
+            }
+            // gh fills the title from the commits and leaves a given body alone.
+            let body = run
+                .issue
+                .map(|n| format!("Fixes #{n}\n\nStarted by amux from issue #{n}."));
+            if let Some(b) = &body {
+                args.extend(["--body", b.as_str()]);
             }
             gh_out(&dir, &args, &[])?;
             let pr = find_pr(&dir, &branch)?

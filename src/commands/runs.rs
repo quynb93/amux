@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const SPAWN_USAGE: &str =
-    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--attach] <provider>[@name] [args...]";
+    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>] [--attach] <provider>[@name] [args...]";
 
 #[derive(Default)]
 struct SpawnOpts {
@@ -32,6 +32,8 @@ struct SpawnOpts {
     max_time: Option<u64>,
     /// A first prompt, passed the way the provider takes one (its `promptArgs`).
     prompt: Option<String>,
+    /// A GitHub issue to work on: it becomes the first prompt (`--issue`).
+    issue: Option<String>,
     worktree: bool,
     branch: Option<String>,
     base: Option<String>,
@@ -93,6 +95,7 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
                     o.max_time = Some(ms);
                 }
             }
+            "--issue" => o.issue = Some(value()?),
             "--prompt" => {
                 // A prompt may start with anything but "-", like any value here.
                 o.prompt = Some(value()?)
@@ -105,7 +108,8 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
         }
         i += 1;
     }
-    o.worktree |= o.branch.is_some() || o.base.is_some();
+    // An issue gets its own worktree and branch, ready for a pull request.
+    o.worktree |= o.branch.is_some() || o.base.is_some() || o.issue.is_some();
     let acct = need(argv.get(i), SPAWN_USAGE)?;
     Ok((o, acct, argv.get(i + 1..).unwrap_or_default()))
 }
@@ -205,7 +209,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         rest.extend(argv[i + 2..].iter().cloned());
         return m.run(&rest, dir);
     }
-    let (o, acct_ref, args) = parse_spawn(argv)?;
+    let (mut o, acct_ref, args) = parse_spawn(argv)?;
     // An easy mistake, for people and agents alike: amux's options after the account go
     // to the CLI instead.
     if let Some(f) = args.iter().find(|a| {
@@ -216,6 +220,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             "--branch",
             "--base",
             "--dir",
+            "--issue",
         ]
         .contains(&a.as_str())
     }) {
@@ -260,8 +265,19 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         Some(_) => None,
         None => crate::commands::team::lead_for_spawn()?,
     };
+    let issue = match &o.issue {
+        Some(r) => Some(crate::work::issues::view(&cwd, r)?),
+        None => None,
+    };
+    let first = match &issue {
+        Some(i) => {
+            o.name.get_or_insert_with(|| format!("issue-{}", i.number));
+            Some(crate::work::issues::prompt(i, o.prompt.as_deref()))
+        }
+        None => o.prompt.clone(),
+    };
     let mut args = args.to_vec();
-    if let Some(p) = o.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(p) = first.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         // The repo's shared decisions (`amux note`) come first; a worker is told how to
         // report back at the end.
         let mut p = format!("{}{p}", crate::work::notes::preamble(&cwd));
@@ -296,6 +312,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         group: o.group.clone(),
         lead: lead.clone(),
         team: o.workers,
+        issue: issue.as_ref().map(|i| i.number),
         ..Default::default()
     };
     (run.rows, run.cols) = runs::term_size().unwrap_or((40, 120));

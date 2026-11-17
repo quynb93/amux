@@ -70,6 +70,9 @@ pub struct Run {
     /// For a lead (`amux lead`): how many workers it may have going at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<u32>,
+    /// The GitHub issue it works on (`amux spawn --issue`); its PR says it fixes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<u64>,
     /// Text that means the account hit its usage limit (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_patterns: Vec<String>,

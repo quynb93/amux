@@ -41,6 +41,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Runaway and stuck agents](#runaway-and-stuck-agents)
   - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
+  - [Issues and schedules](#issues-and-schedules)
   - [Other machines](#other-machines)
   - [On your phone](#on-your-phone)
   - [Plugins and hooks](#plugins-and-hooks)
@@ -66,6 +67,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
 - **Sign in your way.** Use the CLI's own login flow or a stored token (macOS Keychain, or a `0600` file on Linux).
 - **Sessions across accounts and CLIs.** List every session from every CLI in one place. Resume one under another account, or hand it to a different CLI with a transcript handoff.
 - **Parallel runs.** Start several agents in the background, across accounts and CLIs, each in its own git worktree if you like. See which are working and which are waiting, attach to any of them, and detach again.
+- **Issues and schedules.** Turn a GitHub issue into a run on its own branch, pick up new issues by label, and run any amux command on a schedule, such as a morning triage.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
 - **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
 
@@ -437,6 +439,32 @@ amux checks tests --send-failures # the failed steps' logs go to the agent, with
 
 In `amux ui`, the run list shows the PR and its checks (`PR #7 checks ✓`, `PR #7 ✗ 2 failing`), refreshed every minute while checks are running. In the `v` choice, `r` opens the PR and `k` sends failing CI to the agent. amux stores no GitHub token; `gh` keeps its own sign-in.
 
+### Issues and schedules
+
+A GitHub issue can be a run's task. amux reads it with `gh`, starts the run in its own worktree on the branch `amux/issue-<n>`, and its pull request says `Fixes #<n>`:
+
+```sh
+amux spawn --issue 42 claude                          # the issue's title and text are the first prompt
+amux spawn --issue 42 --prompt "Add a test first" claude   # with your own instructions after it
+amux intake --label agent-ready claude@work           # a run for each new open issue with the label (3 at most; --limit)
+```
+
+`amux intake` remembers which issues it started (`~/.amux/intake.json`), so it never starts one twice, even after you remove the run. `--dry-run` lists what it would start.
+
+Any amux command can run by itself on a schedule. It runs in the folder you added it from:
+
+```sh
+amux schedule add triage "weekdays 9:00" spawn --prompt "Triage yesterday's issues and label the easy ones agent-ready" claude
+amux schedule add issues "every 1h" intake --label agent-ready claude@work
+amux schedule add tidy "0 18 * * 5" rm --done
+amux schedule                   # what's scheduled, when it runs next, how it last went
+amux schedule run triage        # run it now, in this terminal
+amux schedule log triage        # what it printed
+amux schedule pause triage      # resume, rm
+```
+
+Times are local: `every 30m`, `hourly`, `daily 9:00`, `weekdays 9:00`, `mondays 9:00`, or a cron line. One background process, the scheduler, starts each schedule when it's due. Any amux command starts the scheduler if it isn't running, and it exits when no schedules are left. It stops when you log out, so `amux revive --at-login` (or any amux command) brings it back after a restart. A schedule missed while the machine slept runs once when it wakes. The runs it starts notify you like any other, and a schedule whose command fails sends a `schedule` notification to your phone.
+
 ### Other machines
 
 Runs can live on a server, a VM or a cloud box as well, wherever SSH reaches and amux is installed:
@@ -633,6 +661,9 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux attach <run>` | Connect this terminal to a run. Ctrl-] detaches. |
 | `amux logs <run>` | Print everything the run has output. |
 | `amux peek <run>` | Print what is on the run's screen right now, or its last screen if it has ended. |
+| `amux spawn --issue <n> …` | Work on a GitHub issue in its own worktree; the PR says it fixes it. |
+| `amux intake [--label <l>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open GitHub issue (with the label). |
+| `amux schedule [add <name> "<when>" <command…> \| rm \| run \| pause \| resume \| log <name>]` | Run amux commands by themselves at set times. |
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
@@ -663,6 +694,9 @@ Commands never wait on the network. The notice comes from a cached result, which
   update-check.json    cached result of the update check
   phone.json           where phone notifications go (`amux phone`, mode 0600)
   tls/                 the self-signed certificate made by `amux serve --tls`
+  schedules.json       schedules (`amux schedule`); schedules/<name>.log is what each printed
+  scheduler.log        when the scheduler started and stopped, and commands it couldn't start
+  intake.json          issues `amux intake` started, per repo
 ```
 
 | Variable | Effect |
@@ -671,6 +705,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `AMUX_NO_UPDATE_CHECK=1` | Turn off the update check. |
 | `AMUX_ACCOUNT` | Set by amux in the launched CLI's environment, e.g. `claude@work`. Read it from hooks or scripts. |
 | `AMUX_RUN` | Set in the CLI's environment when it was started by `amux spawn`: the run's name. |
+| `AMUX_SCHEDULE` | Set for a command started by a schedule: the schedule's name. |
 
 amux makes no network requests of its own, except the daily update check to `api.github.com` and, once you set them up with `amux phone`, notifications to the service you chose.
 
@@ -708,7 +743,7 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, GitHub issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
 1. **Web push from the phone app**, now that it can be served over HTTPS.
 2. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.
