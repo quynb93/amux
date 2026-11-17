@@ -99,12 +99,17 @@ fn report_of(id: &str) -> Option<(String, i64)> {
 
 // ---- amux lead ------------------------------------------------------------------------
 
-const LEAD_USAGE: &str = "amux lead [--name <team>] [--workers <n>] [--worker <provider>@<name>]... [--dir <folder>] <provider>[@name] -p <goal>";
+const LEAD_USAGE: &str = "amux lead [--name <team>] [--workers <n>] [--worker <provider>@<name>]... [--dir <folder>] <provider>[@name] -p <goal> [-- <cli args>]";
 
 /// The lead's instructions: how to run a team with amux.
-fn lead_preamble(team: &str, max: u32, worker_accts: &[String]) -> String {
+fn lead_preamble(team: &str, max: u32, worker_accts: &[String], cli: &[String]) -> String {
     let accts = worker_accts.join(", ");
     let first = worker_accts.first().map(String::as_str).unwrap_or("claude");
+    // Workers get the CLI flags the lead got (permissions, model…), after the account.
+    let flags: String = cli
+        .iter()
+        .map(|a| format!(" {}", crate::util::sh_quote(a)))
+        .collect();
     format!(
         "You are the lead of an amux team named {team}. Split the goal below into independent \
 parts and give each part to a worker agent. You plan, delegate, review and integrate; leave \
@@ -113,17 +118,19 @@ the parts themselves to the workers.
 Run these in your shell:
 - Start a worker (at most {max} at a time; accounts: {accts}):
     amux spawn --worktree --name {team}-<part> --prompt \"<a self-contained task: \
-the context it needs, which files, and how to know it's done>\" {first}
+the context it needs, which files, and how to know it's done>\" {first}{flags}
   (amux's options go before the account; the prompt must be one quoted argument)
 - Wait for the next worker to finish or need you (blocks up to 9 minutes; run it again if \
 it times out):
     amux team wait
 - See all workers: amux team    A worker's changes: amux diff <worker>    Its screen: \
 amux peek <worker>
-- Answer or redirect a worker: amux send <worker> \"<text>\"
+- Answer or redirect a worker: amux send <worker> \"<text>\"   A menu or yes/no prompt: \
+read it first with amux peek (the highlighted choice isn't always yes), then press keys: \
+amux send <worker> --no-enter --key down --key enter
 - Test a worker's work: amux verify <worker> --test
 - Check for conflicts, then merge finished work one at a time, tested: amux overlap; \
-amux land <worker>
+amux land <worker> [--command \"<test command>\"]
 - When you're done with a worker: amux rm <worker>
 
 Give each worker a part that touches different files. Don't edit files the workers are \
@@ -142,6 +149,10 @@ pub fn lead_cmd(argv: &[String]) -> Result<i32> {
     let mut goal = None;
     let mut pass: Vec<String> = vec![];
     let mut acct = None;
+    let (argv, cli): (&[String], &[String]) = match argv.iter().position(|a| a == "--") {
+        Some(i) => (&argv[..i], &argv[i + 1..]),
+        None => (argv, &[]),
+    };
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -185,7 +196,7 @@ pub fn lead_cmd(argv: &[String]) -> Result<i32> {
         Some(n) => n,
         None => runs::claim_id(None, "team")?,
     };
-    let prompt = format!("{}{goal}", lead_preamble(&team, max, &worker_accts));
+    let prompt = format!("{}{goal}", lead_preamble(&team, max, &worker_accts, cli));
     let mut args: Vec<String> = vec![
         "--name".into(),
         team.clone(),
@@ -196,6 +207,7 @@ pub fn lead_cmd(argv: &[String]) -> Result<i32> {
     ];
     args.extend(pass);
     args.push(acct);
+    args.extend(cli.iter().cloned());
     // claim_id made a placeholder for the generated name; spawn claims it for real.
     let _ = std::fs::remove_dir_all(runs::run_dir(&team));
     let code = super::runs::spawn_cmd(&args)?;
@@ -507,9 +519,16 @@ mod tests {
 
     #[test]
     fn the_lead_is_told_how_to_run_a_team() {
-        let p = lead_preamble("auth", 3, &["claude@work".into(), "codex@me".into()]);
+        let p = lead_preamble(
+            "auth",
+            3,
+            &["claude@work".into(), "codex@me".into()],
+            &["--permission-mode".into(), "acceptEdits".into()],
+        );
         assert!(p.contains("amux spawn --worktree --name auth-<part> --prompt"));
-        assert!(p.contains("how to know it's done>\" claude@work"));
+        assert!(
+            p.contains("how to know it's done>\" claude@work '--permission-mode' 'acceptEdits'")
+        );
         assert!(p.contains("at most 3 at a time; accounts: claude@work, codex@me"));
         assert!(p.contains("amux team wait") && p.ends_with("Goal:\n"));
         assert!(worker_postscript("auth").contains("amux report"));

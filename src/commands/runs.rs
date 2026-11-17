@@ -268,9 +268,16 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         if let Some(l) = &lead {
             p.push_str(&crate::commands::team::worker_postscript(l));
         }
-        match &spec.prompt_args {
-            Some(t) => args.extend(crate::launch::fill_args(t, &[("prompt", &p)])),
-            None => args.push(p),
+        let prompt = match &spec.prompt_args {
+            Some(t) => crate::launch::fill_args(t, &[("prompt", &p)]),
+            None => vec![p],
+        };
+        // Before the CLI's own flags, so one that takes several values (claude's
+        // `--allowedTools a b`) can't swallow it; after a subcommand (`codex exec`).
+        if args.first().is_none_or(|a| a.starts_with('-')) {
+            args.splice(0..0, prompt);
+        } else {
+            args.extend(prompt);
         }
     }
     let args = args.as_slice();
