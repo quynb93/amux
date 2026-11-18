@@ -178,6 +178,27 @@ pub fn builtin() -> Vec<Value> {
             "sessions": "gemini",
             "loginFiles": ["oauth_creds.json"]
         }),
+        // Qwen Code (QwenLM/qwen-code), checked against its source:
+        // packages/core/src/config/storage.ts reads QWEN_HOME as the whole ~/.qwen dir
+        // (getGlobalQwenDir) and keeps the login in oauth_creds.json and
+        // google_accounts.json, and MCP logins in mcp-oauth-tokens.json. Sessions go to
+        // projects/ under the same dir. packages/cli/src/config/top-level-options.ts has
+        // --resume <id> and -i <prompt>; the prompts are in cli/src/i18n/locales/en.js.
+        // It signs in with /auth inside a session, so there is no login command.
+        json!({
+            "id": "qwen",
+            "label": "Qwen Code",
+            "bin": "qwen",
+            "sharedHome": "~/.qwen",
+            "homeEnv": "QWEN_HOME",
+            "homeEnvPoints": "home",
+            "privateEntries": ["oauth_creds.json", "google_accounts.json", "mcp-oauth-tokens.json"],
+            "sharedDirs": ["projects", "tmp", "commands", "extensions", "skills"],
+            "resumeArgs": ["--resume", "{id}"],
+            "promptArgs": ["-i", "{prompt}"],
+            "conflictingEnv": ["QWEN_HOME"],
+            "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"]
+        }),
     ]
 }
 

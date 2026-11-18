@@ -292,6 +292,19 @@ mod env_tests {
     }
 
     #[test]
+    fn qwen_points_at_its_own_home_and_keeps_the_login_private() {
+        let q = spec("qwen");
+        let env = build_env(&q, &acct("qwen")).unwrap();
+        assert!(env
+            .get("QWEN_HOME")
+            .unwrap()
+            .ends_with("/accounts/qwen/work/.qwen"));
+        assert!(env.remove.contains(&"QWEN_HOME".to_string()));
+        assert!(q.private_entries.contains(&"oauth_creds.json".to_string()));
+        assert!(q.shared_dirs.contains(&"projects".to_string()));
+    }
+
+    #[test]
     fn gemini_points_at_the_parent_and_has_no_base_url() {
         let env = build_env(&spec("gemini"), &acct("gemini")).unwrap();
         assert!(env

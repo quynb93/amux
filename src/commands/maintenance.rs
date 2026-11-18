@@ -110,8 +110,17 @@ pub fn doctor_cmd() -> Result<i32> {
         }
     };
     let providers = load_providers()?;
+    let accounts = load_accounts()?;
     for p in providers {
         let found = which(&p.bin);
+        // A built-in CLI you don't use isn't a problem: say so, and move on.
+        if found.is_none() && !accounts.iter().any(|a| a.provider == p.id) {
+            println!(
+                "--   {}: binary \"{}\" not installed (no accounts)",
+                p.id, p.bin
+            );
+            continue;
+        }
         let at = found
             .as_ref()
             .map(|f| format!("at {}", tildify(f)))
@@ -125,7 +134,7 @@ pub fn doctor_cmd() -> Result<i32> {
             format!("{}: shared home {}", p.id, tildify(&p.shared_home)),
         );
     }
-    for a in load_accounts()? {
+    for a in &accounts {
         let Some(spec) = providers.iter().find(|p| p.id == a.provider) else {
             check(
                 false,
@@ -133,7 +142,7 @@ pub fn doctor_cmd() -> Result<i32> {
             );
             continue;
         };
-        let home = overlay_home(spec, &a);
+        let home = overlay_home(spec, a);
         check(
             home.exists(),
             format!(
@@ -141,11 +150,11 @@ pub fn doctor_cmd() -> Result<i32> {
                 a.id(),
                 tildify(&home),
                 spec.home_env,
-                tildify(&home_env_value(spec, &a))
+                tildify(&home_env_value(spec, a))
             ),
         );
     }
-    for k in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"] {
+    for k in providers.iter().map(|p| p.home_env.as_str()) {
         if let Some(v) = std::env::var_os(k).filter(|v| !v.is_empty()) {
             println!(
                 "note {k} is set in this shell ({}); amux overrides it per account",
