@@ -1,15 +1,17 @@
-//! Token storage: the macOS Keychain, or a 0600 file in the account dir elsewhere.
+//! Token storage: the macOS Keychain, or a 0600 file elsewhere. Account tokens use the
+//! account dir; tracker keys (`amux tracker login`) use ~/.amux/trackers/.
 
 use crate::store::{account_dir, Account};
 use anyhow::{bail, Result};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const SERVICE: &str = "amux";
 
+/// `AMUX_KEYCHAIN=0` keeps secrets in files on macOS too (headless Macs, and the tests).
 fn use_keychain() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(target_os = "macos") && std::env::var("AMUX_KEYCHAIN").as_deref() != Ok("0")
 }
 
 fn fallback_file(a: &Account) -> PathBuf {
@@ -17,8 +19,22 @@ fn fallback_file(a: &Account) -> PathBuf {
 }
 
 pub fn set_token(a: &Account, token: &str) -> Result<()> {
+    set_secret(&a.id(), &fallback_file(a), token)
+}
+
+pub fn get_token(a: &Account) -> Option<String> {
+    get_secret(&a.id(), &fallback_file(a))
+}
+
+pub fn delete_token(a: &Account) {
+    delete_secret(&a.id(), &fallback_file(a))
+}
+
+/// Stores `token` under `name` in the Keychain, or in `file` (mode 0600, in a 0700
+/// folder) where there is no Keychain.
+pub fn set_secret(name: &str, file: &Path, token: &str) -> Result<()> {
     if token.is_empty() {
-        bail!("Empty token for {}; nothing stored.", a.id());
+        bail!("Empty token for {name}; nothing stored.");
     }
     if use_keychain() {
         // Pass the command on stdin (`security -i`) rather than argv, so the token never
@@ -39,13 +55,12 @@ pub fn set_token(a: &Account, token: &str) -> Result<()> {
         if let Some(mut stdin) = child.stdin.take() {
             writeln!(
                 stdin,
-                "add-generic-password -U -s \"{SERVICE}\" -a \"{}\" -w \"{token}\"",
-                a.id()
+                "add-generic-password -U -s \"{SERVICE}\" -a \"{name}\" -w \"{token}\""
             )?;
         }
         let out = child.wait_with_output()?;
         // `security -i` can exit 0 even when the inner command fails, so read it back.
-        if !out.status.success() || get_token(a).as_deref() != Some(token) {
+        if !out.status.success() || get_secret(name, file).as_deref() != Some(token) {
             let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
             bail!(
                 "Keychain write failed: {}",
@@ -58,15 +73,17 @@ pub fn set_token(a: &Account, token: &str) -> Result<()> {
         }
         return Ok(());
     }
-    crate::fsx::mkdir_private(&account_dir(a))?;
-    crate::fsx::write_atomic(&fallback_file(a), token.as_bytes())?;
+    if let Some(dir) = file.parent() {
+        crate::fsx::mkdir_private(dir)?;
+    }
+    crate::fsx::write_atomic(file, token.as_bytes())?;
     Ok(())
 }
 
-pub fn get_token(a: &Account) -> Option<String> {
+pub fn get_secret(name: &str, file: &Path) -> Option<String> {
     if use_keychain() {
         let out = Command::new("security")
-            .args(["find-generic-password", "-s", SERVICE, "-a", &a.id(), "-w"])
+            .args(["find-generic-password", "-s", SERVICE, "-a", name, "-w"])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
@@ -76,20 +93,20 @@ pub fn get_token(a: &Account) -> Option<String> {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_string());
     }
-    std::fs::read_to_string(fallback_file(a))
+    std::fs::read_to_string(file)
         .ok()
         .map(|s| s.trim_end().to_string())
 }
 
-pub fn delete_token(a: &Account) {
+pub fn delete_secret(name: &str, file: &Path) {
     if use_keychain() {
         let _ = Command::new("security")
-            .args(["delete-generic-password", "-s", SERVICE, "-a", &a.id()])
+            .args(["delete-generic-password", "-s", SERVICE, "-a", name])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         return;
     }
-    let _ = std::fs::remove_file(fallback_file(a));
+    let _ = std::fs::remove_file(file);
 }

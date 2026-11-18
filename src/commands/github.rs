@@ -36,6 +36,11 @@ pub fn pr_cmd(argv: &[String]) -> Result<i32> {
             if n == 1 { "is" } else { "are" }
         );
     }
+    match &o.commented {
+        Some(Ok(key)) => eprintln!("amux: posted the PR's link on {key}."),
+        Some(Err(e)) => eprintln!("amux: could not post the PR's link on the issue: {e}"),
+        None => {}
+    }
     if o.created {
         println!("Opened PR #{} for {}: {}", o.pr.number, run.id, o.pr.url);
     } else {

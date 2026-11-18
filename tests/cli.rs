@@ -3610,3 +3610,479 @@ fn moves_a_run_before_the_limit_only_between_turns() {
     );
     s.amux(&["stop", "q-2"]);
 }
+
+/// A stand-in for Linear's GraphQL API and Jira's REST API. `answer` gets the method,
+/// path, lowercased headers and body, and returns the status and JSON body. Every request
+/// is kept, in order.
+type Answer = Box<dyn Fn(&str, &str, &str, &str) -> (u16, String) + Send>;
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+fn api_server(answer: Answer) -> (String, Seen) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("http://{}", l.local_addr().unwrap());
+    let seen: Seen = Default::default();
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = r.read_line(&mut first);
+            let mut head = String::new();
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                let line = line.to_ascii_lowercase();
+                if let Some(v) = line.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            let body = String::from_utf8_lossy(&body).into_owned();
+            let mut parts = first.split_whitespace();
+            let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            let (code, out) = answer(method, path, &head, &body);
+            log.lock()
+                .unwrap()
+                .push(format!("{method} {path}\n{head}\n{body}"));
+            let _ = write!(
+                &s,
+                "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                out.len()
+            );
+        }
+    });
+    (addr, seen)
+}
+
+/// Runs amux with `input` on its stdin.
+fn amux_stdin(s: &Sandbox, args: &[&str], env: &[(&str, &str)], input: &str) -> Out {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .args(args)
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .envs(env.iter().copied())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let r = child.wait_with_output().unwrap();
+    Out {
+        code: r.status.code().unwrap_or(-1),
+        out: String::from_utf8_lossy(&r.stdout).into(),
+        err: String::from_utf8_lossy(&r.stderr).into(),
+    }
+}
+
+#[test]
+fn works_on_linear_and_jira_issues() {
+    let s = Sandbox::new("trackers");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "x");
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let remote = s.home.join("remote.git");
+    assert!(Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&remote)
+        .status()
+        .unwrap()
+        .success());
+    git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    // A stand-in for the GitHub CLI: one PR per branch, once created.
+    let gh = s.home.join("bin/gh");
+    write(
+        &gh,
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1 $2\" in\n\
+             'pr view') b=$(echo \"$3\" | tr / _); [ -f {st}-$b ] && echo '{{\"url\":\"https://github.com/o/r/pull/7\",\"number\":7,\"state\":\"OPEN\"}}' && exit 0; echo 'no pull requests found' >&2; exit 1;;\n\
+             'pr create') b=$(echo \"$4\" | tr / _); touch {st}-$b;;\n\
+             esac\n",
+            log = s.home.join("gh-log").display(),
+            st = s.home.join("gh-pr").display(),
+        ),
+    );
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Linear: two open issues with comments; the key is lin_key.
+    let (linear, linear_log) = api_server(Box::new(|_, _, head, body| {
+        if !head.contains("authorization: lin_key\r\n") {
+            return (
+                401,
+                r#"{"errors":[{"message":"Authentication required"}]}"#.into(),
+            );
+        }
+        let issue = |n: u32, title: &str, created: &str| {
+            format!(
+                r#"{{"id":"uuid-{n}","identifier":"ENG-{n}","title":"{title}","description":"Steps for **{n}**.","url":"https://linear.app/acme/issue/ENG-{n}/x","createdAt":"{created}",
+                "comments":{{"nodes":[{{"body":"Second.","createdAt":"2026-01-05T00:00:00Z","user":{{"name":"Bo"}}}},{{"body":"First.","createdAt":"2026-01-04T00:00:00Z","user":{{"name":"Ann"}}}}]}}}}"#
+            )
+        };
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let q = v["query"].as_str().unwrap_or_default();
+        let data = if q.contains("viewer") {
+            r#"{"viewer":{"name":"Ann","email":"ann@acme.com"}}"#.to_string()
+        } else if q.contains("commentCreate") {
+            r#"{"commentCreate":{"success":true}}"#.to_string()
+        } else if q.contains("issues(") {
+            format!(
+                r#"{{"issues":{{"nodes":[{},{}]}}}}"#,
+                issue(2, "Add dark mode", "2026-01-03T00:00:00Z"),
+                issue(1, "Login fails on Safari", "2026-01-01T00:00:00Z")
+            )
+        } else {
+            match v["variables"]["id"].as_str() {
+                Some("ENG-1") => {
+                    format!(r#"{{"issue":{}}}"#, issue(1, "Login fails on Safari", ""))
+                }
+                Some("ENG-2") => format!(r#"{{"issue":{}}}"#, issue(2, "Add dark mode", "")),
+                _ => {
+                    return (
+                        200,
+                        r#"{"data":null,"errors":[{"message":"Entity not found: Issue"}]}"#.into(),
+                    )
+                }
+            }
+        };
+        (200, format!(r#"{{"data":{data}}}"#))
+    }));
+    // Jira: PROJ-45 and PROJ-46, for me@x.com with the token jtok.
+    let (jira, jira_log) = api_server(Box::new(|method, path, head, _| {
+        if !head.contains("authorization: basic bwvaec5jb206anrvaw==\r\n") {
+            return (401, String::new());
+        }
+        let adf = |t: &str| {
+            format!(
+                r#"{{"type":"doc","version":1,"content":[{{"type":"paragraph","content":[{{"type":"text","text":"{t}"}}]}},
+                {{"type":"bulletList","content":[{{"type":"listItem","content":[{{"type":"paragraph","content":[{{"type":"text","text":"a point"}}]}}]}}]}}]}}"#
+            )
+        };
+        let p = path.split('?').next().unwrap_or_default();
+        match (method, p) {
+            ("GET", "/rest/api/3/myself") => (
+                200,
+                r#"{"displayName":"Me","emailAddress":"me@x.com"}"#.into(),
+            ),
+            ("GET", "/rest/api/3/search/jql") => (
+                200,
+                r#"{"issues":[{"key":"PROJ-45","fields":{"summary":"Export to CSV"}},{"key":"PROJ-46","fields":{"summary":"Import CSV"}}],"isLast":true}"#.into(),
+            ),
+            ("GET", "/rest/api/3/issue/PROJ-45") | ("GET", "/rest/api/3/issue/PROJ-46") => {
+                let key = &p[p.len() - 7..];
+                (
+                    200,
+                    format!(
+                        r#"{{"key":"{key}","fields":{{"summary":"Export to CSV","description":{},"comment":{{"comments":[{{"author":{{"displayName":"Bo"}},"body":{}}}]}}}}}}"#,
+                        adf("Export the table."),
+                        adf("Use commas.")
+                    ),
+                )
+            }
+            ("POST", "/rest/api/3/issue/PROJ-45/comment") => (201, r#"{"id":"1"}"#.into()),
+            _ => (
+                404,
+                r#"{"errorMessages":["Issue does not exist or you do not have permission to see it."]}"#
+                    .into(),
+            ),
+        }
+    }));
+    let linear_url = format!("{linear}/graphql");
+    let env = [
+        ("AMUX_GH", gh.to_str().unwrap()),
+        ("AMUX_KEYCHAIN", "0"),
+        ("AMUX_LINEAR_URL", linear_url.as_str()),
+    ];
+    let run_json = |id: &str| -> serde_json::Value {
+        serde_json::from_str(
+            &fs::read_to_string(s.amux_home.join("runs").join(id).join("run.json")).unwrap(),
+        )
+        .unwrap()
+    };
+
+    let st = s.amux_with(&["tracker"], &env, None);
+    assert!(st.out.contains("Linear  not set up"), "{}", st.out);
+    let r = s.amux_with(
+        &["spawn", "--issue", "linear:ENG-1", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert!(r.err.contains("No Linear API key"), "{}", r.err);
+
+    // Sign in: a key Linear turns down is not stored.
+    let bad = amux_stdin(&s, &["tracker", "login", "linear"], &env, "wrong\n");
+    assert_ne!(bad.code, 0);
+    assert!(bad.err.contains("401"), "{}", bad.err);
+    let key_file = s.amux_home.join("trackers/linear.token");
+    assert!(!key_file.exists());
+    let ok = amux_stdin(&s, &["tracker", "login", "linear"], &env, "lin_key\n");
+    assert_eq!(ok.code, 0, "{}", ok.err);
+    assert!(ok.out.contains("Ann <ann@acme.com>"), "{}", ok.out);
+    assert_eq!(fs::read_to_string(&key_file).unwrap(), "lin_key");
+    assert_eq!(
+        fs::metadata(&key_file).unwrap().permissions().mode() & 0o077,
+        0
+    );
+    assert!(s
+        .amux_with(&["tracker"], &env, None)
+        .out
+        .contains("Linear  a stored key"));
+
+    // One issue: its own branch, its text and comments as the prompt, a PR that links it.
+    let r = s.amux_with(
+        &[
+            "spawn",
+            "--issue",
+            "linear:eng-1",
+            "--prompt",
+            "Keep it small.",
+            "fake",
+        ],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let j = run_json("eng-1");
+    assert_eq!(j["worktree"]["branch"], "amux/eng-1");
+    assert_eq!(j["tracker"]["key"], "ENG-1");
+    assert_eq!(j["tracker"]["id"], "uuid-1");
+    let p = j["args"][0].as_str().unwrap();
+    assert!(
+        p.starts_with(
+            "Work on Linear issue ENG-1: Login fails on Safari\nhttps://linear.app/acme/issue/ENG-1/x"
+        ),
+        "{p}"
+    );
+    assert!(
+        p.contains("Steps for **1**.")
+            && p.contains("Comments:\n- Ann: First.\n- Bo: Second.")
+            && p.contains("Keep it small.")
+            && p.contains("\"Fixes ENG-1\""),
+        "{p}"
+    );
+    let pr = s.amux_with(&["pr", "eng-1"], &env, None);
+    assert_eq!(pr.code, 0, "{}", pr.err);
+    assert!(
+        pr.err.contains("posted the PR's link on ENG-1"),
+        "{}",
+        pr.err
+    );
+    let log = fs::read_to_string(s.home.join("gh-log")).unwrap();
+    assert!(
+        log.contains("--body Fixes ENG-1\n\nStarted by amux from Linear issue ENG-1: https://linear.app/acme/issue/ENG-1/x."),
+        "{log}"
+    );
+    let last = linear_log.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        last.contains("commentCreate")
+            && last.contains("\"issueId\":\"uuid-1\"")
+            && last.contains("https://github.com/o/r/pull/7"),
+        "{last}"
+    );
+    let r = s.amux_with(
+        &["spawn", "--issue", "linear:ENG-9", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert!(r.err.contains("Entity not found"), "{}", r.err);
+    assert!(!s.amux_home.join("runs/eng-9").exists());
+
+    // Intake from Linear: needs a label or team; starts each new issue once.
+    let r = s.amux_with(&["intake", "--from", "linear", "fake"], &env, Some(&repo));
+    assert!(r.err.contains("Give --label, --team"), "{}", r.err);
+    let linear_intake = [
+        "intake", "--from", "linear", "--label", "agent", "--team", "ENG", "fake",
+    ];
+    let r = s.amux_with(&linear_intake, &env, Some(&repo));
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(
+        r.out.contains("Started eng-2: ENG-2 Add dark mode"),
+        "{}",
+        r.out
+    );
+    assert!(!r.out.contains("eng-1:"), "{}", r.out);
+    let list = linear_log
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|q| q.contains("issues("))
+        .cloned()
+        .unwrap();
+    assert!(
+        list.contains(r#""labels":{"name":{"eqIgnoreCase":"agent"}}"#)
+            && list.contains(r#""team":{"key":{"eqIgnoreCase":"ENG"}}"#),
+        "{list}"
+    );
+    let again = s.amux_with(&linear_intake, &env, Some(&repo));
+    assert!(
+        again
+            .out
+            .contains("No new open Linear issues labeled agent in ENG."),
+        "{}",
+        again.out
+    );
+    let seen = fs::read_to_string(s.amux_home.join("intake.json")).unwrap();
+    assert!(
+        seen.contains("linear:ENG-1") && seen.contains("linear:ENG-2"),
+        "{seen}"
+    );
+
+    // The key from the environment works as well.
+    s.amux_with(&["tracker", "logout", "linear"], &env, None);
+    assert!(!key_file.exists());
+    let mut env_key = env.to_vec();
+    env_key.push(("LINEAR_API_KEY", "lin_key"));
+    let r = s.amux_with(
+        &[
+            "spawn",
+            "--issue",
+            "https://linear.app/acme/issue/ENG-2/x",
+            "--name",
+            "again",
+            "fake",
+        ],
+        &env_key,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+
+    // Jira: sign in with the site and email, then the same.
+    let login = ["tracker", "login", "jira", jira.as_str(), "me@x.com"];
+    let bad = amux_stdin(&s, &login, &env, "nope\n");
+    assert_ne!(bad.code, 0, "{}", bad.out);
+    let ok = amux_stdin(&s, &login, &env, "jtok\n");
+    assert_eq!(ok.code, 0, "{}", ok.err);
+    assert!(ok.out.contains("Me <me@x.com>"), "{}", ok.out);
+    let st = s.amux_with(&["tracker"], &env, None).out;
+    assert!(
+        st.contains(&format!("Jira    {jira} as me@x.com, with a stored token")),
+        "{st}"
+    );
+    let r = s.amux_with(
+        &["spawn", "--issue", "jira:PROJ-45", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let j = run_json("proj-45");
+    assert_eq!(j["worktree"]["branch"], "amux/proj-45");
+    let p = j["args"][0].as_str().unwrap();
+    assert!(
+        p.starts_with(&format!(
+            "Work on Jira issue PROJ-45: Export to CSV\n{jira}/browse/PROJ-45\n\nExport the table.\n\n- a point\n"
+        )),
+        "{p}"
+    );
+    assert!(p.contains("- Bo: Use commas.\n\n  - a point"), "{p}");
+    let pr = s.amux_with(&["pr", "proj-45"], &env, None);
+    assert_eq!(pr.code, 0, "{}", pr.err);
+    let log = fs::read_to_string(s.home.join("gh-log")).unwrap();
+    assert!(
+        log.contains("--body PROJ-45\n\nStarted by amux from Jira issue PROJ-45"),
+        "{log}"
+    );
+    let last = jira_log.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        last.starts_with("POST /rest/api/3/issue/PROJ-45/comment")
+            && last.contains(r#""href":"https://github.com/o/r/pull/7""#),
+        "{last}"
+    );
+    let r = s.amux_with(
+        &["spawn", "--issue", "jira:PROJ-99", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert!(r.err.contains("Issue does not exist"), "{}", r.err);
+
+    // Intake from Jira by label and project; the JQL amux builds goes to /search/jql.
+    let r = s.amux_with(
+        &[
+            "intake",
+            "--from",
+            "jira",
+            "--label",
+            "agent",
+            "--project",
+            "PROJ",
+            "--dry-run",
+            "fake",
+        ],
+        &env,
+        Some(&repo),
+    );
+    assert!(
+        r.out.contains("Would start proj-46: PROJ-46 Import CSV"),
+        "{}{}",
+        r.out,
+        r.err
+    );
+    let search = jira_log
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|q| q.contains("/search/jql"))
+        .cloned()
+        .unwrap();
+    assert!(
+        search.contains("jql=project+%3D+%22PROJ%22+AND+labels+%3D+%22agent%22")
+            || search.contains("jql=project%20%3D%20%22PROJ%22%20AND%20labels%20%3D%20%22agent%22"),
+        "{search}"
+    );
+    // proj-45 already has a run: marked as taken, and not started again.
+    let r = s.amux_with(
+        &[
+            "intake",
+            "--from",
+            "jira",
+            "--jql",
+            "project = PROJ",
+            "fake",
+        ],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(r.out.contains("Started proj-46: PROJ-46"), "{}", r.out);
+    assert!(!r.out.contains("proj-45:"), "{}", r.out);
+
+    // The comment on the issue can be turned off.
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("config.json")).unwrap())
+            .unwrap();
+    cfg["trackers"] = serde_json::json!({ "comment": false });
+    write(&s.amux_home.join("config.json"), &cfg.to_string());
+    let before = jira_log.lock().unwrap().len();
+    let pr = s.amux_with(&["pr", "proj-46"], &env, None);
+    assert_eq!(pr.code, 0, "{}", pr.err);
+    assert!(!pr.err.contains("posted"), "{}", pr.err);
+    assert_eq!(jira_log.lock().unwrap().len(), before);
+    for r in ["eng-1", "eng-2", "again", "proj-45", "proj-46"] {
+        s.amux(&["stop", r]);
+    }
+}

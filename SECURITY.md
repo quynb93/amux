@@ -16,7 +16,8 @@ amux sits next to your logins, so here is exactly what it touches:
 - **Tokens** stored with `--token` or `amux account token` are kept in the macOS Keychain (service `amux`, account `<cli>@<name>`). On Linux they're kept in a `0600` file inside `~/.amux/accounts/<cli>/<name>/`. At launch the token is put in the CLI's environment. On macOS the token is sent to the `security` tool on its standard input, so it never appears in the process list.
 - **`amux env`** prints the token for token-based accounts, because its output is meant for `eval`. Don't paste that output anywhere.
 - **Local files** that can contain prompts or transcripts (`launches.jsonl`, `handoffs/`) are created with mode `0600`. `~/.amux` and the overlays use `0700`.
-- **Network:** amux makes one request of its own, the daily update check to `api.github.com`, which sends nothing but a `User-Agent: amux/<version>` header. Everything else is the CLI you launch.
+- **Tracker keys** stored with `amux tracker login` (a Linear API key, a Jira API token) are kept in the macOS Keychain (service `amux`, account `tracker:linear` or `tracker:jira`), or in a `0600` file in `~/.amux/trackers/` on Linux. They're sent only to Linear's API or to the Jira site you gave.
+- **Network:** amux makes one request of its own by default, the daily update check to `api.github.com`, which sends nothing but a `User-Agent: amux/<version>` header. Phone notifications (`amux phone`) and Linear or Jira issues (`amux tracker`) add requests to the services you set up. Everything else is the CLI you launch.
 
 ## Scope
 

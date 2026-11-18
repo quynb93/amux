@@ -70,7 +70,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
 - **Sessions across accounts and CLIs.** List every session from every CLI in one place. Resume one under another account, or hand it to a different CLI with a transcript handoff.
 - **Parallel runs.** Start several agents in the background, across accounts and CLIs, each in its own git worktree if you like. See which are working and which are waiting, attach to any of them, and detach again.
 - **Auto-approve.** Permission prompts for what your rules allow, such as `cargo test` or edits inside the run's worktree, are answered for you. Everything else waits for you, and every answer is logged.
-- **Issues and schedules.** Turn a GitHub issue into a run on its own branch, pick up new issues by label, and run any amux command on a schedule, such as a morning triage.
+- **Issues and schedules.** Turn a GitHub, Linear or Jira issue into a run on its own branch, pick up new issues by label, and run any amux command on a schedule, such as a morning triage.
 - **Autopilot.** Label an issue and come back to a pull request that passes CI and review. amux opens the PR when the agent commits, hands failing checks and review comments back to it, and tells you when the PR is ready, or merges it.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
 - **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
@@ -515,11 +515,33 @@ amux intake --label agent-ready claude@work           # a run for each new open 
 
 `amux intake` remembers which issues it started (`~/.amux/intake.json`), so it never starts one twice, even after you remove the run. `--dry-run` lists what it would start.
 
+#### Linear and Jira
+
+Linear and Jira issues work the same way. amux reads the issue's title, description and comments from the tracker's API, and the run's branch is named after its key (`amux/eng-123`). The pull request still goes to GitHub:
+
+```sh
+amux tracker login linear                                     # paste a personal API key (Linear: Settings → Security & access)
+amux tracker login jira acme.atlassian.net me@acme.com        # paste an API token (id.atlassian.com → Security → API tokens)
+amux tracker                                                  # what's set up, and where each key comes from
+
+amux spawn --issue linear:ENG-123 claude                      # or the issue's Linear URL
+amux spawn --issue jira:PROJ-45 claude                        # or its Jira URL (…/browse/PROJ-45)
+amux intake --from linear --label agent-ready --team ENG claude@work
+amux intake --from jira --label agent-ready --project PROJ claude@work
+amux intake --from jira --jql 'project = PROJ AND sprint in openSprints() AND assignee is EMPTY' claude@work
+```
+
+- **Keys.** `amux tracker login` checks the key with the service (`--no-check` skips that) and keeps it in the macOS Keychain, or in a `0600` file in `~/.amux/trackers/` on Linux. Jira's site and email go in `~/.amux/trackers.json`. The environment wins over stored keys: `LINEAR_API_KEY`, and `JIRA_API_TOKEN` with `JIRA_URL` and `JIRA_EMAIL`. `amux tracker logout linear|jira` forgets a stored key.
+- **Which issues.** Linear intake takes open issues (not completed or canceled) with the label, in the team, oldest first; give `--label`, `--team` or both. Jira intake runs your `--jql` as is, or builds `project = … AND labels = … AND statusCategory != Done ORDER BY created ASC` from `--project` and `--label`. Jira descriptions and comments are rich text (ADF); amux turns them into plain text with paragraphs, lists, quotes and code blocks.
+- **The pull request.** For Linear, its body starts with `Fixes ENG-123`, so Linear's GitHub integration links it (and, by your team's workflow settings, closes the issue when the PR merges). For Jira, it starts with the key, and the agent is asked to start its commit message with the key, which is what Jira's GitHub integration looks for. Both have the issue's link.
+- **Back on the issue.** When amux opens the PR (`amux pr`, or autopilot), it comments on the Linear or Jira issue with the PR's link. Turn that off with `"trackers": { "comment": false }` in `~/.amux/config.json`. amux never changes an issue's status or fields.
+
 Any amux command can run by itself on a schedule. It runs in the folder you added it from:
 
 ```sh
 amux schedule add triage "weekdays 9:00" spawn --prompt "Triage yesterday's issues and label the easy ones agent-ready" claude
 amux schedule add issues "every 1h" intake --label agent-ready claude@work
+amux schedule add linear "every 1h" intake --from linear --label agent-ready --autopilot claude@work
 amux schedule add tidy "0 18 * * 5" rm --done
 amux schedule                   # what's scheduled, when it runs next, how it last went
 amux schedule run triage        # run it now, in this terminal
@@ -537,12 +559,13 @@ A run on autopilot takes itself from its first commit to a pull request that's r
 amux spawn --autopilot --prompt "Add a --json flag to status" claude   # tells you when the PR is ready
 amux spawn --issue 42 --autopilot=merge claude                         # and merges it
 amux intake --label agent-ready --autopilot claude@work                # each new issue, on autopilot
+amux intake --from linear --label agent-ready --autopilot claude@work  # the same for Linear (or --from jira)
 amux autopilot                     # every run on autopilot: its phase, PR and what it's waiting for
 amux autopilot tests --log         # what it did, step by step
 amux autopilot tests [--merge]     # turn it on for a run that's already going (--off turns it off)
 ```
 
-Once the agent's turn ends with commits on its branch, amux opens the pull request, as `amux pr` would. The agent only commits: amux pushes its new commits each time its turn ends, so agents that aren't allowed to `git push` (the `--starter` rules deny it) work fine. After that, amux checks the PR about once a minute:
+Once the agent's turn ends with commits on its branch, amux opens the pull request, as `amux pr` would. For a Linear or Jira issue, the PR links to it and amux comments the PR's link on the issue ([Linear and Jira](#linear-and-jira)). The agent only commits: amux pushes its new commits each time its turn ends, so agents that aren't allowed to `git push` (the `--starter` rules deny it) work fine. After that, amux checks the PR about once a minute:
 
 - **Failing checks** go back to the agent with the failed steps' logs, once per commit and at most 3 times (`--retries`). After that the run is marked stuck and you're told.
 - **New review comments**, from unresolved threads and reviews that request changes, go back to the agent once its turn is over. Each comment is sent once.
@@ -749,8 +772,9 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux logs <run>` | Print everything the run has output. |
 | `amux peek <run>` | Print what is on the run's screen right now, or its last screen if it has ended. |
 | `amux review <run> [--hunks] [--drop <file>[:<n>]]… [--no-tell] [--force] [--json]` | List a run's hunks, numbered per file, or drop some from its worktree and tell the agent. |
-| `amux spawn --issue <n> …` | Work on a GitHub issue in its own worktree; the PR says it fixes it. |
-| `amux intake [--label <l>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open GitHub issue (with the label). |
+| `amux spawn --issue <n>\|linear:<KEY>\|jira:<KEY> …` | Work on a GitHub, Linear or Jira issue in its own worktree; the PR says it fixes it and links to it. |
+| `amux intake [--from github\|linear\|jira] [--label <l>] [--team <key>] [--project <key>] [--jql <query>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open issue (with the label, in the team or project, or matching the JQL). |
+| `amux tracker [status] \| login linear \| login jira <site-url> <email> \| logout linear\|jira` | Store a Linear API key or a Jira API token, for `--issue` and `intake`. |
 | `amux spawn --autopilot[=merge] …` | Open the PR when the agent commits, hand back failing CI and review comments, and say when it's ready (or merge it). |
 | `amux autopilot [--json] \| <run> [--merge] [--retries <n>] \| <run> --off \| <run> --log` | Runs on autopilot and how far each has got; turn it on or off for a run. |
 | `amux schedule [add <name> "<when>" <command…> \| rm \| run \| pause \| resume \| log <name>]` | Run amux commands by themselves at set times. |
@@ -793,6 +817,8 @@ Commands never wait on the network. The notice comes from a cached result, which
   schedules.json       schedules (`amux schedule`); schedules/<name>.log is what each printed
   scheduler.log        when the scheduler started and stopped, and commands it couldn't start
   intake.json          issues `amux intake` started, per repo
+  trackers.json        Jira's site and email (`amux tracker login jira`; no secrets)
+  trackers/            Linear and Jira keys on Linux (mode 0600); on macOS they're in the Keychain
   autopilot.on         present while runs are on autopilot, so the scheduler keeps going
   limits.json          accounts that hit their usage limit, until their reset
   usage/<cli>@<name>.json  each account's latest 5-hour and 7-day usage (`amux usage`)
@@ -806,8 +832,10 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `AMUX_ACCOUNT` | Set by amux in the launched CLI's environment, e.g. `claude@work`. Read it from hooks or scripts. |
 | `AMUX_RUN` | Set in the CLI's environment when it was started by `amux spawn`: the run's name. |
 | `AMUX_SCHEDULE` | Set for a command started by a schedule: the schedule's name. |
+| `LINEAR_API_KEY` | A Linear API key, used instead of the stored one. |
+| `JIRA_API_TOKEN`, `JIRA_URL`, `JIRA_EMAIL` | A Jira API token, site and email, used instead of the stored ones. |
 
-amux makes no network requests of its own, except the daily update check to `api.github.com` and, once you set them up with `amux phone`, notifications to the service you chose.
+amux makes no network requests of its own, except the daily update check to `api.github.com`, notifications to the service you chose once you set them up with `amux phone`, and, when you use Linear or Jira issues, requests to `api.linear.app` or your Jira site with the key you gave it (reading issues, and the comment with the PR's link).
 
 ## Moving from separate config dirs
 
@@ -843,7 +871,7 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub, Linear and Jira issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
 1. **Web push from the phone app**, now that it can be served over HTTPS.
 2. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.

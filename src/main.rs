@@ -42,6 +42,8 @@ mod commands {
     #[cfg(unix)]
     pub mod theme;
     #[cfg(unix)]
+    pub mod tracker;
+    #[cfg(unix)]
     pub mod usage;
     #[cfg(unix)]
     pub mod verify;
@@ -99,7 +101,8 @@ Accounts:
 Parallel runs (each CLI in the background, in its own terminal):
   amux spawn [--on <machine>[:<dir>]] [--stall <30m>] [--max-time <4h>] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
       --no-auto-approve: every permission prompt waits for you, whatever `amux allow` says
-      --issue <n>: work on a GitHub issue (its own worktree; the PR says it fixes it)
+      --issue <n>|linear:<KEY>|jira:<KEY>: work on a GitHub, Linear or Jira issue (its own
+        worktree; the PR says it fixes it and links to it)
       --autopilot[=merge]: open the PR when it commits, hand back failing CI and review
         comments, and say when it's ready to merge (=merge: merge it)
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
@@ -155,6 +158,9 @@ Parallel runs (each CLI in the background, in its own terminal):
       Run an amux command by itself: \"every 1h\", \"weekdays 9:00\", or cron (\"0 9 * * 1-5\")
   amux intake [--label <l>] [--limit <n>] <provider>[@name]
       A run for each new open GitHub issue (with the label), e.g. on a schedule
+      --from linear --label <l> [--team <key>] | --from jira --jql <query> | --label <l> --project <key>
+  amux tracker [status] | login linear | login jira <site-url> <email> | logout linear|jira
+      Sign in to Linear or Jira (key in the Keychain), for --issue and intake
   amux autopilot [<run> [--merge] [--retries <n>] | <run> --off | <run> --log]
       Runs on autopilot and how far each has got; turn it on or off for a run
   amux ui                                  Watch, attach to, start and stop runs in one screen
@@ -321,6 +327,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "intake" => commands::intake::intake_cmd(rest),
         #[cfg(unix)]
+        "tracker" | "trackers" => commands::tracker::tracker_cmd(rest),
+        #[cfg(unix)]
         "report" => commands::team::report_cmd(rest),
         #[cfg(unix)]
         "theme" | "themes" => commands::theme::theme_cmd(rest),
@@ -349,7 +357,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "review" | "usage" | "failover" | "gc"
         | "try" | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" | "phone"
-        | "theme" | "themes" => {
+        | "theme" | "themes" | "tracker" | "trackers" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

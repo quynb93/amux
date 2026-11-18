@@ -17,7 +17,8 @@ remote.rs        other machines: SSH, forwarding, the socket pipe
 plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:
                    slots (machine limits), verify (tests or push), github (PR, CI),
-                   issues (GitHub issues as prompts), approve (auto-approve rules), review (diff and line comments),
+                   issues (GitHub, Linear and Jira issues as prompts), trackers (Linear and Jira APIs),
+                   approve (auto-approve rules), review (diff and line comments),
                    autopilot (commits → PR → CI and review feedback → ready or merged),
                    limits and quota (usage limits, each account's usage, picking accounts).
                    Nothing here prints.
@@ -28,6 +29,8 @@ git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   founda
 ```
 
 `commands/schedule.rs` also holds the scheduler, `amux __scheduler`: one process (it holds `scheduler.lock`) that starts each schedule's amux command when it's due. `main.rs` starts it on any command when schedules exist and it isn't running. It also drives autopilot (`work/autopilot.rs`): each tick it steps every run with an active `autopilot.json`, at most once per poll (60 s), and it keeps going while `autopilot.on` exists. A step asks `gh` for the PR, its checks and its reviews (one GraphQL call), types into the agent only when its turn has ended, and records each change of phase in `autopilot.log`.
+
+Issues come from GitHub through `gh`, and from Linear and Jira through `work/trackers.rs`, which makes its HTTPS requests with `ureq` (already used for the update check and phone notifications): GraphQL to Linear, REST v3 to Jira Cloud with basic auth, `/rest/api/3/search/jql` for intake. Jira's rich text (ADF) is turned into plain text there. A run on a Linear or Jira issue keeps it in `run.json` as `tracker` (kind, key, URL, Linear's internal id), which `work/github.rs` uses for the PR body and the comment back on the issue. Tests point `AMUX_LINEAR_URL` and `JIRA_URL` at a local server, and set `AMUX_KEYCHAIN=0` so keys go to files instead of the Keychain.
 
 Remote runs reuse everything: `runs::client::connect("gpu:x")` returns a socket that `remote.rs` bridges to `amux __pipe x` over SSH. Previews, typing and attaching work on them unchanged. `serve.rs` keeps to the CLI's commands on purpose, so the phone can't do anything the CLI can't.
 
@@ -150,7 +153,8 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `approve.json` | `amux allow` | Auto-approve rules: allow and deny lists, read by each run host every few seconds |
 | `runs/<id>/autopilot.json`, `autopilot.log`, `autopilot.on` | `amux spawn --autopilot`, `amux autopilot`, the scheduler | A run's autopilot settings and progress (phase, CI fixes sent, review comments sent), its history, and the marker that keeps the scheduler going |
 | `runs/<id>/approvals.jsonl` | the run host | Each permission prompt it judged: what it asked, approved, denied or left for you, and why |
-| `intake.json` | `amux intake` | Issue numbers already started, per repo, so none starts twice |
+| `intake.json` | `amux intake` | Issues already started, per repo, so none starts twice: GitHub numbers, and `linear:ENG-1` / `jira:PROJ-2` keys |
+| `trackers.json`, `trackers/<linear\|jira>.token` | `amux tracker login` | Jira's site and email; on Linux, the Linear key and Jira token (mode 0600). On macOS the keys are in the Keychain (`tracker:linear`, `tracker:jira`). |
 | `limits.json` | the run host, `amux usage --clear` | Accounts that hit their usage limit, until the reset time |
 | `usage/<p>@<n>.json` | `amux __statusline` (Claude Code's status line), the run host and `amux usage` (Codex session files) | The account's latest 5-hour and 7-day usage and reset times (work/quota.rs). Windows past their reset are ignored when read. The run host checks it every 20 s, to move a run before the limit (`limits.switchAt`) once its turn has ended |
 | `statusline.json` | `amux usage --track on` | The `statusLine` it replaced in Claude Code's shared `settings.json`, which `amux __statusline` runs and `--track off` puts back |

@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const SPAWN_USAGE: &str =
-    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>] [--autopilot[=merge]] [--attach] <provider>[@name] [args...]";
+    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>|linear:<KEY>|jira:<KEY>] [--autopilot[=merge]] [--attach] <provider>[@name] [args...]";
 
 /// What an agent on autopilot is told after its prompt.
 const AUTOPILOT_POSTSCRIPT: &str = "\n\nWhen you're done, commit your work on this branch, and don't push: amux pushes it, opens the pull request, and brings you CI failures and review comments to fix.";
@@ -37,7 +37,7 @@ struct SpawnOpts {
     prompt: Option<String>,
     /// Permission prompts always wait for you (`--no-auto-approve`).
     no_auto: bool,
-    /// A GitHub issue to work on: it becomes the first prompt (`--issue`).
+    /// A GitHub, Linear or Jira issue to work on: it becomes the first prompt (`--issue`).
     issue: Option<String>,
     /// Autopilot (`--autopilot`, `--autopilot=merge`): Some(true) merges when ready.
     autopilot: Option<bool>,
@@ -288,7 +288,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     };
     let first = match &issue {
         Some(i) => {
-            o.name.get_or_insert_with(|| format!("issue-{}", i.number));
+            o.name.get_or_insert_with(|| i.run_name());
             Some(crate::work::issues::prompt(i, o.prompt.as_deref()))
         }
         None => o.prompt.clone(),
@@ -332,7 +332,8 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         group: o.group.clone(),
         lead: lead.clone(),
         team: o.workers,
-        issue: issue.as_ref().map(|i| i.number),
+        issue: issue.as_ref().and_then(|i| i.github_number()),
+        tracker: issue.as_ref().and_then(|i| i.tracked()),
         auto_approve: o.no_auto.then_some(false),
         ..Default::default()
     };
