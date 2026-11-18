@@ -19,6 +19,7 @@ mod commands {
     #[cfg(unix)]
     pub mod login_item;
     pub mod maintenance;
+    pub mod map;
     #[cfg(unix)]
     pub mod notes;
     #[cfg(unix)]
@@ -97,6 +98,8 @@ Accounts:
   amux account baseurl <provider>@<name> <url|off>   Send the CLI's API requests to a gateway
   amux account status [<provider>@<name>]  Ask each CLI who is signed in
   amux account rm <provider>@<name> [--purge]
+  amux map [<dir> <provider>@<name> | --rm <dir> [<provider>]]
+      Use that account for plain `amux <provider>` in the folder and below; lists with no args
 
 Parallel runs (each CLI in the background, in its own terminal):
   amux spawn [--on <machine>[:<dir>]] [--stall <30m>] [--max-time <4h>] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
@@ -257,6 +260,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         }
         "sessions" => session_cmds::sessions_cmd(rest),
         "resume" => session_cmds::resume_cmd(rest),
+        "map" => commands::map::map_cmd(rest),
         "providers" => maintenance::providers_cmd(),
         "env" => maintenance::env_cmd(rest),
         "sync" => maintenance::sync_cmd(rest),

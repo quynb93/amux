@@ -63,7 +63,7 @@ On macOS, Claude Code stores the OAuth login in the Keychain under a service nam
 
 `amux claude@work --model opus` runs these steps:
 
-1. **Resolve the account** (`store.rs`): `claude@work` is looked up in `accounts.json`. Plain `claude` falls back to the configured default, or the only account.
+1. **Resolve the account** (`store.rs`): `claude@work` is looked up in `accounts.json`. Plain `claude` uses the account `amux map` set for the current folder or the deepest folder above it, else the configured default, else the only account.
 2. **Sync the overlay** (`overlay.rs`): link new shared entries, repoint wrong links, prune dangling ones, and unlink entries that have since become private. Real files are never deleted. Real files that should be shared are reported as *stray*, and `amux sync --adopt` can move them.
 3. **Build the environment** (`launch.rs`): copy the current environment and remove variables that would point at another account (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, …). Then set the home variable, `AMUX_ACCOUNT`, and the account's options: privacy variables, a token from `secrets.rs`, and the base URL.
 4. **Log and run**: append a line to `launches.jsonl` (mode 0600), then `exec` the CLI. amux replaces itself with the CLI process, so the CLI owns the terminal, receives Ctrl-C directly, and its exit code is the exit code.
@@ -135,7 +135,7 @@ A sandboxed run (`amux spawn --sandbox`, `runs/sandbox.rs`) works the same way, 
 
 | Path | Written by | Contents |
 |---|---|---|
-| `config.json` | `amux account default`, the user | Provider overrides and default accounts |
+| `config.json` | `amux account default`, `amux map`, the user | Provider overrides, default accounts, and accounts per folder (`folders`) |
 | `accounts.json` | `amux account …` | Account list: provider, name, auth type, options. No secrets. |
 | `accounts/<p>/<n>/` | `sync_overlay`, the CLI | The overlay, plus a `token` file on Linux |
 | `handoffs/*.md` | `amux resume` | Transcripts for cross-CLI handoff (mode 0600) |

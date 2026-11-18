@@ -244,6 +244,47 @@ fn resolves_accounts_by_default_or_single_account() {
 }
 
 #[test]
+fn maps_a_folder_to_an_account() {
+    let s = Sandbox::new("map");
+    s.amux(&["account", "add", "fake", "a", "--no-login"]);
+    s.amux(&["account", "add", "fake", "b", "--no-login"]);
+    s.amux(&["account", "default", "fake@a"]);
+    let app = s.home.join("src/app");
+    let deep = app.join("web");
+    fs::create_dir_all(&deep).unwrap();
+    let acct = |dir: &Path, who: &str| {
+        let r = s.amux_with(&[who], &[], Some(dir));
+        assert_eq!(r.code, 0, "{}", r.err);
+        lines(&r.out, "ENV AMUX_ACCOUNT=").join(",")
+    };
+
+    assert!(s.amux(&["map"]).out.contains("No folders mapped"));
+    let r = s.amux(&["map", app.to_str().unwrap(), "fake@nope"]);
+    assert_eq!(r.code, 1);
+    assert!(r.err.contains("No account \"fake@nope\""), "{}", r.err);
+    let r = s.amux_with(&["map", ".", "fake@b"], &[], Some(&app));
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(s.amux(&["map"]).out.contains("~/src/app  fake@b"));
+
+    // The map beats the default, in the folder and below; a named account beats the map.
+    assert_eq!(acct(&deep, "fake"), "fake@b");
+    assert_eq!(acct(&s.home, "fake"), "fake@a");
+    assert_eq!(acct(&deep, "fake@a"), "fake@a");
+    let r = s.amux_with(&["spawn", "fake"], &[], Some(&deep));
+    assert!(r.err.contains("as fake@b (map for ~/src/app)"), "{}", r.err);
+    wait_ps(&s, "fake-1", "exited");
+
+    // Removing the account drops its mappings; --rm removes one by hand.
+    s.amux_with(&["map", ".", "fake@a"], &[], Some(&deep));
+    s.amux(&["account", "rm", "fake@b"]);
+    assert!(!s.amux(&["map"]).out.contains("fake@b"));
+    assert_eq!(acct(&deep, "fake"), "fake@a");
+    let r = s.amux(&["map", "--rm", deep.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(s.amux(&["map"]).out.contains("No folders mapped"));
+}
+
+#[test]
 fn reports_an_unparseable_config() {
     let s = Sandbox::new("badconfig");
     write(&s.amux_home.join("config.json"), "{ not json");

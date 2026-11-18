@@ -299,8 +299,9 @@ fn remove(argv: &[String]) -> Result<i32> {
         if let Some(d) = cfg.defaults.as_mut() {
             d.remove(&acct.provider);
         }
-        save_config(&cfg)?;
     }
+    crate::commands::map::forget_account(&mut cfg.folders, &acct.provider, &acct.name);
+    save_config(&cfg)?;
     delete_token(&acct);
     let dir = account_dir(&acct);
     if a.has("purge") {

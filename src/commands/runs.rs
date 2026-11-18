@@ -4,7 +4,7 @@ use crate::git::git;
 use crate::launch::{log_launch, prepare};
 use crate::paths::{self, tildify};
 use crate::runs::{self, attach::attach, Run, State, Worktree};
-use crate::store::{resolve_account, valid_name};
+use crate::store::{resolve_account, resolve_account_in, valid_name, Chosen};
 use crate::util::{ago, need, one_line, table};
 use crate::{fsx, time};
 use anyhow::{anyhow, bail, Context, Result};
@@ -269,18 +269,30 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             bail!("Run names use letters, digits, '.', '_' and '-'.");
         }
     }
-    // No account named: one that hasn't hit its usage limit and, with `limits.switchAt`,
-    // the one with the most headroom.
-    let acct = if acct_ref.contains('@') {
-        resolve_account(acct_ref)?
-    } else {
-        let default = resolve_account(acct_ref);
-        match crate::work::limits::pick_for_spawn(acct_ref, default.as_ref().ok()) {
-            Some((other, why)) => {
-                eprintln!("amux: {why}");
-                other
+    let cwd = match &o.dir {
+        Some(d) => {
+            let p = paths::expand_home(d);
+            if !p.is_dir() {
+                bail!("No folder {}.", tildify(&p));
             }
-            None => default?,
+            p
+        }
+        None => std::env::current_dir()?,
+    };
+    // A name given outright wins; then `amux map` for the run's folder, then the default.
+    // No account named and none mapped: one that hasn't hit its usage limit and, with
+    // `limits.switchAt`, the one with the most headroom.
+    let (acct, chosen) = match resolve_account_in(acct_ref, Some(&cwd)) {
+        Ok((a, c @ (Chosen::Named | Chosen::Folder(_)))) => (a, c),
+        picked => {
+            let default = picked.as_ref().ok().map(|(a, _)| a);
+            match crate::work::limits::pick_for_spawn(acct_ref, default) {
+                Some((other, why)) => {
+                    eprintln!("amux: {why}");
+                    (other, Chosen::Named)
+                }
+                None => picked?,
+            }
         }
     };
     // An easy mistake, for people and agents alike: amux's options after the account go
@@ -292,16 +304,6 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         );
     }
     let (spec, mut env) = prepare(&acct)?;
-    let cwd = match &o.dir {
-        Some(d) => {
-            let p = paths::expand_home(d);
-            if !p.is_dir() {
-                bail!("No folder {}.", tildify(&p));
-            }
-            p
-        }
-        None => std::env::current_dir()?,
-    };
     // Started from inside a run: it's that run's worker, within its team's limits.
     let lead = match o.adopt {
         Some(_) => None,
@@ -450,7 +452,8 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         );
         return Ok(0);
     }
-    eprintln!("amux: started {id} as {} in {place}", acct.id());
+    let why = chosen.note().map(|n| format!(" ({n})")).unwrap_or_default();
+    eprintln!("amux: started {id} as {}{why} in {place}", acct.id());
     if o.attach {
         return attach(&runs::load(&id)?);
     }
