@@ -17,7 +17,7 @@ const SPAWN_USAGE: &str =
     "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>] [--autopilot[=merge]] [--attach] <provider>[@name] [args...]";
 
 /// What an agent on autopilot is told after its prompt.
-const AUTOPILOT_POSTSCRIPT: &str = "\n\nWhen you're done, commit your work on this branch. amux opens the pull request, and brings you CI failures and review comments to fix.";
+const AUTOPILOT_POSTSCRIPT: &str = "\n\nWhen you're done, commit your work on this branch, and don't push: amux pushes it, opens the pull request, and brings you CI failures and review comments to fix.";
 
 #[derive(Default)]
 struct SpawnOpts {

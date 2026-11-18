@@ -4,6 +4,16 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.10] - 2026-11-18
+
+Fixes from running autopilot on real issues with Claude Code.
+
+### Fixed
+
+- Auto-approve read no Bash command in Claude Code 2.1.3xx, which draws a `│` bar before each command line, so every command prompt waited for you. Commands are read without the bar again.
+- Autopilot pushes the agent's new commits itself when its turn ends, and asks the agent only to commit. Before, CI fixes and review changes waited on the agent's own `git push`, which the starter rules deny, so the run sat at a permission prompt.
+- Autopilot no longer calls a PR with merge conflicts ready, and with `=merge` no longer gets stuck trying to merge it. It asks the agent to merge the base branch in and resolve the conflicts, then pushes the result. It also waits while GitHub is still working out whether the PR merges.
+
 ## [0.11.9] - 2026-11-18
 
 ### Added

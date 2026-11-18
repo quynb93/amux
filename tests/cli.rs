@@ -3171,14 +3171,14 @@ fn autopilot_takes_a_run_from_commits_to_a_merged_pr() {
             &format!("[{{\"name\":\"test\",\"bucket\":\"{bucket}\",\"link\":\"https://github.com/o/r/actions/runs/42/job/1\",\"workflow\":\"CI\"}}]"),
         )
     };
-    let review = |head: &str, decision: &str, threads: &str| {
+    let review = |head: &str, decision: &str, threads: &str, mergeable: &str| {
         write(
             &f("gh-review"),
-            &format!("{{\"data\":{{\"repository\":{{\"pullRequest\":{{\"headRefOid\":\"{head}\",\"reviewDecision\":\"{decision}\",\"reviews\":{{\"nodes\":[]}},\"reviewThreads\":{{\"nodes\":[{threads}]}}}}}}}}}}"),
+            &format!("{{\"data\":{{\"repository\":{{\"pullRequest\":{{\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeable\":\"{mergeable}\",\"reviewDecision\":\"{decision}\",\"reviews\":{{\"nodes\":[]}},\"reviewThreads\":{{\"nodes\":[{threads}]}}}}}}}}}}"),
         )
     };
     checks("fail");
-    review("h1", "", "");
+    review("h1", "", "", "MERGEABLE");
     let env = [
         ("FAKE_CHAT", "1"),
         ("AMUX_GH", gh.to_str().unwrap()),
@@ -3243,6 +3243,27 @@ fn autopilot_takes_a_run_from_commits_to_a_merged_pr() {
     eventually("the agent got the CI failure", || {
         s.amux(&["logs", "ap"]).out.contains("parser-broke")
     });
+    assert!(s
+        .amux(&["logs", "ap"])
+        .out
+        .contains("Don't push: amux pushes"));
+
+    // The agent's fix is committed, not pushed: amux pushes it once the turn is over.
+    write(&wt.join("c.txt"), "z");
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-qm", "fix"]);
+    watch("fix pushed", "pushed 1 new commit");
+    let pushed = Command::new("git")
+        .args([
+            "-C",
+            remote.to_str().unwrap(),
+            "log",
+            "--oneline",
+            "amux/ap",
+        ])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&pushed.stdout).contains("fix"));
 
     // A new commit with a review comment: handed back once the agent's turn ends.
     checks("pending");
@@ -3250,6 +3271,7 @@ fn autopilot_takes_a_run_from_commits_to_a_merged_pr() {
         "h2",
         "CHANGES_REQUESTED",
         r#"{"isResolved":false,"path":"b.txt","line":1,"comments":{"nodes":[{"id":"C1","body":"Say why.","author":{"login":"ann"}}]}}"#,
+        "MERGEABLE",
     );
     watch("review handed back", "handed back 1 review comment");
     eventually("the agent got the review", || {
@@ -3258,9 +3280,19 @@ fn autopilot_takes_a_run_from_commits_to_a_merged_pr() {
             .contains("ann on b.txt:1: Say why.")
     });
 
-    // Green and approved: merged, and the daemon has nothing left to do.
+    // Green but in conflict with main: the agent is asked to merge main in.
     checks("pass");
-    review("h3", "APPROVED", "");
+    review("h3", "APPROVED", "", "CONFLICTING");
+    watch(
+        "conflicts handed back",
+        "handed back merge conflicts with main",
+    );
+    eventually("the agent got the conflicts", || {
+        s.amux(&["logs", "ap"]).out.contains("merge origin/main")
+    });
+
+    // Green and approved: merged, and the daemon has nothing left to do.
+    review("h4", "APPROVED", "", "MERGEABLE");
     watch("merged", "merged");
     let log = fs::read_to_string(f("gh-log")).unwrap();
     assert!(log.contains("pr merge 7 --squash"), "{log}");

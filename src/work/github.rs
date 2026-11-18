@@ -273,7 +273,13 @@ pub fn refresh_checks(run: &Run) -> Result<(PullRequest, Vec<Check>)> {
 
 /// Hands the failing checks, with the end of their failed steps' logs, to the run's agent
 /// to fix. Returns how many checks failed.
-pub fn send_ci_failures(run: &Run, pr: &PullRequest, checks: &[Check]) -> Result<usize> {
+/// `amux_pushes`: autopilot pushes the agent's commits, so it's asked only to commit.
+pub fn send_ci_failures(
+    run: &Run,
+    pr: &PullRequest,
+    checks: &[Check],
+    amux_pushes: bool,
+) -> Result<usize> {
     if pr.failing.is_empty() {
         bail!("No failing checks to send ({}).", pr.checks);
     }
@@ -306,7 +312,11 @@ pub fn send_ci_failures(run: &Run, pr: &PullRequest, checks: &[Check]) -> Result
             "\n\nThe end of the failed steps' logs:\n\n```\n{tail}\n```"
         ));
     }
-    msg.push_str("\n\nPlease find the cause, fix it, commit, and push again.");
+    msg.push_str(if amux_pushes {
+        "\n\nPlease find the cause, fix it, and commit. Don't push: amux pushes your commits when your turn ends."
+    } else {
+        "\n\nPlease find the cause, fix it, commit, and push again."
+    });
     send_text(run, &msg, true)?;
     Ok(pr.failing.len())
 }
@@ -342,9 +352,13 @@ pub struct Review {
     /// APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or empty when no review is required.
     pub decision: String,
     pub feedback: Vec<Feedback>,
+    /// MERGEABLE, CONFLICTING, or UNKNOWN while GitHub works it out.
+    pub mergeable: String,
+    /// The branch the PR merges into.
+    pub base: String,
 }
 
-const REVIEW_QUERY: &str = "query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){headRefOid reviewDecision reviews(last:50){nodes{id state body author{login}}} reviewThreads(first:100){nodes{isResolved path line comments(first:50){nodes{id body author{login}}}}}}}}";
+const REVIEW_QUERY: &str = "query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){headRefOid baseRefName mergeable reviewDecision reviews(last:50){nodes{id state body author{login}}} reviewThreads(first:100){nodes{isResolved path line comments(first:50){nodes{id body author{login}}}}}}}}";
 
 /// Reads the reviews and unresolved review threads of the run's PR #`number`.
 pub fn review(run: &Run, number: u64) -> Result<Review> {
@@ -411,20 +425,45 @@ fn parse_review(pr: &Value) -> Review {
         head: s(&pr["headRefOid"]),
         decision: s(&pr["reviewDecision"]),
         feedback,
+        mergeable: s(&pr["mergeable"]),
+        base: s(&pr["baseRefName"]),
     }
 }
 
 /// Hands review feedback to the run's agent.
-pub fn send_feedback(run: &Run, pr: &PullRequest, items: &[Feedback]) -> Result<()> {
+pub fn send_feedback(
+    run: &Run,
+    pr: &PullRequest,
+    items: &[Feedback],
+    amux_pushes: bool,
+) -> Result<()> {
     let mut msg = format!("Review feedback on PR #{} ({}):\n", pr.number, pr.url);
     for f in items {
         msg.push_str(&format!("\n- {}", f.text));
     }
-    msg.push_str(
+    msg.push_str(if amux_pushes {
+        "\n\nPlease address it: change what should change and commit (don't push: amux pushes \
+         your commits when your turn ends). Where you disagree, say why instead."
+    } else {
         "\n\nPlease address it: change what should change, commit, and push again. \
-         Where you disagree, say why instead.",
-    );
+         Where you disagree, say why instead."
+    });
     send_text(run, &msg, true)
+}
+
+/// Asks the run's agent to bring the PR's base branch in and resolve the conflicts.
+pub fn send_conflicts(run: &Run, pr: &PullRequest, base: &str) -> Result<()> {
+    let base = if base.is_empty() { "main" } else { base };
+    send_text(
+        run,
+        &format!(
+            "PR #{} ({}) has merge conflicts with {base}. Please fetch it and merge origin/{base} \
+             into this branch (don't rebase), resolve the conflicts so both changes are kept, run \
+             the tests, and commit the merge. Don't push: amux pushes your commits when your turn ends.",
+            pr.number, pr.url
+        ),
+        true,
+    )
 }
 
 /// Merges the run's PR #`number` (squash, or `method`: merge, squash or rebase).
@@ -493,7 +532,7 @@ mod tests {
     #[test]
     fn reads_reviews_and_open_threads() {
         let v: Value = serde_json::from_str(
-            r#"{"headRefOid":"abc","reviewDecision":"CHANGES_REQUESTED",
+            r#"{"headRefOid":"abc","mergeable":"CONFLICTING","baseRefName":"main","reviewDecision":"CHANGES_REQUESTED",
             "reviews":{"nodes":[
               {"id":"R1","state":"CHANGES_REQUESTED","body":"Needs a test.","author":{"login":"ann"}},
               {"id":"R2","state":"APPROVED","body":"ok","author":{"login":"bo"}},
@@ -506,6 +545,10 @@ mod tests {
         let r = parse_review(&v);
         assert_eq!(r.head, "abc");
         assert_eq!(r.decision, "CHANGES_REQUESTED");
+        assert_eq!(
+            (r.mergeable.as_str(), r.base.as_str()),
+            ("CONFLICTING", "main")
+        );
         let got: Vec<_> = r
             .feedback
             .iter()

@@ -77,7 +77,7 @@ pub fn checks_cmd(argv: &[String]) -> Result<i32> {
         }
     }
     if send {
-        let n = github::send_ci_failures(&run, &pr, &checks)?;
+        let n = github::send_ci_failures(&run, &pr, &checks, false)?;
         println!(
             "Sent {n} failing check{} to {}.",
             if n == 1 { "" } else { "s" },
