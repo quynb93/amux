@@ -138,6 +138,9 @@ impl App {
         if row.run.sandbox.is_some() {
             where_.push_str(" · sandboxed");
         }
+        if let Some(p) = self.live_port(&row.run) {
+            where_.push_str(&format!(" · :{p}"));
+        }
         let mut what = match (&row.run.waiting, &row.run.status) {
             (Some(wt), _) => wt.reason.clone(),
             (None, Some(s)) => s.message.clone().unwrap_or_default(),

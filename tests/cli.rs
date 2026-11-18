@@ -2358,6 +2358,38 @@ fn shares_notes_ports_and_env_files_between_parallel_runs() {
         "API_KEY=local\n"
     );
 
+    // The UI and `amux open` show the port once a dev server listens on it.
+    let opened = s.home.join("opened");
+    let browser = s.home.join("bin/browser");
+    write(
+        &browser,
+        &format!("#!/bin/sh\necho \"$1\" > {}\n", opened.display()),
+    );
+    fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = [("BROWSER", browser.to_str().unwrap())];
+    let r = s.amux_with(&["open", "p1"], &env, None);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.err.contains("Nothing is listening on port 41000"),
+        "{}",
+        r.err
+    );
+    // Something else on this machine may hold 41000; then there's nothing to check.
+    if let Ok(server) = std::net::TcpListener::bind("127.0.0.1:41000") {
+        let ui = s.amux(&["ui", "--dump", "--size", "24x140", "--select", "p1"]);
+        assert!(ui.out.contains("localhost:41000 (o opens)"), "{}", ui.out);
+        assert!(ui.out.contains("· :41000"), "{}", ui.out);
+        assert!(!ui.out.contains(":41010"), "p2 serves nothing: {}", ui.out);
+        let r = s.amux_with(&["open", "p1"], &env, None);
+        assert_eq!(r.code, 0, "{}", r.err);
+        assert_eq!(r.out, "http://localhost:41000\n");
+        assert_eq!(
+            fs::read_to_string(&opened).unwrap(),
+            "http://localhost:41000\n"
+        );
+        drop(server);
+    }
+
     let b = s.amux_with(
         &["broadcast", "main", "changed:", "rebase", "--note"],
         &[],

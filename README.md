@@ -256,7 +256,7 @@ Or see them all at once with **`amux ui`**: a list of runs with their state, and
 - **Views.** ![The board view](<https://raw.githubusercontent.com/quynb93/amux/main/docs/images/amux-board.png>)
 
   **`b`** shows a board with a column per state: needs you, working, idle and done. Each run is a card, and ←→ and ↑↓ move between cards. **`t`** shows tiles: up to four live runs side by side, each a terminal you can click into and type into. `b` or `t` again goes back to the list, and `/view` switches too.
-- **In the list**, letters are shortcuts: `a` gives the run the whole terminal, Tab jumps to the next run that is waiting for you, `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it, and `c` reviews its changes (space marks a hunk to drop, `D` drops the marked ones). `?` lists every key. Quitting the UI leaves the runs going.
+- **In the list**, letters are shortcuts: `a` gives the run the whole terminal, Tab jumps to the next run that is waiting for you, `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it, `o` opens its dev server, and `c` reviews its changes (space marks a hunk to drop, `D` drops the marked ones). `?` lists every key. Quitting the UI leaves the runs going.
 
 Press **`/`** for the command palette. Type part of a command and its argument completes from your runs, accounts or themes:
 
@@ -364,6 +364,7 @@ amux broadcast "main changed: rebase before you push" --note   # tell the runnin
 
 - Notes are kept in the repo's git folder (`.git/amux/notes.jsonl`), so every worktree sees them and they're never committed.
 - Each worktree run gets its own `PORT` and `AMUX_PORT` (a block of ten from 41000) and its own `COMPOSE_PROJECT_NAME`. Most dev servers pick up `PORT`.
+- Once something listens on a run's `PORT`, `amux ui` shows it in the run's row (`:41000`) and in the preview's title, and **`o`** opens `http://localhost:<port>` in your browser. From the shell, `amux open <run>` does the same. The UI checks the ports every few seconds in the background with a quick connect to localhost. The browser is `$BROWSER` if set, else `open` on macOS and `xdg-open` on Linux.
 - New worktrees get the main checkout's `.env`, `.env.local` and `.env.development.local`, which git doesn't carry. Change the list with `"worktree": { "copy": [".env", "config/local.yml"] }`, or turn ports off with `"worktree": { "ports": false }`.
 
 ### Best of N
@@ -830,6 +831,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux spawn --issue <n>\|linear:<KEY>\|jira:<KEY> …` | Work on a GitHub, Linear or Jira issue in its own worktree; the PR says it fixes it and links to it. |
 | `amux intake [--from github\|linear\|jira] [--label <l>] [--team <key>] [--project <key>] [--jql <query>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open issue (with the label, in the team or project, or matching the JQL). |
 | `amux tracker [status] \| login linear \| login jira <site-url> <email> \| logout linear\|jira` | Store a Linear API key or a Jira API token, for `--issue` and `intake`. |
+| `amux open <run>` | Open a worktree run's dev server (`http://localhost:<PORT>`) in the browser, once something listens there. |
 | `amux spawn --autopilot[=merge] …` | Open the PR when the agent commits, hand back failing CI and review comments, and say when it's ready (or merge it). |
 | `amux spawn --sandbox[=docker\|podman] [--image <image>] [--network on\|off] [--no-sandbox] …` | Run the CLI in a container that sees only the run's checkout and the account's files. See [docs/sandbox.md](docs/sandbox.md). |
 | `amux autopilot [--json] \| <run> [--merge] [--retries <n>] \| <run> --off \| <run> --log` | Runs on autopilot and how far each has got; turn it on or off for a run. |

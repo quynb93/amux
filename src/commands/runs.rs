@@ -725,6 +725,27 @@ pub fn peek_cmd(argv: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// `amux open <run>`: the run's dev server (its PORT) in the browser.
+pub fn open_cmd(argv: &[String]) -> Result<i32> {
+    let run = runs::find(need(argv.first(), "amux open <run>")?)?;
+    let Some(port) = run.port else {
+        bail!(
+            "{} has no port of its own. Runs started with --worktree get one, as PORT and AMUX_PORT.",
+            run.id
+        );
+    };
+    let url = crate::work::notes::port_url(port);
+    if !crate::work::notes::listening(port) {
+        bail!(
+            "Nothing is listening on port {port} yet. Start {}'s dev server; it gets PORT={port}.",
+            run.id
+        );
+    }
+    println!("{url}");
+    crate::util::open_url(&url)?;
+    Ok(0)
+}
+
 pub fn logs_cmd(argv: &[String]) -> Result<i32> {
     let run = runs::find(need(argv.first(), "amux logs <run>")?)?;
     let mut out = std::io::stdout().lock();

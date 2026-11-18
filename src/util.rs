@@ -131,6 +131,32 @@ pub fn one_line(s: &str, max: usize) -> String {
     }
 }
 
+/// Opens `url` in a browser: the command in `$BROWSER` if set (as `gh` and others do),
+/// else `open` on macOS and `xdg-open` elsewhere.
+pub fn open_url(url: &str) -> Result<()> {
+    let browser = std::env::var("BROWSER")
+        .ok()
+        .filter(|b| !b.trim().is_empty());
+    let mut words: Vec<String> = match browser {
+        Some(b) => b.split_whitespace().map(str::to_string).collect(),
+        None if cfg!(target_os = "macos") => vec!["open".into()],
+        None => vec!["xdg-open".into()],
+    };
+    let bin = words.remove(0);
+    let status = Command::new(&bin)
+        .args(&words)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| anyhow::anyhow!("Could not run {bin} to open {url}: {e}"))?;
+    if !status.success() {
+        bail!("{bin} could not open {url}.");
+    }
+    Ok(())
+}
+
 /// Reads a secret from stdin when piped, or from the terminal with echo off.
 pub fn read_secret(prompt: &str) -> Result<String> {
     let stdin = std::io::stdin();
