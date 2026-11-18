@@ -44,6 +44,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Pull requests and CI](#pull-requests-and-ci)
   - [Issues and schedules](#issues-and-schedules)
   - [Autopilot](#autopilot)
+  - [Sandboxed runs](#sandboxed-runs)
   - [Other machines](#other-machines)
   - [On your phone](#on-your-phone)
   - [Plugins and hooks](#plugins-and-hooks)
@@ -71,6 +72,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
 - **Parallel runs.** Start several agents in the background, across accounts and CLIs, each in its own git worktree if you like. See which are working and which are waiting, attach to any of them, and detach again.
 - **Auto-approve.** Permission prompts for what your rules allow, such as `cargo test` or edits inside the run's worktree, are answered for you. Everything else waits for you, and every answer is logged.
 - **Issues and schedules.** Turn a GitHub, Linear or Jira issue into a run on its own branch, pick up new issues by label, and run any amux command on a schedule, such as a morning triage.
+- **Sandboxed runs.** `amux spawn --sandbox` runs the agent in a Docker or Podman container that sees only its checkout and the account's files, so you can let it do anything without watching.
 - **Autopilot.** Label an issue and come back to a pull request that passes CI and review. amux opens the PR when the agent commits, hands failing checks and review comments back to it, and tells you when the PR is ready, or merges it.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
 - **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
@@ -575,6 +577,32 @@ Once the agent's turn ends with commits on its branch, amux opens the pull reque
 
 Text is only typed into the agent when its turn has ended, never into a question or a permission prompt. With [auto-approve](#answering-permission-prompts) rules, that makes a whole issue-to-PR loop run without you. The scheduler drives autopilot, so it keeps going while any run is on it. Each step sends an `autopilot` notification to your phone and runs the `on-autopilot` hook. Progress is kept in `runs/<run>/autopilot.json`, and the history in `autopilot.log`.
 
+### Sandboxed runs
+
+Letting an agent do anything (`--dangerously-skip-permissions`, broad `amux allow` rules) is what makes autopilot and best-of-N runs work without you, and also what makes them risky. `--sandbox` runs the CLI in a container instead, so it can only touch the run's checkout and the account's own files:
+
+```sh
+amux spawn --sandbox --image amux-agents --worktree claude@ci --dangerously-skip-permissions
+amux spawn --sandbox=podman --image amux-agents --worktree codex@me
+amux try 3 claude@ci -p "speed up the parser" --sandbox --image amux-agents
+```
+
+- **The run host stays on your machine** and owns the terminal. Only what it starts changes: `docker run --rm -it --name amux-<run> --user <your uid>:<gid> … <image> claude <args>`. Attach, `ui`, auto-approve, `diff`, `verify`, `pr` and autopilot work as usual. `amux ps` shows the account as `claude@ci [sandbox]`.
+- **Mounted, each at the same path as on your machine:** the run's checkout (for a worktree, also the repository's `.git` folder it points to), the account's overlay, and the shared home its links point into. Nothing else from your home folder. Add more with `"mounts"`.
+- **Sign-in.** On macOS, Claude Code keeps its login in the Keychain, which a container can't read. Give the account a token instead (`claude setup-token`, then `amux account token claude@ci`). A login kept in a file in the overlay, such as Codex's `auth.json`, works as it is. amux refuses an account that has neither, and says how to fix it.
+- **Image.** amux never pulls one and has no default. Build your own with the CLIs in it; [docs/sandbox.md](docs/sandbox.md) has a short Dockerfile. amux checks that the engine and the image are there before it starts.
+- **`--network off`** runs the container with `--network none`. That also cuts off a hosted model's API.
+- **Inside the container there is no `amux`**, so `amux report`, `slot` and a lead's `amux spawn` don't work there. Use `amux report --run <run>` from your machine.
+- `amux stop` removes the container (`<engine> rm -f amux-<run>`) if the run doesn't end on its own.
+
+Defaults go in `~/.amux/config.json`. With `"always": true`, every spawn is sandboxed, including those autopilot, `intake` and schedules start; `--no-sandbox` opts one out.
+
+```json
+{ "sandbox": { "engine": "docker", "image": "amux-agents", "network": "on", "mounts": ["~/datasets:ro"], "always": false } }
+```
+
+See [docs/sandbox.md](docs/sandbox.md) for the exact container command and the limits.
+
 ### Other machines
 
 Runs can live on a server, a VM or a cloud box as well, wherever SSH reaches and amux is installed:
@@ -776,6 +804,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux intake [--from github\|linear\|jira] [--label <l>] [--team <key>] [--project <key>] [--jql <query>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open issue (with the label, in the team or project, or matching the JQL). |
 | `amux tracker [status] \| login linear \| login jira <site-url> <email> \| logout linear\|jira` | Store a Linear API key or a Jira API token, for `--issue` and `intake`. |
 | `amux spawn --autopilot[=merge] …` | Open the PR when the agent commits, hand back failing CI and review comments, and say when it's ready (or merge it). |
+| `amux spawn --sandbox[=docker\|podman] [--image <image>] [--network on\|off] [--no-sandbox] …` | Run the CLI in a container that sees only the run's checkout and the account's files. See [docs/sandbox.md](docs/sandbox.md). |
 | `amux autopilot [--json] \| <run> [--merge] [--retries <n>] \| <run> --off \| <run> --log` | Runs on autopilot and how far each has got; turn it on or off for a run. |
 | `amux schedule [add <name> "<when>" <command…> \| rm \| run \| pause \| resume \| log <name>]` | Run amux commands by themselves at set times. |
 | `amux allow [<rule>… \| --deny <rule>… \| --rm <rule>… \| --starter \| --clear \| --check <rule> \| --log [<run>]]` | Rules for answering permission prompts by themselves. |

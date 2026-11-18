@@ -105,6 +105,8 @@ Parallel runs (each CLI in the background, in its own terminal):
         worktree; the PR says it fixes it and links to it)
       --autopilot[=merge]: open the PR when it commits, hand back failing CI and review
         comments, and say when it's ready to merge (=merge: merge it)
+      --sandbox[=docker|podman] [--image <image>] [--network on|off]: run the CLI in a
+        container with only the run's checkout and the account's home mounted (docs/sandbox.md)
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
       --on starts it on another machine; then name it <machine>:<run> anywhere a run goes.
   amux ps [--json]                         List runs and whether each is working or idle

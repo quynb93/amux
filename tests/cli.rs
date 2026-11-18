@@ -370,6 +370,132 @@ fn attaches_to_a_running_cli_and_stops_it() {
     );
 }
 
+/// `spawn --sandbox` with a fake container engine: it records its arguments, answers
+/// `image inspect` and `rm`, and for `run` starts the fake CLI named after the image.
+#[test]
+fn runs_the_cli_in_a_sandbox_container() {
+    let s = Sandbox::new("sandbox");
+    let engine = s.home.join("bin/fake-engine");
+    write(
+        &engine,
+        "#!/bin/sh\necho \"$*\" >> \"$HOME/engine.log\"\n\
+         case \"$1\" in\n\
+           image) [ \"$3\" = amux-test:1 ] && exit 0; exit 1;;\n\
+           rm) exit 0;;\n\
+           run) shift; while [ $# -gt 0 ]; do a=$1; shift; [ \"$a\" = amux-test:1 ] && break; done\n\
+                PATH=\"$(dirname \"$0\"):$PATH\" exec \"$@\";;\n\
+         esac\nexit 2\n",
+    );
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["loginFiles"] = serde_json::json!(["auth.json"]);
+    c["sandbox"] = serde_json::json!({ "engine": engine });
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    // Outside any repository, so only the folder itself is mounted.
+    let proj = s.home.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    let here = |a: &[&str]| s.amux_with(a, &[], Some(&proj));
+
+    // No image: refused, and nothing is left behind.
+    let r = here(&["spawn", "--sandbox", "fake"]);
+    assert_ne!(r.code, 0);
+    assert!(r.err.contains("needs an image"), "{}", r.err);
+    // An engine that isn't installed.
+    let r = here(&[
+        "spawn",
+        "--sandbox=no-such-engine-amux",
+        "--image",
+        "x",
+        "fake",
+    ]);
+    assert!(r.err.contains("isn't installed"), "{}", r.err);
+    // An image that isn't on the machine is never pulled.
+    let r = here(&["spawn", "--image", "other:2", "fake"]);
+    assert!(r.err.contains("doesn't pull images"), "{}", r.err);
+    // A login the container can't read: no token and no login file.
+    let r = here(&["spawn", "--image", "amux-test:1", "fake"]);
+    assert!(r.err.contains("amux account token fake@one"), "{}", r.err);
+    assert!(s.amux(&["ps"]).out.contains("No runs"));
+
+    write(&s.overlay("one").join("auth.json"), "{}");
+    let r = here(&[
+        "spawn",
+        "--image",
+        "amux-test:1",
+        "--network",
+        "off",
+        "fake",
+        "--model",
+        "x",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.err
+            .contains("sandboxed in fake-engine (amux-test:1, no network)"),
+        "{}",
+        r.err
+    );
+    let ps = wait_ps(&s, "fake-1", "exited 0");
+    assert!(ps.contains("fake@one [sandbox]"), "{ps}");
+    let logs = s.amux(&["logs", "fake-1"]).out;
+    assert!(logs.contains("ARG --model"), "{logs}");
+    assert!(logs.contains("ENV AMUX_RUN=fake-1"), "{logs}");
+    assert!(logs.contains("TTY yes"), "{logs}");
+
+    let log = fs::read_to_string(s.home.join("engine.log")).unwrap();
+    let run = log.lines().find(|l| l.starts_with("run ")).unwrap();
+    let overlay = s.overlay("one");
+    let (o, sh) = (overlay.display(), s.shared.display());
+    let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+    for want in [
+        "run --rm -it --init --pull never --name amux-fake-1 --label amux.run=fake-1".to_string(),
+        format!("--user {}:", uid.trim()),
+        "--network none".into(),
+        format!("-w {}", proj.display()),
+        format!("-v {o}:{o}"),
+        format!("-v {sh}:{sh}"),
+        "-e FAKE_HOME -e AMUX_ACCOUNT".into(),
+        "-e AMUX_RUN".into(),
+        "-e HOME=/tmp".into(),
+        "amux-test:1 fake-cli --model x".into(),
+    ] {
+        assert!(run.contains(&want), "{want:?} not in {run}");
+    }
+    assert!(log.contains("rm -f amux-fake-1"), "{log}");
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(s.amux_home.join("runs/fake-1/run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["sandbox"]["image"], "amux-test:1");
+    assert_eq!(saved["sandbox"]["network"], false);
+
+    // stop ends a sandboxed run like any other; --no-sandbox runs on the machine.
+    let chat = [("FAKE_CHAT", "1")];
+    let r = s.amux_with(
+        &[
+            "spawn",
+            "--sandbox",
+            "--image",
+            "amux-test:1",
+            "--name",
+            "chat",
+            "fake",
+        ],
+        &chat,
+        Some(&proj),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "chat", "running");
+    let stop = s.amux(&["stop", "chat"]);
+    assert!(stop.out.contains("Stopped chat"), "{}", stop.out);
+    let r = here(&["spawn", "--no-sandbox", "--name", "plain", "fake"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(!r.err.contains("sandboxed"), "{}", r.err);
+}
+
 #[test]
 fn gives_a_run_its_own_worktree() {
     let s = Sandbox::new("worktree");

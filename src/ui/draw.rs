@@ -282,6 +282,9 @@ impl App {
                     None => tildify(Path::new(&r.run.cwd)),
                 };
                 let mut detail = format!("{} · {place}", r.run.account);
+                if let Some(sb) = &r.run.sandbox {
+                    detail.push_str(&format!(" · sandboxed ({})", sb.engine_name()));
+                }
                 if let Some(c) = self.conflict_note(&r.run.id) {
                     detail.push_str(&format!(" · {c}"));
                 }
@@ -340,6 +343,9 @@ impl App {
         let mut sub = format!("  {}", run.account);
         if let Some(w) = &run.worktree {
             sub.push_str(&format!(" · {}", w.branch));
+        }
+        if run.sandbox.is_some() {
+            sub.push_str(" · sandboxed");
         }
         let title = vec![
             span(" ", t.muted),

@@ -52,6 +52,7 @@ An entry whose `id` matches a built-in is merged into it, so you only list the f
 | `waitingPatterns` | no | Text the CLI shows when it waits for you, such as a permission prompt. Matched case-insensitively against a background run's output to show `waiting` in `amux ps` and send a notification. Once the CLI reports its own state with OSC 7501, as Codex and Claude Code 2.1.295+ do, these only apply while it reports idle or done, to catch dialogs it doesn't report. |
 | `conflictingEnv` | no | Variables removed from the environment at launch, so one inherited from your shell can't override the account. The home variable and `tokenEnv` are always removed. |
 | `privacyEnv` | no | Variables to set when an account has privacy mode on. Use only opt-outs that the CLI documents. |
+| `loginFiles` | no | Files in the overlay that hold a login, such as `["auth.json"]`. `amux spawn --sandbox` checks that one exists (or that the account has a token) before it starts the CLI in a container. Leave this out and amux doesn't check. |
 | `sessions` | no | Session file format: `"claude"`, `"codex"` or `"gemini"`. Leave this out if amux can't read this CLI's sessions; `amux sessions` then skips it. |
 
 ## Choosing private entries

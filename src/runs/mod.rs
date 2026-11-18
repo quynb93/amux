@@ -13,6 +13,7 @@ pub mod host;
 pub mod notify;
 pub mod program;
 pub mod push;
+pub mod sandbox;
 pub mod screen;
 pub mod state;
 
@@ -94,6 +95,9 @@ pub struct Run {
     /// (`"limits"` in config.json): why, and since when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued: Option<Waiting>,
+    /// Set when the CLI runs in a container (`amux spawn --sandbox`): which, and how.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<sandbox::Sandbox>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
