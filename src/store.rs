@@ -16,6 +16,10 @@ pub struct Config {
     /// Default account per provider id, e.g. { "claude": "work" }.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<Map<String, Value>>,
+    /// Account per provider for a folder and everything below it (`amux map`), keyed by
+    /// the folder's canonical path: { "/src/app": { "claude": "work" } }.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folders: Option<Map<String, Value>>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -23,6 +27,46 @@ pub struct Config {
 impl Config {
     pub fn default_for(&self, provider: &str) -> Option<&str> {
         self.defaults.as_ref()?.get(provider)?.as_str()
+    }
+
+    /// The account `amux map` set for `provider` in `dir` or the nearest folder above it
+    /// (the longest mapped path wins), and that mapped folder.
+    pub fn folder_for(&self, provider: &str, dir: &Path) -> Option<(PathBuf, String)> {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.folders
+            .iter()
+            .flatten()
+            .filter_map(|(folder, m)| {
+                let name = m.get(provider)?.as_str().filter(|n| !n.is_empty())?;
+                let folder = PathBuf::from(folder);
+                dir.starts_with(&folder).then(|| (folder, name.to_string()))
+            })
+            .max_by_key(|(folder, _)| folder.components().count())
+    }
+}
+
+/// Which rule picked the account for a reference such as `claude`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Chosen {
+    /// Named outright: `claude@work`.
+    Named,
+    /// `amux map` bound this folder (or one above it) to the account.
+    Folder(PathBuf),
+    /// `amux account default`.
+    Default,
+    /// The provider's only account.
+    Only,
+}
+
+impl Chosen {
+    /// A short note for output when a rule picked between accounts, e.g. "map for
+    /// ~/src/app"; None when it was named or there was no choice to make.
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Chosen::Named | Chosen::Only => None,
+            Chosen::Folder(f) => Some(format!("map for {}", paths::tildify(f))),
+            Chosen::Default => Some("default account".into()),
+        }
     }
 }
 
@@ -268,30 +312,51 @@ pub fn save_accounts(accounts: Vec<Account>) -> Result<()> {
     write_json(&file, &AccountsFile { accounts, extra })
 }
 
-/// Parses "claude@work", or "claude" (uses the provider's default account).
+/// Parses "claude@work", or "claude": the account `amux map` set for the current folder,
+/// else the provider's default account, else its only one.
 pub fn resolve_account(r: &str) -> Result<Account> {
+    let cwd = std::env::current_dir().ok();
+    resolve_account_in(r, cwd.as_deref()).map(|(a, _)| a)
+}
+
+/// Like `resolve_account`, for a CLI that will run in `dir`, and says which rule chose
+/// the account. A name given outright wins, then `amux map` for `dir`, then the default.
+pub fn resolve_account_in(r: &str, dir: Option<&Path>) -> Result<(Account, Chosen)> {
     let accounts = load_accounts()?;
     let mut parts = r.split('@');
     let provider = parts.next().unwrap_or_default().to_string();
     let mut name = parts.next().unwrap_or_default().to_string();
+    let mut chosen = Chosen::Named;
     if name.is_empty() {
-        name = load_config()?
-            .default_for(&provider)
-            .unwrap_or_default()
-            .to_string();
-        if name.is_empty() {
+        let cfg = load_config()?;
+        if let Some((folder, n)) = dir.and_then(|d| cfg.folder_for(&provider, d)) {
+            if !accounts
+                .iter()
+                .any(|a| a.provider == provider && a.name == n)
+            {
+                let f = paths::tildify(&folder);
+                bail!("No account \"{provider}@{n}\", which `amux map` chose for {f}. Add it with `amux account add {provider} {n}`, or change the map with `amux map {f} {provider}@<name>`.");
+            }
+            name = n;
+            chosen = Chosen::Folder(folder);
+        } else if let Some(n) = cfg.default_for(&provider).filter(|n| !n.is_empty()) {
+            name = n.to_string();
+            chosen = Chosen::Default;
+        } else {
             let own: Vec<&Account> = accounts.iter().filter(|a| a.provider == provider).collect();
             if own.len() == 1 {
                 name = own[0].name.clone();
+                chosen = Chosen::Only;
             } else {
-                bail!("\"{r}\" is ambiguous. Use {provider}@<name> or set a default with `amux account default {provider}@<name>`.");
+                bail!("\"{r}\" is ambiguous. Use {provider}@<name>, set a default with `amux account default {provider}@<name>`, or map this folder with `amux map . {provider}@<name>`.");
             }
         }
     }
-    accounts
+    let acct = accounts
         .into_iter()
         .find(|a| a.provider == provider && a.name == name)
-        .ok_or_else(|| anyhow!("No account \"{provider}@{name}\". Add it with `amux account add {provider} {name}`."))
+        .ok_or_else(|| anyhow!("No account \"{provider}@{name}\". Add it with `amux account add {provider} {name}`."))?;
+    Ok((acct, chosen))
 }
 
 /// amux's per-account dir: ~/.amux/accounts/<provider>/<name>
@@ -358,6 +423,36 @@ mod tests {
             err.to_string().contains("missing: sharedHome, homeEnv"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn maps_folders_by_the_longest_matching_path() {
+        let t = crate::testutil::TempDir::new();
+        let src = t.path().join("src");
+        let app = src.join("app");
+        let deep = app.join("web/ui");
+        let old = src.join("app-old");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        let key = |p: &Path| p.to_string_lossy().into_owned();
+        let mut folders = Map::new();
+        folders.insert(key(&src), json!({"claude": "personal"}));
+        folders.insert(key(&app), json!({"claude": "work", "codex": "me"}));
+        let c = Config {
+            folders: Some(folders),
+            ..Default::default()
+        };
+        assert_eq!(
+            c.folder_for("claude", &deep),
+            Some((app.clone(), "work".to_string())),
+            "the deepest mapped folder wins"
+        );
+        assert_eq!(c.folder_for("codex", &app).unwrap().1, "me");
+        assert_eq!(c.folder_for("claude", &src).unwrap().1, "personal");
+        assert_eq!(c.folder_for("gemini", &deep), None, "per provider");
+        assert_eq!(c.folder_for("claude", t.path()), None);
+        // Whole path components only: src/app-old is not inside src/app.
+        assert_eq!(c.folder_for("claude", &old).unwrap().1, "personal");
     }
 
     #[test]

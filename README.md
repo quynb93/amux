@@ -182,6 +182,20 @@ Token sign-in sets the CLI's token variable at launch. For Claude Code that is `
 
 Account names may use letters, digits, `.`, `_` and `-`. If a CLI has a single account, or a default, then `amux claude` is enough. Otherwise use `amux claude@<name>`.
 
+**One account per folder.** Bind a folder to an account, and plain `amux claude` in that folder or any folder below it uses that account:
+
+```sh
+amux map ~/work claude@work          # also: amux map . codex@work
+amux map ~/oss claude@personal
+amux map                             # list the folders and their accounts
+amux map --rm ~/oss                  # remove a folder (add `claude` to remove only that CLI)
+```
+
+- An account named outright (`amux claude@personal`) always wins. Then the map, then the default account.
+- The deepest mapped folder wins, so `~/work/client-x` can have its own account inside `~/work`. Folders are stored with symlinks resolved, and match by whole path components.
+- The map applies to anything that would otherwise pick the default: `amux claude`, `amux spawn claude` (in the folder it runs in, or `--dir`), `amux env claude` and the rest. `amux spawn` says when the map chose: `started claude-1 as claude@work (map for ~/work) in …`.
+- It's kept in `~/.amux/config.json` under `"folders"`. `amux account rm` drops the account's folders too.
+
 ### Sessions and handoff
 
 Sessions are written to the shared home, so every account sees all of them.
@@ -791,6 +805,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux account baseurl <cli>@<name> <url\|off>` | Set or clear the account's API endpoint. |
 | `amux account status [<cli>@<name>]` | Ask each CLI who is signed in. |
 | `amux account rm <cli>@<name> [--purge]` | Remove an account. `--purge` also deletes its overlay. |
+| `amux map [<dir> <cli>@<name> \| --rm <dir> [<cli>]]` | Use that account for plain `amux <cli>` in the folder and below. With no arguments, list the folders. |
 | `amux sessions [<cli>] [--here] [-n <count>]` | List sessions from every CLI, newest first. |
 | `amux resume <id> [--as <cli>@<name>]` | Resume a session under any account, or hand it to another CLI. |
 | `amux spawn [--name <run>] [--worktree] [--branch <b>] [--base <ref>] [--attach] <cli>[@name] [args…]` | Start the CLI in the background, optionally in its own git worktree. |
@@ -832,7 +847,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 
 ```
 ~/.amux/
-  config.json          providers and per-CLI default accounts
+  config.json          providers, per-CLI default accounts and folder accounts (`amux map`)
   accounts.json        the account list (no secrets)
   accounts/<cli>/<name>/   each account's overlay (and token file on Linux)
   handoffs/            transcripts written by cross-CLI `resume`
