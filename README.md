@@ -64,7 +64,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
 
 ## Features
 
-- **Multiple accounts per CLI.** Claude Code, Codex and Gemini CLI work out of the box. Any CLI that moves its home directory with an environment variable can be added with a few lines of JSON.
+- **Multiple accounts per CLI.** Claude Code, Codex, Gemini CLI and Qwen Code work out of the box. Any CLI that moves its home directory with an environment variable can be added with a few lines of JSON.
 - **One shared home.** Skills, plugins, agents, commands, hooks, MCP config, settings and session history are shared. Only the login and per-account state stay separate.
 - **Run accounts side by side.** Each launch gets its own overlay directory, so two accounts can run at the same time in different terminals.
 - **Sign in your way.** Use the CLI's own login flow or a stored token (macOS Keychain, or a `0600` file on Linux).
@@ -159,6 +159,7 @@ Each account gets a small overlay directory under `~/.amux/accounts/`. Inside it
 | `claude` | `CLAUDE_CONFIG_DIR` | `.claude.json`, `.credentials.json`, Keychain login, `policy-limits.json*`, `remote-settings.json*`, telemetry and stats state, `backups` |
 | `codex` | `CODEX_HOME` | `auth.json` |
 | `gemini` | `GEMINI_CLI_HOME` (the parent of `.gemini`) | `oauth_creds.json`, `google_accounts.json` |
+| `qwen` | `QWEN_HOME` | `oauth_creds.json`, `google_accounts.json`, `mcp-oauth-tokens.json` |
 
 Overlays are refreshed on every launch. New entries in the shared home get linked, and links whose target is gone get removed. amux never deletes a real file. See [docs/architecture.md](docs/architecture.md) for the details.
 
@@ -758,6 +759,17 @@ claude                             # now runs as claude@work without amux
 `amux env` prints the home variable, `AMUX_ACCOUNT`, and any privacy, token and base URL variables for that account.
 
 ### Other CLIs
+
+**Qwen Code** (`amux qwen`) is built in. It moves `~/.qwen` with `QWEN_HOME`, and signs in with `/auth` inside a session, so `amux account add qwen <name>` creates the account and you sign in on its first run. amux can't read its session files yet, so `amux sessions`, `resume`, `revive` and `failover` don't find them. Sessions are still shared, so `amux qwen@other --resume <id>` picks one up under another account.
+
+These were checked and are not built in, because no single variable moves their login:
+
+| CLI | Why not |
+|---|---|
+| GitHub Copilot CLI | `COPILOT_HOME` moves `~/.copilot`, but the login is in the system keychain under one service name (`copilot-cli`) for every home. It switches accounts itself with `/user switch`. |
+| OpenCode | Logins are in its database under `XDG_DATA_HOME`; `OPENCODE_CONFIG_DIR` moves only the config, and `OPENCODE_DB` also moves the sessions. It has its own `opencode auth switch`. |
+| Cursor Agent | `CURSOR_CONFIG_DIR` moves `cli-config.json`, but the docs don't say where the login is kept or whether it moves. |
+| Amp | Only the `--settings-file` flag moves its settings; no variable is documented. It has several accounts of its own (`amp login`). |
 
 Any CLI that moves its home directory with an environment variable can be added in `~/.amux/config.json`. The same file can also override built-in providers, for example to use a different shared home:
 

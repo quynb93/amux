@@ -2,7 +2,28 @@
 
 A *provider* tells amux how one CLI keeps its home directory: which variable moves it, which files belong to a single account, and how to sign in, resume and read sessions.
 
-The built-in providers (`claude`, `codex`, `gemini`) are in [`src/providers.rs`](../src/providers.rs). You can add more, or override parts of a built-in, in `~/.amux/config.json` under `"providers"`.
+The built-in providers (`claude`, `codex`, `gemini`, `qwen`) are in [`src/providers.rs`](../src/providers.rs). You can add more, or override parts of a built-in, in `~/.amux/config.json` under `"providers"`.
+
+## Qwen Code
+
+The `qwen` provider was checked against the [Qwen Code source](https://github.com/QwenLM/qwen-code):
+
+- `packages/core/src/config/storage.ts`: `getGlobalQwenDir()` uses `QWEN_HOME` as the whole `~/.qwen` directory (so `homeEnvPoints` is `home`), and the login is in `oauth_creds.json` and `google_accounts.json`, MCP logins in `mcp-oauth-tokens.json`. Sessions go to `projects/` in the same directory.
+- `packages/cli/src/config/top-level-options.ts`: `--resume <id>` and `-i <prompt>`.
+- `packages/cli/src/i18n/locales/en.js`: the prompt text used for `waitingPatterns`.
+
+It has no login command (it signs in with `/auth` on the first run), and amux can't read its session files yet, so it has no `sessions` format.
+
+### Checked and not built in
+
+A CLI can be a provider only if one variable moves the directory that holds its login. These don't, as of their docs and source in November 2026:
+
+- **GitHub Copilot CLI.** `COPILOT_HOME` moves all of `~/.copilot` ([config dir reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)), but the OAuth token goes in the system keychain under the service `copilot-cli` for every home, and only falls back to `config.json` when there is no keychain ([authentication](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)). Accounts would not be kept apart.
+- **OpenCode.** Logins live in its SQLite database under `XDG_DATA_HOME`. `OPENCODE_CONFIG_DIR` moves only the config, and `OPENCODE_DB` moves the database, sessions included. Moving `XDG_DATA_HOME` would move every app's data.
+- **Cursor Agent.** `CURSOR_CONFIG_DIR` moves `cli-config.json` ([configuration](https://cursor.com/docs/cli/reference/configuration)), but the docs only say the login is "securely stored locally".
+- **Amp.** Settings move only with the `--settings-file` flag ([settings](https://ampcode.com/docs/cli/settings)); no variable is documented for its settings or secrets.
+
+If one of these gains a home variable, a definition in `config.json` is enough to use it.
 
 ```json
 {

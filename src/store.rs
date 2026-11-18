@@ -395,7 +395,7 @@ mod tests {
         let p = load_providers_from(&Config::default()).unwrap();
         assert_eq!(
             p.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            ["claude", "codex", "gemini"]
+            ["claude", "codex", "gemini", "qwen"]
         );
         assert_eq!(p[0].shared_home, paths::HOME.join(".claude"));
     }

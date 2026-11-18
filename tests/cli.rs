@@ -285,6 +285,24 @@ fn maps_a_folder_to_an_account() {
 }
 
 #[test]
+fn doctor_skips_clis_you_have_no_accounts_for() {
+    let s = Sandbox::new("doctor");
+    s.amux(&["account", "add", "fake", "a", "--no-login"]);
+    let empty = s.home.join("empty-path");
+    fs::create_dir_all(&empty).unwrap();
+    let r = s.amux_with(&["doctor"], &[("PATH", empty.to_str().unwrap())], None);
+    assert!(
+        r.out
+            .contains("--   qwen: binary \"qwen\" not installed (no accounts)"),
+        "{}",
+        r.out
+    );
+    assert!(r.out.contains("ok   fake: binary"), "{}", r.out);
+    assert!(!r.out.contains("FAIL qwen"), "{}", r.out);
+    assert!(s.amux(&["providers"]).out.contains("qwen"));
+}
+
+#[test]
 fn reports_an_unparseable_config() {
     let s = Sandbox::new("badconfig");
     write(&s.amux_home.join("config.json"), "{ not json");
