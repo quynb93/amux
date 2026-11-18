@@ -377,8 +377,16 @@ amux team wait auth     # block until the next worker finishes or needs help, an
 Subscription accounts run out: Claude Code's five-hour and weekly windows, Codex's and Gemini's quotas. amux knows every account you have, so a limit doesn't have to stop the work:
 
 ```sh
-amux usage                      # which accounts are limited, until when, and their runs
+amux usage --track on           # once: record Claude Code's usage through its status line
+amux usage                      # each account's 5-hour and 7-day usage, limits and runs
 amux failover fix-login         # the same session, same worktree, under another account
+```
+
+```
+ACCOUNT          5H               7D   RESETS                     UPDATED  LIMIT  RUNS
+claude@work      ▓▓▓▓▓▓▓▓▓░  92%  41%  5h in 1h 3m, 7d in 3d 2h   1m ago   ok     2
+claude@personal  ▓░░░░░░░░░  12%  8%   5h in 4h 10m, 7d in 6d 1h  20m ago  ok     0
+codex@me         -                -                                        ok     0
 ```
 
 - A run whose CLI says it hit its limit shows `waiting` with the message, and the account is marked limited until the reset time the message names. You get a notification, and `~/.amux/hooks/on-limited` runs.
@@ -386,6 +394,23 @@ amux failover fix-login         # the same session, same worktree, under another
 - **`failover`** resumes the run's session (`claude --resume <id>`, `codex resume <id>`) under another account of the same CLI, in the same folder and worktree, and tells the agent to carry on. Set `"limits": { "onLimit": "failover" }` in `~/.amux/config.json` to do it automatically, or keep the default (`wait`), where the CLI waits for the reset itself.
 - The messages amux watches for are each provider's `limitPatterns`. Add your own in `config.json` if a CLI words them differently.
 - Check that moving work between accounts is allowed by your provider's terms.
+
+**Switching before the limit.** amux can also see how much of each account is used, and move work before an account runs out:
+
+```json
+{ "limits": { "switchAt": 90, "onLimit": "failover" } }
+```
+
+- **Where the numbers come from.** Only local files; amux makes no network requests for them.
+  - Claude Code passes its usage (`rate_limits.five_hour` and `seven_day`) to its status line command, for claude.ai Pro, Max and Ultra subscribers, after the session's first response. `amux usage --track on` puts `amux __statusline` in the shared `~/.claude/settings.json`. It saves the numbers for the account the session runs as (`AMUX_ACCOUNT`), then runs your own status line command with the same input, so your status line looks the same. Only `statusLine` changes; `amux usage --track off` puts back what was there. A project's `.claude/settings.json` that sets its own status line takes precedence there, and those sessions aren't recorded.
+  - Codex writes its usage (`rate_limits.primary` and `secondary`) into its session files. amux reads the newest numbers from the session of each Codex run started with `amux spawn`, while the run lives and whenever `amux usage` runs. Codex sessions you start with `amux codex@x` aren't read, because several accounts share one session folder.
+  - Gemini CLI keeps no usage numbers on disk, so its accounts show `-`.
+- Numbers are kept in `~/.amux/usage/<cli>@<name>.json`. A window whose reset time has passed is ignored until new numbers come in.
+- **`switchAt`** is a percentage of the fuller of the two windows. It is off when unset.
+- **New runs.** With `switchAt` set, `amux spawn claude` takes the account with the most headroom, and skips limited accounts and accounts at or over `switchAt`. Accounts with numbers come before accounts without; ties go to the default account, then the one with fewer runs. An account you name is used as named.
+- **Running runs.** With `"onLimit": "failover"` too, a run whose account reaches `switchAt` moves to another account of the same CLI under `switchAt`, the same way `amux failover` does. It moves once, and only when its turn is over: the CLI reports it is idle, or, for a CLI that doesn't report, nothing is waiting on you and it has been quiet for 10 seconds. It doesn't move while a terminal is attached to it. It never moves to an account that is also over `switchAt`, so a session doesn't bounce between two full accounts. When no account has room, it stays, and you are told once. You get a `limited` notification, and `~/.amux/hooks/on-near-limit` runs.
+- Without `onLimit: failover`, amux tells you once when a run's account passes `switchAt`, and leaves the run alone.
+- `amux ui` shows each account's usage in its header when there is room (in the `waiting` color past `switchAt`, or past 90% without it), and `/usage` shows the full table.
 
 ### After a restart
 
@@ -720,6 +745,10 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
 | `amux rm <run>… [--force]`, `amux rm --done` | Remove runs and their clean worktrees. `--done` removes every finished run. |
 | `amux ui` | Watch every run, attach in place, and start, stop or remove runs from one screen. |
+| `amux usage [--json]` | Each account's 5-hour and 7-day usage, when it resets, whether it hit its limit, and its live runs. |
+| `amux usage --track on\|off` | Record Claude Code's usage through its status line (in the shared `settings.json`), or put your status line back. |
+| `amux usage --clear <cli>@<name>` | Forget that an account hit its limit, when it lifted early. |
+| `amux failover <run> [--to <cli>@<name>]` | Resume a run's session under another account, in the same folder and worktree. |
 | `amux lead [--name <team>] [--workers <n>] [--worker <acct>]… <cli>[@name] -p <goal> [-- <cli flags>]` | Start a lead agent that splits the goal and runs a team of workers. |
 | `amux team [<lead>] [--json]`, `amux team wait [<lead>] [--timeout <secs>]` | A team's workers and their reports; block until the next one finishes or needs help. |
 | `amux report <text…>` | From inside a run: what it did, for its lead. |
@@ -752,6 +781,9 @@ Commands never wait on the network. The notice comes from a cached result, which
   scheduler.log        when the scheduler started and stopped, and commands it couldn't start
   intake.json          issues `amux intake` started, per repo
   autopilot.on         present while runs are on autopilot, so the scheduler keeps going
+  limits.json          accounts that hit their usage limit, until their reset
+  usage/<cli>@<name>.json  each account's latest 5-hour and 7-day usage (`amux usage`)
+  statusline.json      your status line command, while `amux usage --track` is on
 ```
 
 | Variable | Effect |

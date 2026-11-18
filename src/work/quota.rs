@@ -1,0 +1,694 @@
+//! Quota: how much of each account's 5-hour and 7-day windows is used, read from local
+//! files only. amux never asks a provider's servers.
+//!
+//! - Claude Code hands its status line command a JSON document on stdin that includes
+//!   `rate_limits.five_hour` and `rate_limits.seven_day` (`used_percentage`, `resets_at` in
+//!   epoch seconds) for claude.ai subscribers. `amux usage --track on` puts
+//!   `amux __statusline` in front of your own status line command; it records the numbers
+//!   for the account in `AMUX_ACCOUNT`, then runs your command.
+//! - Codex writes `token_count` events to its session rollout files, with
+//!   `rate_limits.primary` and `secondary` (`used_percent`, `window_minutes`, `resets_at` in
+//!   epoch seconds). amux reads the newest one from the session of each Codex run.
+//! - Gemini CLI keeps no such numbers on disk, so it has none.
+//!
+//! Each account's latest numbers are kept in ~/.amux/usage/<provider>@<name>.json. A window
+//! whose reset time has passed is dropped when read: its numbers no longer say anything.
+
+use crate::runs::{ProgramStatus, Run, Waiting};
+use crate::store::{load_accounts, load_config, read_json, valid_name, write_json, Account};
+use crate::{paths, time};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+/// Used to rank accounts when `limits.switchAt` isn't set: above this, an account counts
+/// as nearly out.
+pub const HIGH: f64 = 90.0;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Window {
+    /// 0 to 100 (Codex can report more once over).
+    pub used_percent: f64,
+    /// When the window resets, in ms since the epoch.
+    pub resets_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Quota {
+    /// When the CLI reported these numbers, in ms since the epoch.
+    pub at: i64,
+    /// Where they came from: "statusline" (Claude Code) or "rollout" (Codex).
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<Window>,
+}
+
+impl Quota {
+    /// Without the windows that have reset since; None when none is left.
+    pub fn fresh(mut self, now: i64) -> Option<Quota> {
+        self.five_hour = self.five_hour.filter(|w| w.resets_at > now);
+        self.seven_day = self.seven_day.filter(|w| w.resets_at > now);
+        (self.five_hour.is_some() || self.seven_day.is_some()).then_some(self)
+    }
+
+    /// The tighter of the two windows: its name ("5-hour" or "7-day") and numbers.
+    pub fn tightest(&self) -> Option<(&'static str, &Window)> {
+        let a = self.five_hour.as_ref().map(|w| ("5-hour", w));
+        let b = self.seven_day.as_ref().map(|w| ("7-day", w));
+        match (a, b) {
+            (Some(a), Some(b)) => Some(if b.1.used_percent > a.1.used_percent {
+                b
+            } else {
+                a
+            }),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// How much of the account is used: the higher of its two windows.
+    pub fn used(&self) -> Option<f64> {
+        self.tightest().map(|(_, w)| w.used_percent)
+    }
+}
+
+pub fn dir() -> PathBuf {
+    paths::AMUX_HOME.join("usage")
+}
+
+/// `provider@name` → its file, for valid account ids only (they become a file name).
+fn file(account: &str) -> Option<PathBuf> {
+    let (p, n) = account.split_once('@')?;
+    (valid_name(p) && valid_name(n)).then(|| dir().join(format!("{account}.json")))
+}
+
+/// The account's numbers as last recorded, without windows that have reset.
+pub fn load(account: &str) -> Option<Quota> {
+    let f = file(account)?;
+    let q: Option<Quota> = read_json(&f).ok()?;
+    q?.fresh(time::now_ms())
+}
+
+/// Every account's numbers that are still current, by account id.
+pub fn all(accounts: &[Account]) -> BTreeMap<String, Quota> {
+    accounts
+        .iter()
+        .filter_map(|a| Some((a.id(), load(&a.id())?)))
+        .collect()
+}
+
+/// Saves `q` as the account's latest numbers, unless what is stored is newer, or the same
+/// numbers were saved less than a minute ago (Claude Code runs its status line often).
+/// True when it wrote.
+pub fn record(account: &str, q: &Quota) -> bool {
+    let Some(f) = file(account) else {
+        return false;
+    };
+    let old: Option<Quota> = read_json(&f).ok().flatten();
+    if let Some(o) = &old {
+        let same = o.five_hour == q.five_hour && o.seven_day == q.seven_day;
+        if o.at > q.at || (same && q.at - o.at < 60_000) {
+            return false;
+        }
+    }
+    write_json(&f, q).is_ok()
+}
+
+/// A window from a percentage and a reset time in epoch seconds.
+fn window(used: Option<f64>, resets_s: Option<i64>, minutes: Option<i64>) -> Option<Window> {
+    Some(Window {
+        used_percent: used?,
+        resets_at: resets_s? * 1000,
+        window_minutes: minutes,
+    })
+}
+
+/// Claude Code's status line input → its numbers, if it has any (claude.ai subscribers,
+/// after the session's first response).
+pub fn from_statusline(v: &Value, now: i64) -> Option<Quota> {
+    let rl = v.get("rate_limits")?;
+    let w = |key: &str, minutes: i64| {
+        let o = rl.get(key)?;
+        window(
+            o.get("used_percentage").and_then(Value::as_f64),
+            o.get("resets_at").and_then(as_secs),
+            Some(minutes),
+        )
+    };
+    let q = Quota {
+        at: now,
+        source: "statusline".into(),
+        five_hour: w("five_hour", 300),
+        seven_day: w("seven_day", 10_080),
+    };
+    (q.five_hour.is_some() || q.seven_day.is_some()).then_some(q)
+}
+
+/// Epoch seconds, as an integer or a float.
+fn as_secs(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
+}
+
+/// One Codex `RateLimitWindow`: `used_percent`, `window_minutes`, and `resets_at` (epoch
+/// seconds), or `resets_in_seconds` in older versions (from the event's time).
+fn codex_window(v: &Value, at: i64) -> Option<Window> {
+    let used = v.get("used_percent").and_then(Value::as_f64)?;
+    let minutes = v.get("window_minutes").and_then(Value::as_i64);
+    let resets_at = match v.get("resets_at").and_then(as_secs) {
+        Some(s) => s * 1000,
+        None => match v.get("resets_in_seconds").and_then(as_secs) {
+            Some(s) => at + s * 1000,
+            None => at + minutes? * 60_000,
+        },
+    };
+    Some(Window {
+        used_percent: used,
+        resets_at,
+        window_minutes: minutes,
+    })
+}
+
+/// The newest rate limits in a Codex rollout (JSON lines): the last
+/// `{"type":"event_msg","payload":{"type":"token_count","rate_limits":{…}}}`. Codex's own
+/// limit (`limit_id` "codex", or none) wins over per-model ones in the same file.
+pub fn from_codex_rollout(text: &str) -> Option<Quota> {
+    let mut other = None;
+    for line in text.lines().rev() {
+        if !line.contains("\"token_count\"") || !line.contains("rate_limits") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let p = &v["payload"];
+        if v["type"] != "event_msg" || p["type"] != "token_count" {
+            continue;
+        }
+        let rl = &p["rate_limits"];
+        if !rl.is_object() {
+            continue;
+        }
+        let at = v["timestamp"]
+            .as_str()
+            .and_then(time::parse_iso)
+            .unwrap_or_else(time::now_ms);
+        let mut q = Quota {
+            at,
+            source: "rollout".into(),
+            ..Default::default()
+        };
+        for (i, key) in ["primary", "secondary"].into_iter().enumerate() {
+            let Some(w) = rl.get(key).and_then(|w| codex_window(w, at)) else {
+                continue;
+            };
+            // By length when Codex says it; otherwise primary is the short window.
+            let short = w.window_minutes.map_or(i == 0, |m| m <= 24 * 60);
+            let slot = if short {
+                &mut q.five_hour
+            } else {
+                &mut q.seven_day
+            };
+            if slot.is_none() {
+                *slot = Some(w);
+            }
+        }
+        if q.five_hour.is_none() && q.seven_day.is_none() {
+            continue;
+        }
+        match rl["limit_id"].as_str() {
+            None | Some("codex") => return Some(q),
+            Some(_) => {
+                other.get_or_insert(q);
+            }
+        }
+    }
+    other
+}
+
+/// The end of a file, up to `max` bytes.
+fn tail(f: &Path, max: u64) -> Option<String> {
+    let mut file = std::fs::File::open(f).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut buf = Vec::new();
+    file.take(max).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// The newest rate limits in a rollout file: its last 256 KB, then its last 4 MB.
+pub fn read_codex_rollout(f: &Path) -> Option<Quota> {
+    for max in [256 * 1024, 4 * 1024 * 1024] {
+        let text = tail(f, max)?;
+        if let Some(q) = from_codex_rollout(&text) {
+            return Some(q);
+        }
+        if (text.len() as u64) < max {
+            break;
+        }
+    }
+    None
+}
+
+/// The rollout file of a Codex run: the newest one under `<home>/sessions` written since
+/// the run started, whose session started in the run's folder (as `amux failover` picks a
+/// session). Only files changed since then are opened.
+pub fn codex_rollout_of(run: &Run, home: &Path) -> Option<PathBuf> {
+    let since = run.started_at - 60_000;
+    let mut found: Vec<(i64, PathBuf)> = Vec::new();
+    collect_rollouts(&home.join("sessions"), 3, since, &mut found);
+    found.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    found
+        .into_iter()
+        .map(|(_, p)| p)
+        .find(|p| codex_cwd(p).as_deref() == Some(run.cwd.as_str()))
+}
+
+fn collect_rollouts(dir: &Path, depth: usize, since: i64, out: &mut Vec<(i64, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let Ok(m) = e.metadata() else { continue };
+        let modified = m.modified().map(time::to_ms).unwrap_or(0);
+        if m.is_dir() {
+            // A day folder can't hold files newer than its own last change.
+            if depth > 0 && modified >= since {
+                collect_rollouts(&e.path(), depth - 1, since, out);
+            }
+        } else if modified >= since && e.file_name().to_string_lossy().ends_with(".jsonl") {
+            out.push((modified, e.path()));
+        }
+    }
+}
+
+/// The folder a Codex session started in, from its `session_meta` line.
+fn codex_cwd(f: &Path) -> Option<String> {
+    let mut head = String::new();
+    std::fs::File::open(f)
+        .ok()?
+        .take(64 * 1024)
+        .read_to_string(&mut head)
+        .ok();
+    head.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "session_meta")
+        .and_then(|v| v["payload"]["cwd"].as_str().map(str::to_string))
+}
+
+/// Keeps a Codex run's numbers current: finds its rollout once, and rereads it when it
+/// has changed. `seen` carries the file and its last change between calls.
+pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) {
+    let path = match seen {
+        Some((p, _)) if p.exists() => p.clone(),
+        _ => match codex_rollout_of(run, home) {
+            Some(p) => p,
+            None => return,
+        },
+    };
+    let modified = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map(time::to_ms)
+        .unwrap_or(0);
+    if seen
+        .as_ref()
+        .is_some_and(|(p, t)| *p == path && *t == modified)
+    {
+        return;
+    }
+    if let Some(q) = read_codex_rollout(&path) {
+        record(&run.account, &q);
+    }
+    *seen = Some((path, modified));
+}
+
+/// Reads the numbers of every live Codex run now, for `amux usage`.
+pub fn refresh_live_codex_runs() {
+    let Ok(specs) = crate::store::load_providers() else {
+        return;
+    };
+    for run in crate::runs::list() {
+        if !run.state().is_live() {
+            continue;
+        }
+        let provider = run.account.split('@').next().unwrap_or_default();
+        let Some(spec) = specs.iter().find(|s| s.id == provider) else {
+            continue;
+        };
+        if spec.sessions.as_deref() == Some("codex") {
+            refresh_codex(&run, &spec.shared_home, &mut None);
+        }
+    }
+}
+
+/// `"limits": { "switchAt": 90 }`: the percentage of a window at which work moves to
+/// another account before the limit. None when unset (or not between 1 and 100).
+pub fn switch_at() -> Option<f64> {
+    let cfg = load_config().ok()?;
+    let v = cfg.extra.get("limits")?.get("switchAt")?;
+    let n = v
+        .as_f64()
+        .or_else(|| v.as_str()?.trim_end_matches('%').parse().ok())?;
+    (n > 0.0 && n <= 100.0).then_some(n)
+}
+
+/// Whether a run is between turns, so it can move to another account without cutting
+/// the agent off mid-turn: the CLI reports it is idle or done (OSC 7501), or, for a CLI
+/// that doesn't report, nothing is waiting on you and it has printed nothing for 10 s.
+pub fn turn_boundary(
+    status: Option<&ProgramStatus>,
+    waiting: Option<&Waiting>,
+    last_out: i64,
+    now: i64,
+) -> bool {
+    if waiting.is_some() {
+        return false;
+    }
+    match status {
+        Some(s) => matches!(s.state.as_str(), "idle" | "done"),
+        None => now - last_out >= 10_000,
+    }
+}
+
+/// An account that work could go to.
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    pub id: String,
+    pub used: Option<f64>,
+    pub limited: bool,
+    pub busy: usize,
+    pub default: bool,
+}
+
+/// The best candidate: never `avoid` or a limited one, and none at or over `ceiling` when
+/// given. Accounts under `high` come first, least used first; then accounts with no
+/// numbers; then the rest. Ties go to the default account, then the one with fewer runs.
+pub fn choose(c: &[Candidate], avoid: &str, ceiling: Option<f64>, high: f64) -> Option<usize> {
+    let tier = |u: Option<f64>| match u {
+        Some(u) if u < high => 0,
+        None => 1,
+        Some(_) => 2,
+    };
+    c.iter()
+        .enumerate()
+        .filter(|(_, a)| a.id != avoid && !a.limited)
+        .filter(|(_, a)| match (ceiling, a.used) {
+            (Some(m), Some(u)) => u < m,
+            _ => true,
+        })
+        .min_by_key(|(_, a)| {
+            (
+                tier(a.used),
+                (a.used.unwrap_or(0.0) * 10.0) as i64,
+                !a.default,
+                a.busy,
+            )
+        })
+        .map(|(i, _)| i)
+}
+
+/// The accounts of `provider` as candidates, from what is on disk now.
+pub fn candidates(provider: &str) -> Vec<(Account, Candidate)> {
+    let limited = crate::work::limits::active();
+    let runs = crate::runs::list();
+    let default = load_config()
+        .ok()
+        .and_then(|c| c.default_for(provider).map(str::to_string));
+    load_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.provider == provider)
+        .map(|a| {
+            let id = a.id();
+            let c = Candidate {
+                used: load(&id).and_then(|q| q.used()),
+                limited: limited.contains_key(&id),
+                busy: runs
+                    .iter()
+                    .filter(|r| r.account == id && r.state().is_live())
+                    .count(),
+                default: default.as_deref() == Some(a.name.as_str()),
+                id,
+            };
+            (a, c)
+        })
+        .collect()
+}
+
+/// Where a run on `account` should move before the limit: another account of the same
+/// CLI that is under `switch_at`, if any. Accounts at or over it are never picked, so a
+/// session doesn't bounce back to an account that is just as full.
+pub fn pick_switch(provider: &str, account: &str, switch_at: f64) -> Option<Account> {
+    let all = candidates(provider);
+    let c: Vec<Candidate> = all.iter().map(|(_, c)| c.clone()).collect();
+    let i = choose(&c, account, Some(switch_at), switch_at)?;
+    Some(all[i].0.clone())
+}
+
+/// "92% of its 5-hour window, resets in 1h 3m".
+pub fn describe(q: &Quota, now: i64) -> String {
+    match q.tightest() {
+        Some((name, w)) => format!(
+            "{:.0}% of its {name} window, resets {}",
+            w.used_percent,
+            until(w.resets_at, now)
+        ),
+        None => "no numbers".into(),
+    }
+}
+
+/// "in 2h 5m", "in 40m", "in 3d 4h".
+pub fn until(ms: i64, now: i64) -> String {
+    let m = ((ms - now).max(0) + 59_999) / 60_000;
+    if m >= 24 * 60 {
+        format!("in {}d {}h", m / 1440, m % 1440 / 60)
+    } else if m >= 60 {
+        format!("in {}h {}m", m / 60, m % 60)
+    } else {
+        format!("in {m}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reads_claude_code_status_line_input() {
+        let v = json!({
+            "model": {"display_name": "Opus"},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 23.5, "resets_at": 1738425600},
+                "seven_day": {"used_percentage": 41.2, "resets_at": 1738857600}
+            }
+        });
+        let q = from_statusline(&v, 1_738_420_000_000).unwrap();
+        assert_eq!(q.source, "statusline");
+        assert_eq!(q.five_hour.as_ref().unwrap().used_percent, 23.5);
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at, 1_738_425_600_000);
+        assert_eq!(q.seven_day.as_ref().unwrap().used_percent, 41.2);
+        assert_eq!(q.used(), Some(41.2));
+        assert_eq!(q.tightest().unwrap().0, "7-day");
+        // One window only, and none at all (API keys, or before the first response).
+        let one =
+            json!({"rate_limits": {"five_hour": {"used_percentage": 5, "resets_at": 1738425600}}});
+        assert!(from_statusline(&one, 0).unwrap().seven_day.is_none());
+        assert!(from_statusline(&json!({"model": {}}), 0).is_none());
+        assert!(from_statusline(&json!({"rate_limits": {}}), 0).is_none());
+    }
+
+    #[test]
+    fn drops_windows_that_have_reset() {
+        let q = Quota {
+            at: 0,
+            source: "statusline".into(),
+            five_hour: Some(Window {
+                used_percent: 95.0,
+                resets_at: 1000,
+                window_minutes: None,
+            }),
+            seven_day: Some(Window {
+                used_percent: 30.0,
+                resets_at: 5000,
+                window_minutes: None,
+            }),
+        };
+        let f = q.clone().fresh(2000).unwrap();
+        assert!(f.five_hour.is_none());
+        assert_eq!(f.used(), Some(30.0));
+        assert!(q.fresh(6000).is_none());
+    }
+
+    #[test]
+    fn reads_the_newest_rate_limits_from_a_codex_rollout() {
+        let line = |ts: &str, rl: Value| {
+            json!({"timestamp": ts, "type": "event_msg",
+                   "payload": {"type": "token_count", "info": null, "rate_limits": rl}})
+            .to_string()
+        };
+        let text = [
+            json!({"timestamp": "2026-11-19T10:00:00.000Z", "type": "session_meta",
+                   "payload": {"id": "x", "cwd": "/w"}})
+            .to_string(),
+            line(
+                "2026-11-19T10:01:00.000Z",
+                json!({"limit_id": "codex", "primary": {"used_percent": 10.0, "window_minutes": 300, "resets_at": 1_800_000_000},
+                       "secondary": {"used_percent": 3.0, "window_minutes": 10080, "resets_at": 1_800_500_000}}),
+            ),
+            line(
+                "2026-11-19T10:02:00.000Z",
+                json!({"limit_id": "codex", "primary": {"used_percent": 42.5, "window_minutes": 300, "resets_at": 1_800_000_000},
+                       "secondary": {"used_percent": 7.0, "window_minutes": 10080, "resets_at": 1_800_500_000}}),
+            ),
+            // A per-model limit after it doesn't replace Codex's own.
+            line(
+                "2026-11-19T10:02:30.000Z",
+                json!({"limit_id": "other_model", "primary": {"used_percent": 99.0, "window_minutes": 300, "resets_at": 1_800_000_000}}),
+            ),
+            // No rate limits on this one.
+            json!({"timestamp": "2026-11-19T10:03:00.000Z", "type": "event_msg",
+                   "payload": {"type": "token_count", "info": {}, "rate_limits": null}})
+            .to_string(),
+            "{\"cut off".to_string(),
+        ]
+        .join("\n");
+        let q = from_codex_rollout(&text).unwrap();
+        assert_eq!(q.source, "rollout");
+        assert_eq!(q.at, time::parse_iso("2026-11-19T10:02:00.000Z").unwrap());
+        assert_eq!(q.five_hour.as_ref().unwrap().used_percent, 42.5);
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at, 1_800_000_000_000);
+        assert_eq!(q.seven_day.as_ref().unwrap().used_percent, 7.0);
+        assert!(from_codex_rollout("{\"type\":\"session_meta\"}").is_none());
+    }
+
+    #[test]
+    fn reads_older_codex_rate_limits_with_relative_resets() {
+        let text = json!({"timestamp": "2025-09-20T10:00:00.000Z", "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": 50.0, "window_minutes": 299, "resets_in_seconds": 600},
+                "secondary": {"used_percent": 20.0, "window_minutes": 10079, "resets_in_seconds": 86400}}}})
+        .to_string();
+        let q = from_codex_rollout(&text).unwrap();
+        let at = time::parse_iso("2025-09-20T10:00:00.000Z").unwrap();
+        assert_eq!(q.five_hour.unwrap().resets_at, at + 600_000);
+        assert_eq!(q.seven_day.unwrap().resets_at, at + 86_400_000);
+    }
+
+    #[test]
+    fn finds_a_codex_runs_rollout_by_its_folder() {
+        let home = crate::testutil::TempDir::new();
+        let day = home.path().join("sessions/2026/11/19");
+        let meta = |cwd: &str| {
+            json!({"timestamp": "2026-11-19T10:00:00.000Z", "type": "session_meta",
+                   "payload": {"id": "x", "cwd": cwd}})
+            .to_string()
+        };
+        let count = json!({"timestamp": "2026-11-19T10:01:00.000Z", "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": 61.0, "window_minutes": 300, "resets_at": 1_800_000_000}}}})
+        .to_string();
+        crate::testutil::write(
+            &day.join("rollout-a.jsonl"),
+            &format!("{}\n{count}\n", meta("/work/api")),
+        );
+        crate::testutil::write(
+            &day.join("rollout-b.jsonl"),
+            &format!("{}\n", meta("/work/other")),
+        );
+        let run = Run {
+            cwd: "/work/api".into(),
+            started_at: time::now_ms(),
+            ..Default::default()
+        };
+        let f = codex_rollout_of(&run, home.path()).unwrap();
+        assert!(f.ends_with("rollout-a.jsonl"));
+        assert_eq!(read_codex_rollout(&f).unwrap().used(), Some(61.0));
+        // Files from before the run started aren't its own.
+        let old = Run {
+            started_at: time::now_ms() + 3_600_000,
+            ..run
+        };
+        assert!(codex_rollout_of(&old, home.path()).is_none());
+    }
+
+    fn cand(id: &str, used: Option<f64>, limited: bool, busy: usize, default: bool) -> Candidate {
+        Candidate {
+            id: id.into(),
+            used,
+            limited,
+            busy,
+            default,
+        }
+    }
+
+    #[test]
+    fn picks_the_account_with_the_most_headroom() {
+        let c = [
+            cand("c@a", Some(50.0), false, 0, true),
+            cand("c@b", Some(10.0), false, 2, false),
+            cand("c@c", Some(5.0), true, 0, false),
+            cand("c@d", None, false, 0, false),
+            cand("c@e", Some(95.0), false, 0, false),
+        ];
+        // Least used, never a limited one.
+        assert_eq!(choose(&c, "", Some(90.0), 90.0), Some(1));
+        // Accounts at or over the ceiling are skipped; unknown ones come after known ones.
+        let high = [
+            cand("c@a", Some(92.0), false, 0, true),
+            cand("c@d", None, false, 0, false),
+        ];
+        assert_eq!(choose(&high, "c@x", Some(90.0), 90.0), Some(1));
+        assert_eq!(choose(&high, "c@d", Some(90.0), 90.0), None);
+        // Without a ceiling (a hard limit), a high account is still better than none.
+        assert_eq!(choose(&high, "c@d", None, 90.0), Some(0));
+        // Ties go to the default account, then the one with fewer runs.
+        let tie = [
+            cand("c@a", None, false, 3, false),
+            cand("c@b", None, false, 1, false),
+            cand("c@c", None, false, 5, true),
+        ];
+        assert_eq!(choose(&tie, "", None, 90.0), Some(2));
+        assert_eq!(choose(&tie, "c@c", None, 90.0), Some(1));
+    }
+
+    #[test]
+    fn switches_only_between_turns() {
+        let status = |s: &str| ProgramStatus {
+            state: s.into(),
+            kind: None,
+            message: None,
+            since: 0,
+        };
+        let now = 100_000;
+        // Reported state decides when the CLI reports it.
+        assert!(turn_boundary(Some(&status("idle")), None, now, now));
+        assert!(turn_boundary(Some(&status("done")), None, now, now));
+        assert!(!turn_boundary(Some(&status("working")), None, 0, now));
+        assert!(!turn_boundary(Some(&status("blocked")), None, 0, now));
+        // A prompt waiting on you is mid-turn.
+        let w = Waiting {
+            reason: "Do you want to proceed?".into(),
+            since: 0,
+            source: None,
+        };
+        assert!(!turn_boundary(Some(&status("idle")), Some(&w), 0, now));
+        // Otherwise: quiet for 10 seconds.
+        assert!(!turn_boundary(None, None, now - 3_000, now));
+        assert!(turn_boundary(None, None, now - 10_000, now));
+    }
+
+    #[test]
+    fn formats_time_until_a_reset() {
+        assert_eq!(until(0, 0), "in 0m");
+        assert_eq!(until(40 * 60_000, 0), "in 40m");
+        assert_eq!(until(125 * 60_000, 0), "in 2h 5m");
+        assert_eq!(until((3 * 24 + 4) * 3_600_000, 0), "in 3d 4h");
+    }
+}

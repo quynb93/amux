@@ -1,6 +1,6 @@
 # Architecture
 
-amux is a launcher. It never talks to a model API and never edits a CLI's files. Its job is to prepare a directory and an environment so that a normal, unmodified CLI runs as a particular account.
+amux is a launcher. It never talks to a model API and never edits a CLI's files, except one setting when you ask it to: `amux usage --track on` points `statusLine` in Claude Code's `settings.json` at `amux __statusline`, and `--track off` puts back what was there. Its job is to prepare a directory and an environment so that a normal, unmodified CLI runs as a particular account.
 
 ## Code layout
 
@@ -18,7 +18,8 @@ plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:
                    slots (machine limits), verify (tests or push), github (PR, CI),
                    issues (GitHub issues as prompts), approve (auto-approve rules), review (diff and line comments),
-                   autopilot (commits → PR → CI and review feedback → ready or merged).
+                   autopilot (commits → PR → CI and review feedback → ready or merged),
+                   limits and quota (usage limits, each account's usage, picking accounts).
                    Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
@@ -150,6 +151,9 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `runs/<id>/autopilot.json`, `autopilot.log`, `autopilot.on` | `amux spawn --autopilot`, `amux autopilot`, the scheduler | A run's autopilot settings and progress (phase, CI fixes sent, review comments sent), its history, and the marker that keeps the scheduler going |
 | `runs/<id>/approvals.jsonl` | the run host | Each permission prompt it judged: what it asked, approved, denied or left for you, and why |
 | `intake.json` | `amux intake` | Issue numbers already started, per repo, so none starts twice |
+| `limits.json` | the run host, `amux usage --clear` | Accounts that hit their usage limit, until the reset time |
+| `usage/<p>@<n>.json` | `amux __statusline` (Claude Code's status line), the run host and `amux usage` (Codex session files) | The account's latest 5-hour and 7-day usage and reset times (work/quota.rs). Windows past their reset are ignored when read. The run host checks it every 20 s, to move a run before the limit (`limits.switchAt`) once its turn has ended |
+| `statusline.json` | `amux usage --track on` | The `statusLine` it replaced in Claude Code's shared `settings.json`, which `amux __statusline` runs and `--track off` puts back |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
 

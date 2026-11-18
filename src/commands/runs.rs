@@ -252,21 +252,20 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             bail!("Run names use letters, digits, '.', '_' and '-'.");
         }
     }
-    let mut acct = resolve_account(acct_ref)?;
-    // No account named: one that hasn't hit its usage limit, if there is one.
-    if !acct_ref.contains('@') {
-        if let Some(l) = crate::work::limits::of(&acct.id()) {
-            if let Some(other) = crate::work::limits::pick(&acct.provider, &acct.id()) {
-                eprintln!(
-                    "amux: {} is limited ({}); using {} instead",
-                    acct.id(),
-                    l.reason,
-                    other.id()
-                );
-                acct = other;
+    // No account named: one that hasn't hit its usage limit and, with `limits.switchAt`,
+    // the one with the most headroom.
+    let acct = if acct_ref.contains('@') {
+        resolve_account(acct_ref)?
+    } else {
+        let default = resolve_account(acct_ref);
+        match crate::work::limits::pick_for_spawn(acct_ref, default.as_ref().ok()) {
+            Some((other, why)) => {
+                eprintln!("amux: {why}");
+                other
             }
+            None => default?,
         }
-    }
+    };
     let (spec, mut env) = prepare(&acct)?;
     let cwd = match &o.dir {
         Some(d) => {
@@ -757,10 +756,13 @@ const FAILOVER_USAGE: &str = "amux failover <run> [--to <provider>@<name>]";
 pub fn failover_cmd(argv: &[String]) -> Result<i32> {
     let mut to = None;
     let mut id = None;
+    // Set by the run host when it moves a run before the limit (`limits.switchAt`).
+    let mut near = false;
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--to" => to = Some(need(it.next(), FAILOVER_USAGE)?.to_string()),
+            "--near-limit" => near = true,
             f if f.starts_with('-') => bail!("Unknown option {f}. Usage: {FAILOVER_USAGE}"),
             r => id = Some(r.to_string()),
         }
@@ -827,7 +829,11 @@ pub fn failover_cmd(argv: &[String]) -> Result<i32> {
     nudge_when_ready(
         &name,
         since,
-        "The previous account hit its usage limit, so this session continues under another account. Please carry on with the task where you left off.",
+        if near {
+            "The previous account was close to its usage limit, so this session continues under another account. If you were in the middle of the task, carry on where you left off; otherwise wait for the next instruction."
+        } else {
+            "The previous account hit its usage limit, so this session continues under another account. Please carry on with the task where you left off."
+        },
     );
     println!(
         "{} continues as {name} under {} (session {session}, same folder{}).",

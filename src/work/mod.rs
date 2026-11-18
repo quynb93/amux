@@ -10,6 +10,7 @@ pub mod issues;
 pub mod limits;
 pub mod notes;
 pub mod overlap;
+pub mod quota;
 pub mod review;
 pub mod slots;
 pub mod verify;
