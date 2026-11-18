@@ -1,0 +1,17 @@
+{
+  "claude": {
+    "waitingPatterns": ["Do you want to", "Enter to confirm"],
+    "limitPatterns": ["You've hit your limit", "Usage limit reached", "limit reached · limit resets"]
+  },
+  "codex": {
+    "waitingPatterns": ["Would you like to run", "Would you like to make the following edits", "Yes, proceed"],
+    "limitPatterns": ["You've hit your usage limit", "usage limit has been reached"]
+  },
+  "gemini": {
+    "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"],
+    "limitPatterns": ["exhausted your daily quota", "Quota exceeded for quota metric"]
+  },
+  "qwen": {
+    "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"]
+  }
+}

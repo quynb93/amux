@@ -422,7 +422,7 @@ codex@me         -                -                                        ok   
 - A run whose CLI says it hit its limit shows `waiting` with the message, and the account is marked limited until the reset time the message names. You get a notification, and `~/.amux/hooks/on-limited` runs.
 - `amux spawn claude` (no account named) skips limited accounts.
 - **`failover`** resumes the run's session (`claude --resume <id>`, `codex resume <id>`) under another account of the same CLI, in the same folder and worktree, and tells the agent to carry on. Set `"limits": { "onLimit": "failover" }` in `~/.amux/config.json` to do it automatically, or keep the default (`wait`), where the CLI waits for the reset itself.
-- The messages amux watches for are each provider's `limitPatterns`. Add your own in `config.json` if a CLI words them differently.
+- The messages amux watches for are each provider's `limitPatterns`. `amux update --patterns` fetches the current wording ([Updates](#updates)), and you can add your own in `config.json` if a CLI words them differently.
 - Check that moving work between accounts is allowed by your provider's terms.
 
 **Switching before the limit.** amux can also see how much of each account is used, and move work before an account runs out:
@@ -805,6 +805,17 @@ Update available: amux 0.1.0 → 0.2.0  Run `amux update` or see https://github.
 
 Commands never wait on the network. The notice comes from a cached result, which a background process refreshes from GitHub releases at most once a day. `amux update` checks right away and installs the new version (`--check` only prints how). Set `AMUX_NO_UPDATE_CHECK=1` to turn the check off. It is also skipped in CI and when output is not a terminal.
 
+**Prompt patterns.** CLIs change the wording of their permission prompts and limit messages between releases, and amux needs the current wording to show `waiting` and notice usage limits. The wording for the built-in CLIs is kept in [`patterns.json`](patterns.json) in this repo, so it can change without a release:
+
+```sh
+amux update --patterns     # fetch patterns.json from the repo's main branch now
+```
+
+- The daily update check fetches it too, and `AMUX_NO_UPDATE_CHECK=1` turns that off as well. It is saved in `~/.amux/patterns.json`.
+- It is checked before it is saved: at most 64 KB, valid JSON, only `waitingPatterns` and `limitPatterns` for built-in CLIs, and each pattern one line of plain text (4 to 200 characters, matched case-insensitively, not a regular expression). A file that fails is not saved, and the last good one stays.
+- Layers, lowest first: the built-in patterns, `~/.amux/patterns.json`, then your own `waitingPatterns` and `limitPatterns` in `config.json`.
+- Patterns only decide what a run shows and when you're notified. [Auto-approve](#answering-permission-prompts) never uses them: it reads the prompt on the screen itself.
+
 ## Command reference
 
 | Command | What it does |
@@ -854,7 +865,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
 | `amux doctor` | Check binaries, shared homes and overlays. |
-| `amux update [--check]` | Install the latest amux release, or with `--check` only look for one. |
+| `amux update [--check \| --patterns]` | Install the latest amux release, or with `--check` only look for one. `--patterns` fetches the latest prompt and limit text for the built-in CLIs. |
 | `amux --version`, `amux help` | |
 
 ## Files and environment
@@ -869,6 +880,7 @@ Commands never wait on the network. The notice comes from a cached result, which
   worktrees/           git worktrees made by `amux spawn --worktree`
   launches.jsonl       local log of launches: time, account, directory, arguments (mode 0600)
   update-check.json    cached result of the update check
+  patterns.json        prompt and limit text for the built-in CLIs (`amux update --patterns`)
   phone.json           where phone notifications go (`amux phone`, mode 0600)
   tls/                 the self-signed certificate made by `amux serve --tls`
   approve.json         rules for answering permission prompts (`amux allow`)
@@ -893,7 +905,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `LINEAR_API_KEY` | A Linear API key, used instead of the stored one. |
 | `JIRA_API_TOKEN`, `JIRA_URL`, `JIRA_EMAIL` | A Jira API token, site and email, used instead of the stored ones. |
 
-amux makes no network requests of its own, except the daily update check to `api.github.com`, notifications to the service you chose once you set them up with `amux phone`, and, when you use Linear or Jira issues, requests to `api.linear.app` or your Jira site with the key you gave it (reading issues, and the comment with the PR's link).
+amux makes no network requests of its own, except the daily update check (the latest release from `api.github.com`, and `patterns.json` from `raw.githubusercontent.com`, both turned off by `AMUX_NO_UPDATE_CHECK=1`), `amux update`, notifications to the service you chose once you set them up with `amux phone`, and, when you use Linear or Jira issues, requests to `api.linear.app` or your Jira site with the key you gave it (reading issues, and the comment with the PR's link).
 
 ## Moving from separate config dirs
 

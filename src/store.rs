@@ -165,7 +165,17 @@ pub(crate) fn falsy(v: Option<&Value>) -> bool {
 }
 
 /// Built-in providers merged with the ones in config.json, in definition order.
+#[cfg(test)]
 pub fn load_providers_from(cfg: &Config) -> Result<Vec<ProviderSpec>> {
+    load_providers_with(cfg, &Map::new())
+}
+
+/// Built-in providers, then the patterns fetched by `amux update --patterns`, then
+/// config.json: each layer's fields replace the one below it.
+pub fn load_providers_with(
+    cfg: &Config,
+    fetched: &Map<String, Value>,
+) -> Result<Vec<ProviderSpec>> {
     let mut raw: Vec<Map<String, Value>> = providers::builtin()
         .into_iter()
         .filter_map(|v| {
@@ -176,6 +186,7 @@ pub fn load_providers_from(cfg: &Config) -> Result<Vec<ProviderSpec>> {
             }
         })
         .collect();
+    crate::patterns::apply(&mut raw, fetched);
     for custom in cfg.providers.iter().flatten() {
         let Some(custom) = custom.as_object() else {
             bail!(
@@ -265,7 +276,7 @@ pub fn load_providers() -> Result<&'static [ProviderSpec]> {
     PROVIDERS
         .get_or_init(|| {
             load_config()
-                .and_then(|c| load_providers_from(&c))
+                .and_then(|c| load_providers_with(&c, &crate::patterns::load()))
                 .map_err(|e| format!("{e:#}"))
         })
         .as_deref()

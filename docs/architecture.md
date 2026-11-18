@@ -131,6 +131,8 @@ A sandboxed run (`amux spawn --sandbox`, `runs/sandbox.rs`) works the same way, 
 
 `update.rs` follows the pattern Claude Code and Codex use. On each run it reads `~/.amux/update-check.json` and prints a notice if a newer version is cached. If the cache is more than a day old, it starts a detached `amux __update-check` process that asks the GitHub releases API for the latest tag and rewrites the cache. The command the user typed never waits on the network.
 
+The same background process fetches `patterns.json` from the repo's main branch (`patterns.rs`), as `amux update --patterns` does on demand. It holds `waitingPatterns` and `limitPatterns` for the built-in providers. It is validated (size, JSON, only those two keys, plain one-line text) and saved to `~/.amux/patterns.json` only if it passes, and is checked again when loaded. `store::load_providers` layers it between the built-in definitions and `config.json`. Nothing in `work/approve.rs` reads it.
+
 ## State on disk
 
 | Path | Written by | Contents |
@@ -162,5 +164,6 @@ A sandboxed run (`amux spawn --sandbox`, `runs/sandbox.rs`) works the same way, 
 | `statusline.json` | `amux usage --track on` | The `statusLine` it replaced in Claude Code's shared `settings.json`, which `amux __statusline` runs and `--track off` puts back |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |
 | `update-check.json` | update check | Last check time and latest version |
+| `patterns.json` | update check, `amux update --patterns` | Prompt and limit text for the built-in providers, from the repo |
 
 JSON files are written atomically: amux writes a temp file, then renames it over the old one.

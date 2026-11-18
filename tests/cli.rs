@@ -3175,6 +3175,84 @@ fn update_installs_the_latest_release() {
 }
 
 #[test]
+fn updates_prompt_patterns_without_a_release() {
+    let s = Sandbox::new("patterns");
+    let path = "/quynb93/amux/main/patterns.json".to_string();
+    let good = file_server(vec![(
+        path.clone(),
+        br#"{"claude": {"waitingPatterns": ["Shall I go ahead"]}, "newcli": {"waitingPatterns": ["Go on?"]}}"#
+            .to_vec(),
+    )]);
+    let bad = file_server(vec![(
+        path.clone(),
+        br#"{"claude": {"bin": "/tmp/not-claude"}}"#.to_vec(),
+    )]);
+    let saved = s.amux_home.join("patterns.json");
+    let update =
+        |url: &str| s.amux_with(&["update", "--patterns"], &[("AMUX_GITHUB_URL", url)], None);
+
+    let r = update(&good);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.out
+            .contains("Updated the prompt and limit patterns for claude"),
+        "{}",
+        r.out
+    );
+    assert!(r.out.contains("Skipped newcli"), "{}", r.out);
+    let text = fs::read_to_string(&saved).unwrap();
+    assert!(
+        text.contains("Shall I go ahead") && !text.contains("newcli"),
+        "{text}"
+    );
+    assert!(update(&good).out.contains("up to date"));
+
+    // A file that doesn't check out is never saved.
+    let r = update(&bad);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.err.contains("only waitingPatterns and limitPatterns"),
+        "{}",
+        r.err
+    );
+    assert_eq!(fs::read_to_string(&saved).unwrap(), text);
+
+    // New runs use the fetched patterns; the rest of the built-in stays.
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    let fake = c["providers"][0]["bin"].clone();
+    c["providers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"id": "claude", "bin": fake}));
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "claude", "w", "--no-login"]);
+    let r = s.amux(&["spawn", "--name", "c", "claude"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    let run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/c/run.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        run["waitingPatterns"],
+        serde_json::json!(["Shall I go ahead"])
+    );
+    assert!(run["limitPatterns"]
+        .as_array()
+        .unwrap()
+        .contains(&"You've hit your limit".into()));
+
+    // config.json beats the fetched file.
+    c["providers"][1]["waitingPatterns"] = serde_json::json!(["My own prompt"]);
+    write(&cfg, &c.to_string());
+    s.amux(&["spawn", "--name", "d", "claude"]);
+    let run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/d/run.json")).unwrap())
+            .unwrap();
+    assert_eq!(run["waitingPatterns"], serde_json::json!(["My own prompt"]));
+}
+
+#[test]
 fn works_on_github_issues_and_runs_commands_on_a_schedule() {
     let s = Sandbox::new("issues");
     s.amux(&["account", "add", "fake", "one", "--no-login"]);
