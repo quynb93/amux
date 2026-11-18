@@ -21,12 +21,13 @@ use serde::Serialize;
 use std::path::Path;
 
 const TRY_USAGE: &str =
-    "amux try <count> <provider>[@name] | <account>,<account>... -p <prompt> [--name <task>] [--base <ref>]";
+    "amux try <count> <provider>[@name] | <account>,<account>... -p <prompt> [--name <task>] [--base <ref>] [--sandbox[=<engine>]] [--image <image>] [--network on|off]";
 
 pub fn try_cmd(argv: &[String]) -> Result<i32> {
     let mut prompt = None;
     let mut name = None;
     let mut base = None;
+    let mut sandbox: Vec<String> = vec![];
     let mut pos = vec![];
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -34,6 +35,14 @@ pub fn try_cmd(argv: &[String]) -> Result<i32> {
             "-p" | "--prompt" => prompt = Some(need(it.next(), TRY_USAGE)?.to_string()),
             "--name" => name = Some(need(it.next(), TRY_USAGE)?.to_string()),
             "--base" => base = Some(need(it.next(), TRY_USAGE)?.to_string()),
+            // Passed on to each attempt's spawn.
+            f if f == "--sandbox" || f.starts_with("--sandbox=") || f == "--no-sandbox" => {
+                sandbox.push(f.to_string())
+            }
+            "--image" | "--network" => {
+                sandbox.push(a.clone());
+                sandbox.push(need(it.next(), TRY_USAGE)?.to_string());
+            }
             f if f.starts_with('-') => bail!("Unknown option {f}. Usage: {TRY_USAGE}"),
             p => pos.push(p.to_string()),
         }
@@ -82,6 +91,7 @@ pub fn try_cmd(argv: &[String]) -> Result<i32> {
         if let Some(b) = &base {
             args.extend(["--base".to_string(), b.clone()]);
         }
+        args.extend(sandbox.iter().cloned());
         args.push(acct.clone());
         super::runs::spawn_cmd(&args)?;
     }

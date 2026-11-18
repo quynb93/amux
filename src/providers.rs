@@ -64,6 +64,10 @@ pub struct ProviderSpec {
     pub privacy_env: Option<Map<String, Value>>,
     /// Session file format: "claude", "codex" or "gemini".
     pub sessions: Option<String>,
+    /// Files in the overlay that hold a login, for `amux spawn --sandbox` to check that a
+    /// container can sign in (a Keychain login can't be read from one).
+    #[serde(default)]
+    pub login_files: Vec<String>,
 }
 
 impl ProviderSpec {
@@ -130,7 +134,9 @@ pub fn builtin() -> Vec<Value> {
                 "DISABLE_ERROR_REPORTING": "1",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
             },
-            "sessions": "claude"
+            "sessions": "claude",
+            // On Linux; on macOS the login is in the Keychain instead.
+            "loginFiles": [".credentials.json"]
         }),
         json!({
             "id": "codex",
@@ -150,7 +156,8 @@ pub fn builtin() -> Vec<Value> {
             "waitingPatterns": ["Would you like to run", "Would you like to make the following edits", "Yes, proceed"],
             "limitPatterns": ["You've hit your usage limit", "usage limit has been reached"],
             "baseUrlEnv": "OPENAI_BASE_URL",
-            "sessions": "codex"
+            "sessions": "codex",
+            "loginFiles": ["auth.json"]
         }),
         json!({
             "id": "gemini",
@@ -168,7 +175,8 @@ pub fn builtin() -> Vec<Value> {
             "conflictingEnv": ["GEMINI_CLI_HOME"],
             "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"],
             "limitPatterns": ["exhausted your daily quota", "Quota exceeded for quota metric"],
-            "sessions": "gemini"
+            "sessions": "gemini",
+            "loginFiles": ["oauth_creds.json"]
         }),
     ]
 }

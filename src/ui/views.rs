@@ -135,6 +135,9 @@ impl App {
         if let Some(wt) = &row.run.worktree {
             where_.push_str(&format!(" · {}", wt.branch));
         }
+        if row.run.sandbox.is_some() {
+            where_.push_str(" · sandboxed");
+        }
         let mut what = match (&row.run.waiting, &row.run.status) {
             (Some(wt), _) => wt.reason.clone(),
             (None, Some(s)) => s.message.clone().unwrap_or_default(),

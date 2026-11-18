@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const SPAWN_USAGE: &str =
-    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>|linear:<KEY>|jira:<KEY>] [--autopilot[=merge]] [--attach] <provider>[@name] [args...]";
+    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>|linear:<KEY>|jira:<KEY>] [--autopilot[=merge]] [--sandbox[=docker|podman]] [--image <image>] [--network on|off] [--no-sandbox] [--attach] <provider>[@name] [args...]";
 
 /// What an agent on autopilot is told after its prompt.
 const AUTOPILOT_POSTSCRIPT: &str = "\n\nWhen you're done, commit your work on this branch, and don't push: amux pushes it, opens the pull request, and brings you CI failures and review comments to fix.";
@@ -41,6 +41,12 @@ struct SpawnOpts {
     issue: Option<String>,
     /// Autopilot (`--autopilot`, `--autopilot=merge`): Some(true) merges when ready.
     autopilot: Option<bool>,
+    /// `--sandbox` (Some(None)) or `--sandbox=<engine>`: run the CLI in a container.
+    sandbox: Option<Option<String>>,
+    no_sandbox: bool,
+    /// The container image (`--image`), and whether it gets a network (`--network`).
+    image: Option<String>,
+    network: Option<bool>,
     worktree: bool,
     branch: Option<String>,
     base: Option<String>,
@@ -80,6 +86,15 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--worktree" | "-w" => o.worktree = true,
             "--attach" | "-a" => o.attach = true,
             "--no-auto-approve" => o.no_auto = true,
+            "--sandbox" => {
+                o.sandbox = Some(match inline.as_deref() {
+                    None | Some("") => None,
+                    Some(e) => Some(e.to_string()),
+                })
+            }
+            "--no-sandbox" => o.no_sandbox = true,
+            "--image" => o.image = Some(value()?),
+            "--network" => o.network = Some(crate::runs::sandbox::network_on(&value()?)?),
             "--autopilot" => {
                 o.autopilot = Some(match inline.as_deref() {
                     None | Some("on") => false,
@@ -239,6 +254,8 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             "--dir",
             "--issue",
             "--autopilot",
+            "--sandbox",
+            "--image",
         ]
         .contains(&a.as_str())
     }) {
@@ -321,6 +338,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         }
     }
     let args = args.as_slice();
+    let sandbox = sandbox_request(&o)?;
     let id = runs::claim_id(o.name.as_deref(), &acct.provider)?;
 
     let mut run = Run {
@@ -372,6 +390,16 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
                     .push(("COMPOSE_PROJECT_NAME".into(), format!("amux-{}", run.id)));
             }
         }
+        if let Some((req, cfg)) = &sandbox {
+            run.sandbox = Some(crate::runs::sandbox::plan(
+                req,
+                cfg,
+                &spec,
+                &acct,
+                &env,
+                Path::new(&run.cwd),
+            )?);
+        }
         runs::save(&run)?;
         log_launch(&acct, args, Path::new(&run.cwd));
         start_host(&run, &env)
@@ -385,10 +413,18 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         return Err(e);
     }
 
-    let place = match &run.worktree {
+    let mut place = match &run.worktree {
         Some(wt) => format!("{} (branch {})", tildify(Path::new(&run.cwd)), wt.branch),
         None => tildify(Path::new(&run.cwd)),
     };
+    if let Some(sb) = &run.sandbox {
+        place.push_str(&format!(
+            ", sandboxed in {} ({}{})",
+            sb.engine_name(),
+            sb.image,
+            if sb.network { "" } else { ", no network" }
+        ));
+    }
     if let Some(merge) = o.autopilot {
         crate::work::autopilot::enable(&id, merge, None)?;
         eprintln!(
@@ -411,6 +447,42 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     }
     eprintln!("  amux attach {id}    amux ps    amux stop {id}");
     Ok(0)
+}
+
+/// Whether the run goes in a container, and how: `--no-sandbox` wins, then the flags
+/// (`--image` and `--network` imply `--sandbox`), then the run it adopts (failover keeps
+/// a sandboxed run sandboxed), then `"always": true` in the config's `"sandbox"`.
+fn sandbox_request(
+    o: &SpawnOpts,
+) -> Result<Option<(crate::runs::sandbox::Request, crate::runs::sandbox::Config)>> {
+    use crate::runs::sandbox::{Config, Request};
+    if o.no_sandbox {
+        return Ok(None);
+    }
+    let cfg = Config::load()?;
+    let req = if o.sandbox.is_some() || o.image.is_some() || o.network.is_some() {
+        Request {
+            engine: o.sandbox.clone().flatten(),
+            image: o.image.clone(),
+            network: o.network,
+        }
+    } else if let Some(old) = o
+        .adopt
+        .as_deref()
+        .and_then(|a| runs::find(a).ok())
+        .and_then(|r| r.sandbox)
+    {
+        Request {
+            engine: Some(old.engine),
+            image: Some(old.image),
+            network: Some(old.network),
+        }
+    } else if cfg.always {
+        Request::default()
+    } else {
+        return Ok(None);
+    };
+    Ok(Some((req, cfg)))
 }
 
 /// Starts `amux __run-host <id>` in its own session with the account's environment and
@@ -539,6 +611,7 @@ pub(crate) fn ps_values(all: &[Run]) -> Vec<serde_json::Value> {
                 "verifyLabel": verify.as_ref().map(|v| v.label()),
                 "verify": verify,
                 "pr": crate::work::github::load(&r.id),
+                "sandbox": r.sandbox.as_ref().map(|s| s.engine_name()),
                 "startedAt": r.started_at,
                 "args": r.args,
                 "run": r,
@@ -578,7 +651,10 @@ pub fn ps_cmd(argv: &[String]) -> Result<i32> {
             let dir = s(v, "cwd");
             vec![
                 s(v, "id"),
-                s(v, "account"),
+                match v["sandbox"].as_str() {
+                    Some(_) => format!("{} [sandbox]", s(v, "account")),
+                    None => s(v, "account"),
+                },
                 s(v, "psLabel"),
                 since(v["startedAt"].as_i64().unwrap_or(now), now),
                 if v.get("machine").is_some() {
@@ -712,7 +788,13 @@ pub fn stop_cmd(argv: &[String]) -> Result<i32> {
         bail!("{} is not running.", run.id);
     }
     signal(&run, if force { libc::SIGKILL } else { libc::SIGTERM })?;
-    match wait_exit(&run.id, Duration::from_secs(5)) {
+    let mut ended = wait_exit(&run.id, Duration::from_secs(5));
+    // A container can outlive a signal to its engine's client: remove it, which ends the CLI.
+    if let (None, Some(sb)) = (&ended, &run.sandbox) {
+        sb.remove(&run.id);
+        ended = wait_exit(&run.id, Duration::from_secs(5));
+    }
+    match ended {
         Some(r) => println!("Stopped {} ({}).", r.id, state_label(&r, time::now_ms())),
         None => println!(
             "Sent {} to {}; it is still running. Use `amux stop {} --force` to kill it.",
@@ -1069,6 +1151,9 @@ pub fn rm_cmd(argv: &[String]) -> Result<i32> {
                 );
             }
             let _ = signal(&run, libc::SIGKILL);
+            if let Some(sb) = &run.sandbox {
+                sb.remove(&run.id);
+            }
             wait_exit(&run.id, Duration::from_secs(3));
         }
         let note = run
@@ -1109,6 +1194,27 @@ mod tests {
         assert_eq!(o.name.as_deref(), Some("fix"));
         assert_eq!(acct, "claude@work");
         assert_eq!(rest, ["--name", "x", "-p", "hi"]);
+    }
+
+    #[test]
+    fn reads_sandbox_flags() {
+        let (o, _, _) = parse_spawn(&args(&["--sandbox", "claude"])).unwrap();
+        assert_eq!(o.sandbox, Some(None));
+        let (o, _, _) = parse_spawn(&args(&[
+            "--sandbox=podman",
+            "--image",
+            "img:1",
+            "--network",
+            "off",
+            "claude",
+        ]))
+        .unwrap();
+        assert_eq!(o.sandbox, Some(Some("podman".into())));
+        assert_eq!(o.image.as_deref(), Some("img:1"));
+        assert_eq!(o.network, Some(false));
+        assert!(parse_spawn(&args(&["--network", "maybe", "claude"])).is_err());
+        let (o, _, _) = parse_spawn(&args(&["--no-sandbox", "claude"])).unwrap();
+        assert!(o.no_sandbox && sandbox_request(&o).unwrap().is_none());
     }
 
     #[test]

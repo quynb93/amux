@@ -348,8 +348,17 @@ fn host(id: &str) -> Result<i32> {
 
     let (master, slave) = openpty(run.rows.max(1), run.cols.max(1))?;
     record_size(run.rows.max(1), run.cols.max(1));
-    let mut cmd = Command::new(&run.bin);
-    cmd.args(&run.args)
+    // A sandboxed run starts the container engine, which runs the CLI in the image.
+    let argv = match &run.sandbox {
+        Some(sb) => {
+            // A container of the same name left over (a revived run) would block this one.
+            sb.remove(id);
+            sb.command(id, &run.cwd, &run.bin, &run.args)
+        }
+        None => [vec![run.bin.clone()], run.args.clone()].concat(),
+    };
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .current_dir(&run.cwd)
         .env("AMUX_RUN", id)
         .stdin(Stdio::from(slave.try_clone()?))
@@ -370,7 +379,7 @@ fn host(id: &str) -> Result<i32> {
     drop(cmd);
     let mut child = spawned.map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
-            anyhow!("\"{}\" not found on PATH.", run.bin)
+            anyhow!("\"{}\" not found on PATH.", argv[0])
         } else {
             e.into()
         }
@@ -421,6 +430,10 @@ fn host(id: &str) -> Result<i32> {
     }
 
     let status = child.wait()?;
+    // The engine's client can be killed while its container goes on: end that too.
+    if let Some(sb) = &run.sandbox {
+        sb.remove(id);
+    }
     let code = status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));

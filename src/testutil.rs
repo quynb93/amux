@@ -61,6 +61,7 @@ pub fn spec(id: &str, shared_home: &Path) -> ProviderSpec {
         base_url_env: None,
         privacy_env: None,
         sessions: None,
+        login_files: vec![],
     }
 }
 
