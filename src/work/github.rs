@@ -311,6 +311,130 @@ pub fn send_ci_failures(run: &Run, pr: &PullRequest, checks: &[Check]) -> Result
     Ok(pr.failing.len())
 }
 
+/// The run's latest pull request as GitHub has it now (open, merged or closed), kept in
+/// pr.json; None if its branch never had one.
+pub fn current(run: &Run) -> Result<Option<PullRequest>> {
+    let (dir, branch) = branch_of(run)?;
+    let Some(mut pr) = find_pr(&dir, &branch)? else {
+        return Ok(None);
+    };
+    if let Some(old) = load(&run.id).filter(|o| o.number == pr.number) {
+        pr.checks = old.checks;
+        pr.failing = old.failing;
+    }
+    write_json(&pr_file(&run.id), &pr)?;
+    Ok(Some(pr))
+}
+
+/// One piece of review feedback on a PR: a comment in an unresolved thread, or the text
+/// of a review.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Feedback {
+    pub id: String,
+    pub text: String,
+}
+
+/// What reviewers think of a PR, and the commit they looked at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Review {
+    /// The PR's head commit.
+    pub head: String,
+    /// APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or empty when no review is required.
+    pub decision: String,
+    pub feedback: Vec<Feedback>,
+}
+
+const REVIEW_QUERY: &str = "query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){headRefOid reviewDecision reviews(last:50){nodes{id state body author{login}}} reviewThreads(first:100){nodes{isResolved path line comments(first:50){nodes{id body author{login}}}}}}}}";
+
+/// Reads the reviews and unresolved review threads of the run's PR #`number`.
+pub fn review(run: &Run, number: u64) -> Result<Review> {
+    let (dir, _) = branch_of(run)?;
+    let n = format!("n={number}");
+    let q = format!("query={REVIEW_QUERY}");
+    let out = gh_out(
+        &dir,
+        &[
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "repo={repo}",
+            "-F",
+            &n,
+            "-f",
+            &q,
+        ],
+        &[],
+    )?;
+    let v: Value = serde_json::from_str(&out).context("unexpected output from gh api graphql")?;
+    Ok(parse_review(&v["data"]["repository"]["pullRequest"]))
+}
+
+fn parse_review(pr: &Value) -> Review {
+    let s = |v: &Value| v.as_str().unwrap_or_default().trim().to_string();
+    let mut feedback = vec![];
+    let nodes = |v: &Value| v["nodes"].as_array().cloned().unwrap_or_default();
+    for r in nodes(&pr["reviews"]) {
+        let body = s(&r["body"]);
+        if body.is_empty() || !matches!(s(&r["state"]).as_str(), "CHANGES_REQUESTED" | "COMMENTED")
+        {
+            continue;
+        }
+        feedback.push(Feedback {
+            id: s(&r["id"]),
+            text: format!("{} in a review: {body}", s(&r["author"]["login"])),
+        });
+    }
+    for t in nodes(&pr["reviewThreads"]) {
+        if t["isResolved"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let place = match (s(&t["path"]), t["line"].as_u64()) {
+            (p, _) if p.is_empty() => String::new(),
+            (p, Some(l)) => format!(" on {p}:{l}"),
+            (p, None) => format!(" on {p}"),
+        };
+        for c in nodes(&t["comments"]) {
+            let body = s(&c["body"]);
+            if body.is_empty() {
+                continue;
+            }
+            feedback.push(Feedback {
+                id: s(&c["id"]),
+                text: format!("{}{place}: {body}", s(&c["author"]["login"])),
+            });
+        }
+    }
+    feedback.retain(|f| !f.id.is_empty());
+    Review {
+        head: s(&pr["headRefOid"]),
+        decision: s(&pr["reviewDecision"]),
+        feedback,
+    }
+}
+
+/// Hands review feedback to the run's agent.
+pub fn send_feedback(run: &Run, pr: &PullRequest, items: &[Feedback]) -> Result<()> {
+    let mut msg = format!("Review feedback on PR #{} ({}):\n", pr.number, pr.url);
+    for f in items {
+        msg.push_str(&format!("\n- {}", f.text));
+    }
+    msg.push_str(
+        "\n\nPlease address it: change what should change, commit, and push again. \
+         Where you disagree, say why instead.",
+    );
+    send_text(run, &msg, true)
+}
+
+/// Merges the run's PR #`number` (squash, or `method`: merge, squash or rebase).
+pub fn merge(run: &Run, number: u64, method: &str) -> Result<()> {
+    let (dir, _) = branch_of(run)?;
+    let flag = format!("--{method}");
+    gh_out(&dir, &["pr", "merge", &number.to_string(), &flag], &[])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +488,36 @@ mod tests {
         assert_eq!(pr.label(), "PR #7 checks ✓");
         pr.state = "MERGED".into();
         assert_eq!(pr.label(), "PR #7 merged");
+    }
+
+    #[test]
+    fn reads_reviews_and_open_threads() {
+        let v: Value = serde_json::from_str(
+            r#"{"headRefOid":"abc","reviewDecision":"CHANGES_REQUESTED",
+            "reviews":{"nodes":[
+              {"id":"R1","state":"CHANGES_REQUESTED","body":"Needs a test.","author":{"login":"ann"}},
+              {"id":"R2","state":"APPROVED","body":"ok","author":{"login":"bo"}},
+              {"id":"R3","state":"COMMENTED","body":"","author":{"login":"bo"}}]},
+            "reviewThreads":{"nodes":[
+              {"isResolved":false,"path":"src/a.rs","line":4,"comments":{"nodes":[{"id":"C1","body":"Off by one.","author":{"login":"ann"}}]}},
+              {"isResolved":true,"path":"src/b.rs","line":1,"comments":{"nodes":[{"id":"C2","body":"Done.","author":{"login":"ann"}}]}}]}}"#,
+        )
+        .unwrap();
+        let r = parse_review(&v);
+        assert_eq!(r.head, "abc");
+        assert_eq!(r.decision, "CHANGES_REQUESTED");
+        let got: Vec<_> = r
+            .feedback
+            .iter()
+            .map(|f| (f.id.as_str(), f.text.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("R1", "ann in a review: Needs a test."),
+                ("C1", "ann on src/a.rs:4: Off by one.")
+            ]
+        );
+        assert_eq!(parse_review(&Value::Null), Review::default());
     }
 }

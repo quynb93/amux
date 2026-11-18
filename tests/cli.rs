@@ -3117,3 +3117,173 @@ fn answers_permission_prompts_the_rules_allow() {
         s.amux(&["stop", r, "--force"]);
     }
 }
+
+#[test]
+fn autopilot_takes_a_run_from_commits_to_a_merged_pr() {
+    let s = Sandbox::new("autopilot");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    let remote = s.home.join("remote.git");
+    fs::create_dir_all(&repo).unwrap();
+    write(&repo.join("a.txt"), "x");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&s.home, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    // A stand-in for the GitHub CLI whose PR, checks and reviews come from files.
+    let f = |n: &str| s.home.join(n);
+    let gh = f("bin/gh");
+    write(
+        &gh,
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1 $2\" in\n\
+             'pr view') [ -f {st} ] && echo \"{{\\\"url\\\":\\\"https://github.com/o/r/pull/7\\\",\\\"number\\\":7,\\\"state\\\":\\\"$(cat {st})\\\"}}\" && exit 0; echo 'no pull requests found for branch' >&2; exit 1;;\n\
+             'pr create') echo OPEN > {st};;\n\
+             'pr checks') cat {checks};;\n\
+             'api graphql') cat {review};;\n\
+             'run view') echo 'test\tRun tests\tassertion failed: parser-broke';;\n\
+             'pr merge') echo MERGED > {st};;\n\
+             esac\n",
+            log = f("gh-log").display(),
+            st = f("gh-pr").display(),
+            checks = f("gh-checks").display(),
+            review = f("gh-review").display(),
+        ),
+    );
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let checks = |bucket: &str| {
+        write(
+            &f("gh-checks"),
+            &format!("[{{\"name\":\"test\",\"bucket\":\"{bucket}\",\"link\":\"https://github.com/o/r/actions/runs/42/job/1\",\"workflow\":\"CI\"}}]"),
+        )
+    };
+    let review = |head: &str, decision: &str, threads: &str| {
+        write(
+            &f("gh-review"),
+            &format!("{{\"data\":{{\"repository\":{{\"pullRequest\":{{\"headRefOid\":\"{head}\",\"reviewDecision\":\"{decision}\",\"reviews\":{{\"nodes\":[]}},\"reviewThreads\":{{\"nodes\":[{threads}]}}}}}}}}}}"),
+        )
+    };
+    checks("fail");
+    review("h1", "", "");
+    let env = [
+        ("FAKE_CHAT", "1"),
+        ("AMUX_GH", gh.to_str().unwrap()),
+        ("AMUX_SCHEDULE_TICK_MS", "100"),
+        ("AMUX_AUTOPILOT_POLL_MS", "200"),
+    ];
+    let bad = s.amux_with(&["spawn", "--autopilot=yes", "fake"], &env, Some(&repo));
+    assert!(bad.err.contains("=merge"), "{}", bad.err);
+    let r = s.amux_with(
+        &[
+            "spawn",
+            "--name",
+            "ap",
+            "--autopilot=merge",
+            "--prompt",
+            "fix it",
+            "fake",
+        ],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("autopilot is on for ap"), "{}", r.err);
+    wait_ps(&s, "ap", "running");
+    eventually("the prompt tells the agent to commit", || {
+        s.amux(&["logs", "ap"])
+            .out
+            .contains("commit your work on this branch")
+    });
+
+    // Nothing committed: no PR.
+    let watch = |what: &str, want: &str| {
+        let mut seen = String::new();
+        for _ in 0..300 {
+            seen = s.amux_with(&["autopilot"], &env, None).out;
+            if seen.contains(want) {
+                return seen;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!(
+            "{what}: wanted {want:?} in\n{seen}\n{}",
+            s.amux(&["autopilot", "ap", "--log"]).out
+        );
+    };
+    watch("idle without commits", "nothing committed yet");
+    assert!(!fs::read_to_string(f("gh-log"))
+        .unwrap_or_default()
+        .contains("pr create"));
+
+    // A commit and an idle agent: a PR, and its failing CI is handed back.
+    let j: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/ap/run.json")).unwrap())
+            .unwrap();
+    let wt = PathBuf::from(j["worktree"]["path"].as_str().unwrap());
+    write(&wt.join("b.txt"), "y");
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-qm", "work"]);
+    watch("CI handed back", "handed back test (try 1 of 3)");
+    let log = fs::read_to_string(f("gh-log")).unwrap();
+    assert!(log.contains("pr create --head amux/ap --fill"), "{log}");
+    eventually("the agent got the CI failure", || {
+        s.amux(&["logs", "ap"]).out.contains("parser-broke")
+    });
+
+    // A new commit with a review comment: handed back once the agent's turn ends.
+    checks("pending");
+    review(
+        "h2",
+        "CHANGES_REQUESTED",
+        r#"{"isResolved":false,"path":"b.txt","line":1,"comments":{"nodes":[{"id":"C1","body":"Say why.","author":{"login":"ann"}}]}}"#,
+    );
+    watch("review handed back", "handed back 1 review comment");
+    eventually("the agent got the review", || {
+        s.amux(&["logs", "ap"])
+            .out
+            .contains("ann on b.txt:1: Say why.")
+    });
+
+    // Green and approved: merged, and the daemon has nothing left to do.
+    checks("pass");
+    review("h3", "APPROVED", "");
+    watch("merged", "merged");
+    let log = fs::read_to_string(f("gh-log")).unwrap();
+    assert!(log.contains("pr merge 7 --squash"), "{log}");
+    let hist = s.amux(&["autopilot", "ap", "--log"]).out;
+    for want in [
+        "opened PR #7",
+        "handed back test",
+        "review comment",
+        "merged PR #7",
+    ] {
+        assert!(hist.contains(want), "{want}: {hist}");
+    }
+    eventually("the scheduler exits", || {
+        fs::read_to_string(s.amux_home.join("scheduler.log"))
+            .unwrap_or_default()
+            .contains("scheduler exits")
+    });
+    let j = s.amux(&["autopilot", "--json"]).out;
+    assert!(j.contains("\"phase\": \"merged\""), "{j}");
+    assert!(s
+        .amux(&["autopilot", "ap", "--off"])
+        .out
+        .contains("off for ap"));
+    assert!(s.amux(&["autopilot"]).out.contains("No runs on autopilot"));
+    s.amux(&["stop", "ap"]);
+}

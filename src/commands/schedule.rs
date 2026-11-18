@@ -539,7 +539,8 @@ pub fn running() -> bool {
 /// Starts the scheduler if there are schedules and none is running. Returns true when it
 /// started one.
 pub fn ensure_running() -> bool {
-    if !file().exists() || load().iter().all(|s| s.paused) || running() {
+    let schedules = file().exists() && load().iter().any(|s| !s.paused);
+    if !(schedules || crate::work::autopilot::marker().exists()) || running() {
         return false;
     }
     let Some(exe) = exe_path() else { return false };
@@ -615,10 +616,12 @@ pub fn main() -> i32 {
             Ok(None) => true,
             Err(_) => false,
         });
+        // Runs on autopilot: their PRs, CI and reviews.
+        let pilots = crate::work::autopilot::tick();
         let all = load();
-        if all.is_empty() && going.is_empty() {
+        if all.is_empty() && going.is_empty() && !pilots {
             eprintln!(
-                "{} no schedules left; scheduler exits",
+                "{} no schedules or autopilot runs left; scheduler exits",
                 time::iso(time::now_ms())
             );
             return 0;
