@@ -122,6 +122,33 @@ struct Hub {
     rules_at: i64,
     /// The prompt last judged, so each is judged (and answered) once.
     judged: Option<String>,
+    /// `amux failover` has been started for this run (at its limit, or before it), so it
+    /// is started once.
+    moving: bool,
+}
+
+/// Starts `amux failover <run> [extra…]` in its own session: failover stops this run,
+/// which ends this host.
+fn start_failover(id: &str, extra: &[&str]) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut c = Command::new(exe);
+    c.args(["failover", id])
+        .args(extra)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if let Ok(mut child) = c.spawn() {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 impl Default for Hub {
@@ -137,6 +164,7 @@ impl Default for Hub {
             rules: approve::Rules::default(),
             rules_at: 0,
             judged: None,
+            moving: false,
         }
     }
 }
@@ -185,26 +213,9 @@ impl Hub {
             self.notifier
                 .send(&self.run.id, "limited", &self.title(), &msg);
         }
-        if crate::work::limits::on_limit() == "failover" {
-            if let Ok(exe) = std::env::current_exe() {
-                use std::os::unix::process::CommandExt;
-                let mut c = Command::new(exe);
-                c.args(["failover", &self.run.id])
-                    .env("AMUX_NO_UPDATE_CHECK", "1")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                // Its own session: failover stops this run, which ends this host.
-                unsafe {
-                    c.pre_exec(|| {
-                        libc::setsid();
-                        Ok(())
-                    });
-                }
-                if let Ok(mut child) = c.spawn() {
-                    std::thread::spawn(move || child.wait());
-                }
-            }
+        if crate::work::limits::on_limit() == "failover" && !self.moving {
+            self.moving = true;
+            start_failover(&self.run.id, &[]);
         }
     }
 
@@ -393,6 +404,10 @@ fn host(id: &str) -> Result<i32> {
         let (cwd, started) = (PathBuf::from(&run.cwd), run.started_at);
         std::thread::spawn(move || watchdog(&hub, &master, guard, &cwd, started, pid));
     }
+    {
+        let hub = hub.clone();
+        std::thread::spawn(move || quota_watch(&hub));
+    }
 
     let status = child.wait()?;
     let code = status
@@ -504,6 +519,95 @@ fn watchdog(
                 libc::killpg(pid as libc::pid_t, libc::SIGTERM);
             },
             _ => {}
+        }
+    }
+}
+
+/// Watches the account's quota (work/quota.rs) while the run lives. For a Codex run it
+/// also reads the numbers from the run's session file. Once the account passes
+/// `limits.switchAt`, it tells you, and with `onLimit: failover` it moves the run to an
+/// account under it, once, and only between turns: never mid-turn, and never while a
+/// terminal is attached (you are working in it). It moves to an account under switchAt
+/// only, so a session doesn't bounce back to an account that is just as full.
+fn quota_watch(hub: &Mutex<Hub>) {
+    use crate::work::{limits, quota};
+    let tick = std::env::var("AMUX_QUOTA_TICK_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000u64);
+    let account = lock(hub).run.account.clone();
+    let provider = account.split('@').next().unwrap_or_default().to_string();
+    let codex_home = crate::store::get_provider(&provider)
+        .ok()
+        .filter(|s| s.sessions.as_deref() == Some("codex"))
+        .map(|s| s.shared_home);
+    let mut seen = None;
+    // Whether you were told the account is past switchAt, since it last was under it.
+    let mut told = false;
+    loop {
+        std::thread::sleep(Duration::from_millis(tick));
+        let run = {
+            let h = lock(hub);
+            if h.run.exit_code.is_some() || h.moving {
+                return;
+            }
+            h.run.clone()
+        };
+        if let Some(home) = &codex_home {
+            quota::refresh_codex(&run, home, &mut seen);
+        }
+        let Some(at) = quota::switch_at() else {
+            continue;
+        };
+        let Some(q) = quota::load(&account) else {
+            continue;
+        };
+        let Some(used) = q.used() else { continue };
+        if used < at {
+            told = false;
+            continue;
+        }
+        let now = time::now_ms();
+        let near = format!("{account} is at {}", quota::describe(&q, now));
+        let failover = limits::on_limit() == "failover";
+        let target = failover
+            .then(|| quota::pick_switch(&provider, &account, at))
+            .flatten();
+        let mut h = lock(hub);
+        let between = !h.attached()
+            && quota::turn_boundary(
+                h.run.status.as_ref(),
+                h.run.waiting.as_ref(),
+                h.last_out,
+                now,
+            );
+        match target {
+            Some(t) if between => {
+                h.moving = true;
+                let msg = format!("{near}; moving {} to {}", run.id, t.id());
+                crate::plugins::hook("near-limit", &run.id, &msg);
+                let title = h.title();
+                h.notifier.send(&run.id, "limited", &title, &msg);
+                drop(h);
+                start_failover(&run.id, &["--to", &t.id(), "--near-limit"]);
+                return;
+            }
+            // Wait for the turn to end.
+            Some(_) => {}
+            None if !told => {
+                told = true;
+                let msg = if failover {
+                    format!("{near}, and no other {provider} account is under {at:.0}%")
+                } else {
+                    near
+                };
+                crate::plugins::hook("near-limit", &run.id, &msg);
+                if !h.attached() {
+                    let title = h.title();
+                    h.notifier.send(&run.id, "limited", &title, &msg);
+                }
+            }
+            None => {}
         }
     }
 }

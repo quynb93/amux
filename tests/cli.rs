@@ -3319,3 +3319,189 @@ fn autopilot_takes_a_run_from_commits_to_a_merged_pr() {
     assert!(s.amux(&["autopilot"]).out.contains("No runs on autopilot"));
     s.amux(&["stop", "ap"]);
 }
+
+/// Writes an account's usage numbers as amux records them, with `pct` of a 5-hour window
+/// that resets in an hour.
+fn write_usage(s: &Sandbox, account: &str, pct: f64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    write(
+        &s.amux_home.join(format!("usage/{account}.json")),
+        &serde_json::json!({ "at": now, "source": "statusline",
+            "fiveHour": { "usedPercent": pct, "resetsAt": now + 3_600_000 } })
+        .to_string(),
+    );
+}
+
+#[test]
+fn records_claude_code_usage_through_the_status_line_and_restores_it() {
+    let s = Sandbox::new("track");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let settings = s.home.join(".claude/settings.json");
+    let before = serde_json::to_string_pretty(&serde_json::json!({
+        "model": "opus",
+        "statusLine": { "type": "command", "command": "echo mine; cat > \"$HOME/line-input\"", "padding": 1 },
+        "permissions": { "allow": ["Bash(ls)"] }
+    }))
+    .unwrap()
+        + "\n";
+    write(&settings, &before);
+
+    let on = s.amux(&["usage", "--track", "on"]);
+    assert_eq!(on.code, 0, "{}", on.err);
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    let cmd = after["statusLine"]["command"].as_str().unwrap();
+    assert!(cmd.ends_with("__statusline"), "{cmd}");
+    assert_eq!(after["statusLine"]["padding"], 1);
+    assert_eq!(after["permissions"]["allow"][0], "Bash(ls)");
+    assert!(s
+        .amux(&["usage", "--track", "on"])
+        .out
+        .contains("Already on"));
+
+    // What Claude Code runs: the wrapper records the numbers, then shows your own line.
+    let input = serde_json::json!({ "model": { "display_name": "Opus" }, "rate_limits": {
+        "five_hour": { "used_percentage": 42.0, "resets_at": 4_000_000_000i64 },
+        "seven_day": { "used_percentage": 12.5, "resets_at": 4_000_500_000i64 } } })
+    .to_string();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+        .arg("__statusline")
+        .env("HOME", &s.home)
+        .env("AMUX_HOME", &s.amux_home)
+        .env("AMUX_ACCOUNT", "fake@one")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "mine\n");
+    assert_eq!(
+        fs::read_to_string(s.home.join("line-input")).unwrap(),
+        input
+    );
+    let u = s.amux(&["usage"]).out;
+    assert!(u.contains("▓▓▓▓░░░░░░  42%") && u.contains(" 12% "), "{u}");
+    let j: serde_json::Value = serde_json::from_str(&s.amux(&["usage", "--json"]).out).unwrap();
+    assert_eq!(j[0]["quota"]["fiveHour"]["usedPercent"], 42.0);
+    assert_eq!(j[0]["quota"]["sevenDay"]["resetsAt"], 4_000_500_000_000i64);
+
+    let off = s.amux(&["usage", "--track", "off"]);
+    assert_eq!(off.code, 0, "{}", off.err);
+    assert_eq!(fs::read_to_string(&settings).unwrap(), before);
+    assert!(s.amux(&["usage", "--track", "off"]).out.contains("Not on"));
+}
+
+#[test]
+fn spawns_on_the_account_with_the_most_headroom() {
+    let s = Sandbox::new("headroom");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    s.amux(&["account", "add", "fake", "two", "--no-login"]);
+    s.amux(&["account", "default", "fake@one"]);
+    write_usage(&s, "fake@one", 95.0);
+    write_usage(&s, "fake@two", 20.0);
+    // Without switchAt, the default account is used as before.
+    let r = s.amux(&["spawn", "--name", "a", "fake"]);
+    assert!(r.err.contains("as fake@one"), "{}", r.err);
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["limits"]["switchAt"] = 90.into();
+    write(&cfg, &c.to_string());
+    let r = s.amux(&["spawn", "--name", "b", "fake"]);
+    assert!(
+        r.err
+            .contains("using fake@two, which has the most headroom (20% used; fake@one: 95% used)"),
+        "{}",
+        r.err
+    );
+    // Named accounts are used as named.
+    let r = s.amux(&["spawn", "--name", "c", "fake@one"]);
+    assert!(r.err.contains("as fake@one"), "{}", r.err);
+}
+
+#[test]
+fn moves_a_run_before_the_limit_only_between_turns() {
+    let s = Sandbox::new("switchat");
+    // Reports its state (OSC 7501): working until told "done", then idle.
+    let bin = s.home.join("bin/turn-cli");
+    write(
+        &bin,
+        "#!/bin/sh\nst() { printf '\\033]7501;state=%s\\033\\\\' \"$1\"; }\necho \"ARGS $*\"\nst working\n\
+         while read l; do echo \"got $l\"; [ \"$l\" = done ] && st idle; done\n",
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = bin.to_str().unwrap().into();
+    c["providers"][0]["resumeArgs"] = serde_json::json!(["--resume", "{id}"]);
+    c["providers"][0]["sessions"] = "claude".into();
+    c["providers"][0]["sharedDirs"] = serde_json::json!(["projects"]);
+    c["limits"]["switchAt"] = 90.into();
+    c["limits"]["onLimit"] = "failover".into();
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    s.amux(&["account", "add", "fake", "two", "--no-login"]);
+    s.amux(&["account", "default", "fake@one"]);
+    let tick = [("AMUX_QUOTA_TICK_MS", "100")];
+    let r = s.amux_with(&["spawn", "--name", "q", "fake@one"], &tick, None);
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "q", "running");
+    let read_run = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/q/run.json")).unwrap())
+            .unwrap()
+    };
+    let mut run = read_run();
+    for _ in 0..100 {
+        if run["status"]["state"] == "working" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        run = read_run();
+    }
+    assert_eq!(run["status"]["state"], "working", "{run}");
+    let cwd = run["cwd"].as_str().unwrap().to_string();
+    let sid = "5e55a0b1-0000-4000-8000-000000000002";
+    write(
+        &s.shared.join(format!("projects/-x/{sid}.jsonl")),
+        &format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "cwd": cwd, "sessionId": sid,
+                "message": {"role": "user", "content": "build the login page"}})
+        ),
+    );
+    write_usage(&s, "fake@one", 93.0);
+    // Mid-turn: it stays where it is.
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(!s.amux_home.join("runs/q-2").exists());
+    // The turn ends: it moves, once, to the account with room.
+    assert_eq!(s.amux(&["send", "q", "done"]).code, 0);
+    let ps = wait_ps(&s, "q-2", "fake@two");
+    assert!(ps.contains(&format!("--resume {sid}")), "{ps}");
+    let mut log = String::new();
+    for _ in 0..100 {
+        log = s.amux(&["logs", "q-2"]).out;
+        if log.contains("got The previous account was close to its usage limit") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(log.contains("was close to its usage limit"), "{log}");
+    let notes = fs::read_to_string(s.home.join("notes")).unwrap_or_default();
+    assert!(
+        notes.contains("limited q fake@one is at 93% of its 5-hour window")
+            && notes.contains("moving q to fake@two"),
+        "{notes}"
+    );
+    s.amux(&["stop", "q-2"]);
+}

@@ -367,7 +367,10 @@ async function loadMonitor() {
     const us = await api("/api/usage");
     box.append(el("h2", null, "Accounts"));
     const rows = us.map((u) => {
-      if (!u.limit) return `${u.account}: ok · ${u.liveRuns} running`;
+      const q = u.quota || {};
+      const pct = (w, n) => (w ? ` · ${n} ${Math.round(w.usedPercent)}%` : "");
+      const used = pct(q.fiveHour, "5h") + pct(q.sevenDay, "7d");
+      if (!u.limit) return `${u.account}: ok${used} · ${u.liveRuns} running`;
       const mins = Math.max(0, Math.round((u.limit.resetsAt - Date.now()) / 60000));
       return `✗ ${u.account}: limited, resets in ${Math.floor(mins / 60)}h ${mins % 60}m · ${u.liveRuns} running`;
     });

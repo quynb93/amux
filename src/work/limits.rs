@@ -7,13 +7,14 @@
 //!
 //! - the run host spots the message (`limitPatterns`), marks the run waiting with it, and
 //!   records the account as limited until the reset time the message names;
-//! - `amux spawn <provider>` (no account named) skips accounts that are limited;
+//! - `amux spawn <provider>` (no account named) skips accounts that are limited, and with
+//!   `limits.switchAt` takes the account with the most headroom (work/quota.rs);
 //! - `amux failover <run>` resumes the same session, in the same worktree, under another
 //!   account; with `"limits": { "onLimit": "failover" }` it happens by itself.
 //!
 //! Limited accounts are kept in ~/.amux/limits.json until their reset time.
 
-use crate::store::{load_accounts, load_config, read_json, write_json, Account};
+use crate::store::{load_config, read_json, write_json, Account};
 use crate::{paths, time};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -230,21 +231,60 @@ pub fn on_limit() -> String {
         .unwrap_or_else(|| "wait".into())
 }
 
-/// Another account of `provider` that isn't limited, preferring the one with the fewest
-/// live runs; never `avoid`.
+/// Another account of `provider` that isn't limited, preferring the one with the most
+/// headroom (work/quota.rs), then the fewest live runs; never `avoid`.
 pub fn pick(provider: &str, avoid: &str) -> Option<Account> {
-    let limited = active();
-    let runs = crate::runs::list();
-    let busy = |a: &Account| {
-        runs.iter()
-            .filter(|r| r.account == a.id() && r.state().is_live())
-            .count()
+    use crate::work::quota;
+    let all = quota::candidates(provider);
+    let c: Vec<_> = all.iter().map(|(_, c)| c.clone()).collect();
+    let high = quota::switch_at().unwrap_or(quota::HIGH);
+    let i = quota::choose(&c, avoid, None, high)?;
+    Some(all[i].0.clone())
+}
+
+/// The account `amux spawn <provider>` (no account named) should use instead of
+/// `default`, and a sentence saying why. A limited default gives way to another account,
+/// as before. With `limits.switchAt` set, the account with the most headroom under it is
+/// used, also when there is no default.
+pub fn pick_for_spawn(provider: &str, default: Option<&Account>) -> Option<(Account, String)> {
+    use crate::work::quota;
+    if let Some(d) = default {
+        if let Some(l) = of(&d.id()) {
+            let other = pick(provider, &d.id())?;
+            let why = format!(
+                "{} is limited ({}); using {} instead",
+                d.id(),
+                l.reason,
+                other.id()
+            );
+            return Some((other, why));
+        }
+    }
+    let at = quota::switch_at()?;
+    let all = quota::candidates(provider);
+    let c: Vec<_> = all.iter().map(|(_, c)| c.clone()).collect();
+    let i = quota::choose(&c, "", Some(at), at)?;
+    let (best, bc) = &all[i];
+    let pct = |u: Option<f64>| u.map_or("no numbers yet".to_string(), |u| format!("{u:.0}% used"));
+    let why = match default {
+        Some(d) if d.id() == best.id() => return None,
+        Some(d) => {
+            let du = c.iter().find(|x| x.id == d.id()).and_then(|x| x.used);
+            format!(
+                "using {}, which has the most headroom ({}; {}: {})",
+                best.id(),
+                pct(bc.used),
+                d.id(),
+                pct(du)
+            )
+        }
+        None => format!(
+            "using {}, which has the most headroom ({})",
+            best.id(),
+            pct(bc.used)
+        ),
     };
-    load_accounts()
-        .ok()?
-        .into_iter()
-        .filter(|a| a.provider == provider && a.id() != avoid && !limited.contains_key(&a.id()))
-        .min_by_key(|a| busy(a))
+    Some((best.clone(), why))
 }
 
 #[cfg(test)]

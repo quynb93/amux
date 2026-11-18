@@ -57,6 +57,8 @@ type Shared<T> = std::sync::Arc<std::sync::Mutex<(T, bool)>>;
 const CONFLICTS_EVERY: Duration = Duration::from_secs(20);
 /// How often runs on other machines are fetched.
 const REMOTE_EVERY: Duration = Duration::from_secs(2);
+/// How often each account's usage (~/.amux/usage) is re-read for the header.
+const QUOTA_EVERY: Duration = Duration::from_secs(15);
 const RELOAD_EVERY: Duration = Duration::from_millis(500);
 /// Previews kept connected at once. Only these hold a socket, however many runs exist.
 /// Live previews kept connected: enough for the most tiles, plus one for the list view.
@@ -378,6 +380,42 @@ struct App {
     /// Where each tile and board card was drawn, and its run, for the mouse.
     panes: Vec<(Rect, usize)>,
     cards: Vec<(Rect, usize)>,
+    /// Accounts' usage for the header, re-read every QUOTA_EVERY, and when.
+    quota: Vec<QuotaItem>,
+    quota_at: Option<Instant>,
+}
+
+/// One account in the header's usage: how much of its tighter window is used, whether it
+/// is past `limits.switchAt` (or 90%), and whether it hit its limit.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct QuotaItem {
+    pub account: String,
+    pub used: Option<f64>,
+    pub high: bool,
+    pub limited: bool,
+}
+
+/// Accounts with usage numbers or a limit, for the header.
+fn quota_items() -> Vec<QuotaItem> {
+    use crate::work::{limits, quota};
+    let accounts = store::load_accounts().unwrap_or_default();
+    let quotas = quota::all(&accounts);
+    let limited = limits::active();
+    let high = quota::switch_at().unwrap_or(quota::HIGH);
+    accounts
+        .iter()
+        .filter_map(|a| {
+            let id = a.id();
+            let used = quotas.get(&id).and_then(|q| q.used());
+            let limited = limited.contains_key(&id);
+            (used.is_some() || limited).then(|| QuotaItem {
+                high: used.is_some_and(|u| u >= high),
+                account: id,
+                used,
+                limited,
+            })
+        })
+        .collect()
 }
 
 /// How long letters count as typing after one that isn't a shortcut.
@@ -429,6 +467,8 @@ impl App {
             conflicts: std::sync::Arc::new(std::sync::Mutex::new((HashMap::new(), true))),
             conflicts_at: None,
             cards: Vec::new(),
+            quota: Vec::new(),
+            quota_at: None,
         }
     }
 
@@ -510,6 +550,10 @@ impl App {
         }
         self.refresh_checks();
         self.refresh_conflicts();
+        if self.quota_at.is_none_or(|t| t.elapsed() >= QUOTA_EVERY) {
+            self.quota = quota_items();
+            self.quota_at = Some(Instant::now());
+        }
         let ids: HashSet<&str> = self.rows.iter().map(|r| r.run.id.as_str()).collect();
         self.unseen.retain(|id| ids.contains(id.as_str()));
         self.last_kind.retain(|id, _| ids.contains(id.as_str()));
@@ -1071,6 +1115,34 @@ mod tests {
         // An ended run can't be typed into: Enter doesn't start typing.
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.focus_run);
+    }
+
+    #[test]
+    fn shows_each_accounts_usage_in_the_header_when_it_fits() {
+        let mut app = App::new(Theme::built_in("default").unwrap());
+        app.quota = vec![
+            QuotaItem {
+                account: "claude@work".into(),
+                used: Some(92.4),
+                high: true,
+                limited: false,
+            },
+            QuotaItem {
+                account: "codex@me".into(),
+                used: None,
+                high: false,
+                limited: true,
+            },
+        ];
+        let wide = app.dump(6, 120, false);
+        assert!(
+            wide[0].contains("claude@work 92% · codex@me limited") && wide[0].contains("? help"),
+            "{}",
+            wide[0]
+        );
+        // Too narrow: only the hints, as before.
+        let narrow = app.dump(6, 50, false);
+        assert!(!narrow[0].contains("claude@work"), "{}", narrow[0]);
     }
 
     #[test]

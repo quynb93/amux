@@ -131,7 +131,8 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux land <run>... [--into <b>] [--no-test] [--dry-run]
       Merge queue: rebase each run onto the branch, test it in a slot, fast-forward.
       A run that conflicts or fails is skipped and its agent told what to fix.
-  amux usage [--json]                      Which accounts hit their usage limit, until when
+  amux usage [--json]                      Each account's 5-hour and 7-day usage, limits, runs
+  amux usage --track on|off                Record Claude Code's usage through its status line
   amux failover <run> [--to <acct>]        Resume a run's session under another account
                                            (same worktree); automatic with limits.onLimit
   amux pr <run> [--draft] [--base <b>]     Push a run's branch and open its pull request (gh)
@@ -213,6 +214,9 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         Some("__scheduler") => return Ok(commands::schedule::main()),
         #[cfg(unix)]
         Some("__slot-hook") => return Ok(commands::slot::hook_main()),
+        // Internal: Claude Code's status line while `amux usage --track` is on.
+        #[cfg(unix)]
+        Some("__statusline") => return Ok(commands::usage::statusline_main()),
         Some("--version" | "-v" | "version") => {
             println!("{}", update::version());
             return Ok(0);

@@ -168,14 +168,40 @@ impl App {
         if self.busy > 0 {
             spans.push(span(format!("   {}", self.spinner()), t.accent));
         }
-        let right = hints(t, &[("/", "commands"), ("?", "help")]);
+        let help = hints(t, &[("/", "commands"), ("?", "help")]);
         let room = (area.width as usize).saturating_sub(width_of(&spans) + 2);
         f.render_widget(Line::from(spans), area);
-        if width_of(&right) < room {
-            let mut r = right;
+        // Each account's usage before the hints, when there is room for it.
+        let mut usage = self.quota_spans();
+        if !usage.is_empty() {
+            usage.push(span("   ", t.muted));
+        }
+        usage.extend(help.iter().cloned());
+        let right = [usage, help].into_iter().find(|r| width_of(r) < room);
+        if let Some(mut r) = right {
             r.push(span(" ", t.muted));
             f.render_widget(Line::from(r).right_aligned(), area);
         }
+    }
+
+    /// "claude@work 42% · codex@me limited", colored by how close each is to its limit.
+    fn quota_spans(&self) -> Vec<Span<'static>> {
+        let t = &self.theme;
+        let mut out = Vec::new();
+        for (i, q) in self.quota.iter().enumerate() {
+            if i > 0 {
+                out.push(span(" · ", t.muted));
+            }
+            out.push(span(format!("{} ", q.account), t.muted));
+            let (text, style) = match (q.limited, q.used) {
+                (true, _) => ("limited".to_string(), kind_style(t, Kind::Failed)),
+                (false, Some(u)) if q.high => (format!("{u:.0}%"), kind_style(t, Kind::Attention)),
+                (false, Some(u)) => (format!("{u:.0}%"), t.text),
+                (false, None) => ("-".to_string(), t.muted),
+            };
+            out.push(span(text, style));
+        }
+        out
     }
 
     pub(super) fn spinner(&self) -> &'static str {
