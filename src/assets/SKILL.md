@@ -50,6 +50,8 @@ A run in state `waiting` is asking something (see `reason`). Answer with `amux s
 amux diff parser-tests --stat                   # what it changed since it started
 amux comment parser-tests src/parser.rs:42 "this panics on empty input"
 amux comments parser-tests --send               # all comments as one message to it
+amux review parser-tests --hunks                # its hunks, numbered per file
+amux review parser-tests --drop src/a.rs:2      # take one hunk out (tells it); --drop src/a.rs: the file
 amux verify parser-tests                        # recommends: test here, or push for CI
 amux verify parser-tests --test                 # tests in its folder, in a test slot
 amux verify parser-tests --send-failures        # failing output back to it

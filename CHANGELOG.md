@@ -9,6 +9,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 - `amux usage` shows how much of each account's 5-hour and 7-day windows is used, with a bar, when each resets and when the numbers were last updated, next to its limit state and live runs. `--json` includes the numbers (`quota.fiveHour`, `quota.sevenDay`). `amux ui` shows each account's usage in its header, re-read every 15 seconds, and the phone app shows it under Accounts. amux reads the numbers from local files only and makes no network requests for them.
 - `amux usage --track on` records Claude Code's numbers through its status line: amux puts `amux __statusline` in the shared `~/.claude/settings.json`, which saves the `rate_limits` Claude Code passes to it for the account, then runs your own status line command with the same input. `--track off` puts your status line back as it was. Codex's numbers are read from the `token_count` events in each Codex run's session file. Gemini CLI keeps none on disk.
 - `"limits": { "switchAt": 90 }` moves work off an account before it runs out. `amux spawn <cli>` (no account named) takes the account with the most headroom and skips accounts at or over `switchAt`. With `"onLimit": "failover"`, a run whose account passes `switchAt` moves to an account under it, once, when its turn has ended and no terminal is attached, never mid-turn. It never moves back to an account that is also over `switchAt`. You get a `limited` notification and the `on-near-limit` hook runs.
+- Keep or drop single hunks of a run's changes. In `amux ui`'s review (`c`), space marks the hunk under the cursor (or every hunk of a file, on its name) and `D` drops the marked ones after a y/n confirm. `amux review <run> --hunks` lists hunks numbered per file, and `--drop <file>[:<n>]` drops them from scripts. The hunks are reverse-applied to the run's worktree, and a new untracked file is deleted. When nothing else was uncommitted there, the drop is committed as "Drop N hunks (amux review)". The agent is told what was dropped so it doesn't add it back. Nothing is dropped if any hunk no longer matches the reviewed diff or the agent is mid-turn, and each drop is saved as a patch in `runs/<id>/dropped/` to undo it.
+
+### Changed
+
+- In the review view, space now marks a hunk instead of paging down. PgDn, Ctrl-F and Ctrl-D page down; PgUp, Ctrl-B and Ctrl-U page up.
+- The review diff shows a renamed file as removed and added, so each part can be dropped on its own.
 
 ## [0.11.10] - 2026-11-18
 

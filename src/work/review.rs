@@ -38,6 +38,9 @@ pub struct DiffLine {
     pub new: Option<u32>,
     /// Its line number in the old file (removed lines).
     pub old: Option<u32>,
+    /// The hunk it is part of: an index into `hunks::parse` of the same diff. A new
+    /// untracked file is one hunk from its first note on.
+    pub hunk: Option<usize>,
 }
 
 impl DiffLine {
@@ -85,20 +88,25 @@ pub fn parse_diff(text: &str) -> Vec<DiffLine> {
     let mut file = String::new();
     let (mut old, mut new) = (0u32, 0u32);
     let mut in_hunk = false;
+    // Hunks so far, the one being read, and whether this file is new and untracked.
+    let (mut hunks, mut hunk, mut untracked) = (0usize, None, false);
     for raw in text.lines() {
-        let line = |kind, new: Option<u32>, old: Option<u32>, file: &str| DiffLine {
+        let line = |kind, new: Option<u32>, old: Option<u32>, file: &str, hunk| DiffLine {
             kind,
             text: raw.to_string(),
             file: file.to_string(),
             new,
             old,
+            hunk,
         };
         if let Some(rest) = raw.strip_prefix("diff --git ") {
             in_hunk = false;
+            untracked = false;
+            hunk = None;
             // "a/x b/x": the new path is after " b/". Paths with spaces are rare; the
             // "+++ b/" line below corrects it when present.
             file = rest.rsplit_once(" b/").map_or(rest, |(_, b)| b).to_string();
-            out.push(line(LineKind::File, None, None, &file));
+            out.push(line(LineKind::File, None, None, &file, hunk));
             continue;
         }
         if !in_hunk {
@@ -111,8 +119,17 @@ pub fn parse_diff(text: &str) -> Vec<DiffLine> {
             if raw.starts_with("--- ") || raw.starts_with("index ") {
                 continue;
             }
+            if raw == UNTRACKED {
+                untracked = true;
+                hunk = Some(hunks);
+                hunks += 1;
+            }
         }
         if let Some(h) = raw.strip_prefix("@@ ") {
+            if !untracked {
+                hunk = Some(hunks);
+                hunks += 1;
+            }
             // "-a[,b] +c[,d] @@ …"
             let mut nums = h.split_whitespace();
             let start = |s: Option<&str>, sign: char| -> u32 {
@@ -124,23 +141,23 @@ pub fn parse_diff(text: &str) -> Vec<DiffLine> {
             old = start(nums.next(), '-');
             new = start(nums.next(), '+');
             in_hunk = true;
-            out.push(line(LineKind::Hunk, None, None, &file));
+            out.push(line(LineKind::Hunk, None, None, &file, hunk));
             continue;
         }
         if in_hunk {
             match raw.as_bytes().first() {
                 Some(b'+') => {
-                    out.push(line(LineKind::Added, Some(new), None, &file));
+                    out.push(line(LineKind::Added, Some(new), None, &file, hunk));
                     new += 1;
                     continue;
                 }
                 Some(b'-') => {
-                    out.push(line(LineKind::Removed, None, Some(old), &file));
+                    out.push(line(LineKind::Removed, None, Some(old), &file, hunk));
                     old += 1;
                     continue;
                 }
                 Some(b' ') | None => {
-                    out.push(line(LineKind::Context, Some(new), None, &file));
+                    out.push(line(LineKind::Context, Some(new), None, &file, hunk));
                     old += 1;
                     new += 1;
                     continue;
@@ -149,10 +166,13 @@ pub fn parse_diff(text: &str) -> Vec<DiffLine> {
                 _ => {}
             }
         }
-        out.push(line(LineKind::Meta, None, None, &file));
+        out.push(line(LineKind::Meta, None, None, &file, hunk));
     }
     out
 }
+
+/// The note under `diff --git` that marks a new file git doesn't track yet.
+pub const UNTRACKED: &str = "new file (not yet added to git)";
 
 /// The folder a run's changes are in and what to compare them with.
 pub fn diff_target(run: &Run) -> Result<(PathBuf, String)> {
@@ -166,9 +186,20 @@ pub fn diff_target(run: &Run) -> Result<(PathBuf, String)> {
     }
 }
 
-/// Everything the run changed, committed or not, with new untracked files shown as
-/// added, ready to review.
-pub fn run_diff(run: &Run) -> Result<Vec<DiffLine>> {
+/// A run's changes as a diff, read once so the lines shown and the hunks that can be
+/// dropped come from the same text.
+pub struct Changes {
+    /// The folder the diff was made in.
+    pub dir: PathBuf,
+    pub text: String,
+    /// New untracked files (paths as in the diff) and a fingerprint of each as it was
+    /// read, so a drop can tell whether it changed since.
+    pub untracked: Vec<(String, Option<u64>)>,
+}
+
+/// Everything the run changed against where it started, committed or not, with new
+/// untracked files shown as added, ready to review.
+pub fn changes(run: &Run) -> Result<Changes> {
     let (dir, base) = diff_target(run)?;
     if !dir.is_dir() {
         bail!(
@@ -177,17 +208,58 @@ pub fn run_diff(run: &Run) -> Result<Vec<DiffLine>> {
             crate::paths::tildify(&dir)
         );
     }
-    let mut text = git_raw(&dir, &["diff", "--no-color", "--no-ext-diff", &base, "--"])?;
-    let untracked = git_raw(&dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for f in untracked.split('\0').filter(|f| !f.is_empty()) {
-        text.push_str(&new_file_diff(&dir, f));
-    }
-    Ok(parse_diff(&text))
+    changes_in(&dir, &base)
 }
 
-/// A file git doesn't track yet, as the diff that would add it.
-fn new_file_diff(dir: &Path, f: &str) -> String {
-    let mut out = format!("diff --git a/{f} b/{f}\nnew file (not yet added to git)\n");
+/// The diff of `dir` against `base`. Renames show as a deletion and a new file, so every
+/// hunk can be dropped on its own.
+pub fn changes_in(dir: &Path, base: &str) -> Result<Changes> {
+    let mut text = git_raw(
+        dir,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            // a/ and b/ whatever diff.noprefix says: the parser and `git apply` need them.
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base,
+            "--",
+        ],
+    )?;
+    let list = git_raw(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let mut untracked = Vec::new();
+    for f in list.split('\0').filter(|f| !f.is_empty()) {
+        let (diff, print) = new_file_diff(dir, f);
+        text.push_str(&diff);
+        untracked.push((f.to_string(), print));
+    }
+    Ok(Changes {
+        dir: dir.to_path_buf(),
+        text,
+        untracked,
+    })
+}
+
+/// A fingerprint of a file's content (or a symlink's target), to notice a change.
+pub fn fingerprint(path: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let m = std::fs::symlink_metadata(path).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if m.file_type().is_symlink() {
+        std::fs::read_link(path).ok()?.hash(&mut h);
+    } else if m.is_file() {
+        std::fs::read(path).ok()?.hash(&mut h);
+    } else {
+        return None;
+    }
+    Some(h.finish())
+}
+
+/// A file git doesn't track yet, as the diff that would add it, and its fingerprint.
+fn new_file_diff(dir: &Path, f: &str) -> (String, Option<u64>) {
+    let mut out = format!("diff --git a/{f} b/{f}\n{UNTRACKED}\n");
     let path = dir.join(f);
     // Not through symlinks: a link could point anywhere on the machine.
     match std::fs::symlink_metadata(&path) {
@@ -195,22 +267,30 @@ fn new_file_diff(dir: &Path, f: &str) -> String {
             out.push_str(&format!("({} KB, too large to show)\n", m.len() / 1024));
         }
         Ok(m) if m.is_file() => match std::fs::read(&path) {
-            Ok(b) if b.contains(&0) => out.push_str("(binary file)\n"),
             Ok(b) => {
-                let s = String::from_utf8_lossy(&b);
-                let n = s.lines().count();
-                out.push_str(&format!("+++ b/{f}\n@@ -0,0 +1,{n} @@\n"));
-                for l in s.lines() {
-                    out.push('+');
-                    out.push_str(l);
-                    out.push('\n');
+                if b.contains(&0) {
+                    out.push_str("(binary file)\n");
+                } else {
+                    let s = String::from_utf8_lossy(&b);
+                    let n = s.lines().count();
+                    out.push_str(&format!("+++ b/{f}\n@@ -0,0 +1,{n} @@\n"));
+                    for l in s.lines() {
+                        out.push('+');
+                        out.push_str(l);
+                        out.push('\n');
+                    }
                 }
+                // The bytes shown are the bytes fingerprinted.
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                b.hash(&mut h);
+                return (out, Some(h.finish()));
             }
             Err(_) => out.push_str("(unreadable)\n"),
         },
         _ => {}
     }
-    out
+    (out, fingerprint(&path))
 }
 
 /// One review comment.

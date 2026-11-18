@@ -140,6 +140,9 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux comment <run> <file>:<line> <note>  A review comment on a line the run changed
   amux comments <run> [--send | --rm <n> | --clear]
       List a run's review comments, or send the pending ones to its agent as one message
+  amux review <run> [--hunks] [--drop <file>[:<n>]]... [--no-tell] [--force]
+      List a run's hunks, numbered per file, or drop some from its worktree and tell
+      the agent. Refuses while the agent is working (--force skips that check)
   amux stop <run> [--force]                End a run (SIGTERM, or SIGKILL with --force)
   amux rm <run>... [--force] | --done      Remove runs and their clean worktrees
   amux revive [<run>...] [--all] [--fresh] Bring back runs lost in a restart: same name, worktree
@@ -339,12 +342,14 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "comment" => commands::review::comment_cmd(rest),
         #[cfg(unix)]
         "comments" => commands::review::comments_cmd(rest),
+        #[cfg(unix)]
+        "review" => commands::review::review_cmd(rest),
         #[cfg(not(unix))]
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
-        | "overlap" | "land" | "comment" | "comments" | "usage" | "failover" | "gc" | "try"
-        | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" | "phone" | "theme"
-        | "themes" => {
+        | "overlap" | "land" | "comment" | "comments" | "review" | "usage" | "failover" | "gc"
+        | "try" | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" | "phone"
+        | "theme" | "themes" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {
