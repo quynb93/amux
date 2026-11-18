@@ -505,10 +505,11 @@ amux autopilot tests --log         # what it did, step by step
 amux autopilot tests [--merge]     # turn it on for a run that's already going (--off turns it off)
 ```
 
-Once the agent's turn ends with commits on its branch, amux opens the pull request, as `amux pr` would. After that it checks the PR about once a minute:
+Once the agent's turn ends with commits on its branch, amux opens the pull request, as `amux pr` would. The agent only commits: amux pushes its new commits each time its turn ends, so agents that aren't allowed to `git push` (the `--starter` rules deny it) work fine. After that, amux checks the PR about once a minute:
 
 - **Failing checks** go back to the agent with the failed steps' logs, once per commit and at most 3 times (`--retries`). After that the run is marked stuck and you're told.
 - **New review comments**, from unresolved threads and reviews that request changes, go back to the agent once its turn is over. Each comment is sent once.
+- **Merge conflicts** with the base branch go back to the agent, which merges the base branch in and resolves them. amux then pushes the merge.
 - **Green, and approved or not needing review:** you're told the PR is ready to merge. With `=merge` (or `--merge`), amux merges it with `gh pr merge --squash`.
 - **Waiting for a review, merged by someone, or closed:** you're told, and autopilot stops for a merged or closed PR.
 

@@ -54,6 +54,9 @@ pub struct Pilot {
     pub head: String,
     #[serde(default)]
     pub head_at: i64,
+    /// The commit whose merge conflicts were handed back last.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conflict_for: String,
     /// Review comments already handed back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seen: Vec<String>,
@@ -324,6 +327,17 @@ fn no_pr(run: &Run, p: &mut Pilot, kind: Kind) -> Result<()> {
 /// An open PR: hand back what needs fixing, or say it's ready (or merge it).
 fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
     let id = run.id.as_str();
+    // The agent commits; amux pushes, once its turn is over (agents are often not allowed
+    // to push, and a push mid-turn would start CI on half a fix).
+    if turn_over(run, kind) || !kind.is_live() {
+        let plan = super::verify::Plan::for_run(run);
+        if let Some(n) = plan.ahead.filter(|n| *n > 0) {
+            super::verify::push(run, &plan)?;
+            let s = if n == 1 { "" } else { "s" };
+            set(id, p, "checks", &format!("pushed {n} new commit{s}"));
+            return Ok(());
+        }
+    }
     let (pr, checks) = github::refresh_checks(run)?;
     let rv = github::review(run, pr.number)?;
     if rv.head != p.head {
@@ -344,7 +358,7 @@ fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
         let n = new.len();
         let s = if n == 1 { "" } else { "s" };
         if free {
-            github::send_feedback(run, &pr, &new)?;
+            github::send_feedback(run, &pr, &new, true)?;
             p.seen.extend(new.into_iter().map(|f| f.id));
             set(
                 id,
@@ -378,6 +392,61 @@ fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
         }
         return Ok(());
     }
+
+    // Conflicts first: GitHub runs no CI on a PR it can't merge.
+    if rv.mergeable == "CONFLICTING" {
+        if p.conflict_for == rv.head {
+            if live {
+                set(
+                    id,
+                    p,
+                    "fixing",
+                    "waiting for the merge conflicts to be resolved",
+                );
+            } else {
+                set(id, p, "stuck", "merge conflicts, and the run has ended");
+                tell(
+                    id,
+                    p,
+                    &format!("stuck:conflict:{}", rv.head),
+                    &format!(
+                        "PR #{} has merge conflicts and the run has ended: {}",
+                        pr.number, pr.url
+                    ),
+                );
+            }
+        } else if free {
+            github::send_conflicts(run, &pr, &rv.base)?;
+            p.conflict_for = rv.head.clone();
+            set(
+                id,
+                p,
+                "fixing",
+                &format!("handed back merge conflicts with {}", rv.base),
+            );
+        } else if !live {
+            set(id, p, "stuck", "merge conflicts, and the run has ended");
+            tell(
+                id,
+                p,
+                &format!("stuck:conflict:{}", rv.head),
+                &format!(
+                    "PR #{} has merge conflicts and the run has ended: {}",
+                    pr.number, pr.url
+                ),
+            );
+        } else {
+            set(
+                id,
+                p,
+                "checks",
+                "merge conflicts; waiting for the agent's turn to end",
+            );
+        }
+        return Ok(());
+    }
+    // GitHub hasn't worked out yet whether it merges; don't call it ready meanwhile.
+    let unsure = rv.mergeable == "UNKNOWN";
 
     match pr.checks.as_str() {
         "failing" => {
@@ -419,7 +488,7 @@ fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
                     ),
                 );
             } else if free {
-                github::send_ci_failures(run, &pr, &checks)?;
+                github::send_ci_failures(run, &pr, &checks, true)?;
                 p.fixes += 1;
                 p.sent_for = rv.head.clone();
                 set(
@@ -458,6 +527,15 @@ fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
             // Checks may not have registered yet for a commit just pushed.
             if state == "none" && now - p.head_at < 2 * poll_ms().max(60_000) {
                 set(id, p, "checks", "waiting for checks to start");
+                return Ok(());
+            }
+            if unsure {
+                set(
+                    id,
+                    p,
+                    "checks",
+                    "waiting for GitHub to check that it merges",
+                );
                 return Ok(());
             }
             ready(run, p, &pr, &rv.decision)?;

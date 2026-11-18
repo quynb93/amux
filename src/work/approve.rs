@@ -131,9 +131,10 @@ pub fn read_prompt(rows: &[String]) -> Option<Ask> {
             .take(2)
             .collect();
         let [a, b] = d[..] else { return None };
+        // Claude Code 2.1.3xx draws a bar before each line of the command.
         let cmd: Vec<&str> = block[a + 1..b]
             .iter()
-            .copied()
+            .map(|l| l.strip_prefix('│').map_or(*l, str::trim))
             .filter(|l| !l.is_empty())
             .collect();
         // A command the screen shows on several lines is never approved: it can't be told
@@ -461,5 +462,37 @@ mod tests {
                 && parse_rule(": x").is_err()
                 && parse_rule("a b").is_err()
         );
+    }
+
+    #[test]
+    fn reads_commands_drawn_with_a_bar() {
+        let screen = [
+            "────────────────────────────────",
+            " Bash command",
+            " Tip: auto mode handles these prompts for you",
+            " Commit the change",
+            "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+            " │ git add calc.py && git commit -m \"Add subtract. Fixes #1\"",
+            "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+            " This command requires approval",
+            "",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No",
+        ]
+        .map(String::from);
+        let a = read_prompt(&screen).unwrap();
+        assert_eq!(
+            (a.kind.as_str(), a.subject.as_str()),
+            (
+                "bash",
+                "git add calc.py && git commit -m \"Add subtract. Fixes #1\""
+            )
+        );
+        let mut two = screen.clone();
+        two[5] = " │ cat a.txt".into();
+        two[6] = " │ rm b.txt".into();
+        two[7] = "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌".into();
+        assert_eq!(read_prompt(&two).unwrap().subject, "cat a.txt\nrm b.txt");
     }
 }
