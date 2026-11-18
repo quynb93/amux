@@ -250,6 +250,11 @@ impl App {
                     self.verify(id)
                 }
             }
+            KeyCode::Char('o') => {
+                if let Some((id, _)) = cur {
+                    self.open_port(id)
+                }
+            }
             KeyCode::Esc if self.scroll == 0 && self.filtered() => {
                 self.filter.clear();
                 self.show = Show::All;

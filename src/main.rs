@@ -117,6 +117,7 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux attach <run>                        Connect this terminal to a run (Ctrl-] detaches)
   amux logs <run>                          Print everything a run has output
   amux peek <run>                          Print what is on a run's screen now
+  amux open <run>                          Open a worktree run's dev server (its PORT) in the browser
   amux send <run> [--wait] <text...> | -   Type a prompt into a run and press Enter
   amux wait <run>... [--until waiting|idle|exited] [--timeout <secs>]
       Block until the runs need you, finish their turn (default) or exit; 124 on timeout
@@ -281,6 +282,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         #[cfg(unix)]
         "logs" => commands::runs::logs_cmd(rest),
         #[cfg(unix)]
+        "open" => commands::runs::open_cmd(rest),
+        #[cfg(unix)]
         "peek" => commands::runs::peek_cmd(rest),
         #[cfg(unix)]
         "stop" => commands::runs::stop_cmd(rest),
@@ -362,8 +365,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "review" | "usage" | "failover" | "gc"
-        | "try" | "compare" | "pick" | "note" | "notes" | "broadcast" | "revive" | "phone"
-        | "theme" | "themes" | "tracker" | "trackers" => {
+        | "try" | "compare" | "pick" | "open" | "note" | "notes" | "broadcast" | "revive"
+        | "phone" | "theme" | "themes" | "tracker" | "trackers" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

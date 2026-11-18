@@ -166,10 +166,40 @@ pub fn free_port_block(taken: &[u16]) -> Option<u16> {
         .find(|p| !taken.contains(p))
 }
 
+/// Whether something, usually the run's dev server, accepts connections on `port` on this
+/// machine. Tries 127.0.0.1 and then ::1, since some servers bind "localhost" to only one.
+/// Each try waits at most 150 ms, so callers do this off the UI thread.
+pub fn listening(port: u16) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    let wait = std::time::Duration::from_millis(150);
+    [
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+    ]
+    .iter()
+    .any(|a| TcpStream::connect_timeout(a, wait).is_ok())
+}
+
+/// The address of a run's dev server.
+pub fn port_url(port: u16) -> String {
+    format!("http://localhost:{port}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::{write, TempDir};
+
+    #[test]
+    fn tells_whether_a_port_is_listening() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(listening(port));
+        // Not checked after closing it: another test running at the same time may get
+        // the same port from the OS.
+        drop(l);
+        assert_eq!(port_url(41000), "http://localhost:41000");
+    }
 
     #[test]
     fn notes_live_in_the_git_folder_and_open_prompts() {

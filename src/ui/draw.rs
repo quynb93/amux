@@ -285,6 +285,9 @@ impl App {
                 if let Some(sb) = &r.run.sandbox {
                     detail.push_str(&format!(" · sandboxed ({})", sb.engine_name()));
                 }
+                if let Some(p) = self.live_port(&r.run) {
+                    detail.push_str(&format!(" · :{p}"));
+                }
                 if let Some(c) = self.conflict_note(&r.run.id) {
                     detail.push_str(&format!(" · {c}"));
                 }
@@ -346,6 +349,9 @@ impl App {
         }
         if run.sandbox.is_some() {
             sub.push_str(" · sandboxed");
+        }
+        if let Some(p) = self.live_port(&run) {
+            sub.push_str(&format!(" · localhost:{p} (o opens)"));
         }
         let title = vec![
             span(" ", t.muted),
@@ -869,6 +875,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "",
         "in review: space marks a hunk to drop, D drops the marked ones",
     ),
+    ("o", "open the run's dev server (its PORT) in the browser"),
     ("PgUp PgDn", "scroll the preview; Esc back to live"),
     ("/", "command palette"),
     ("q", "quit; runs keep going"),

@@ -52,6 +52,72 @@ impl App {
         }
     }
 
+    /// Checks, in the background and every few seconds, which live worktree runs have
+    /// something listening on their port: a quick connect to localhost, never per frame.
+    pub(super) fn refresh_ports(&mut self) {
+        let ports: Vec<u16> = self
+            .rows
+            .iter()
+            .filter(|r| r.kind.is_live() && !r.run.id.contains(':'))
+            .filter_map(|r| r.run.port)
+            .collect();
+        let check = move || -> HashSet<u16> {
+            ports
+                .into_iter()
+                .filter(|p| crate::work::notes::listening(*p))
+                .collect()
+        };
+        if !self.guard {
+            *self.listening.lock().unwrap_or_else(|e| e.into_inner()) = (check(), true);
+            return;
+        }
+        let due = self.ports_at.is_none_or(|t| t.elapsed() >= PORTS_EVERY);
+        let idle = self.listening.lock().map(|c| c.1).unwrap_or(false);
+        if due && idle {
+            self.ports_at = Some(Instant::now());
+            if let Ok(mut c) = self.listening.lock() {
+                c.1 = false;
+            }
+            let shared = self.listening.clone();
+            std::thread::spawn(move || {
+                let s = check();
+                *shared.lock().unwrap_or_else(|e| e.into_inner()) = (s, true);
+            });
+        }
+    }
+
+    /// The run's port, when its dev server is up: for the list, the board and the preview.
+    pub(super) fn live_port(&self, run: &Run) -> Option<u16> {
+        let port = run.port?;
+        let l = self.listening.lock().ok()?;
+        l.0.contains(&port).then_some(port)
+    }
+
+    /// Opens the run's dev server in the browser (`o`).
+    pub(super) fn open_port(&mut self, id: String) {
+        let Some(run) = self
+            .rows
+            .iter()
+            .find(|r| r.run.id == id)
+            .map(|r| r.run.clone())
+        else {
+            return;
+        };
+        match (run.port, self.live_port(&run)) {
+            (None, _) => self.say(
+                format!("{id} has no port of its own; worktree runs get one."),
+                true,
+            ),
+            (Some(p), None) => self.say(
+                format!("Nothing is listening on :{p} yet. Its dev server gets PORT={p}."),
+                true,
+            ),
+            (Some(_), Some(_)) => {
+                self.background(vec!["open".into(), id.clone()], format!("Opening {id}"))
+            }
+        }
+    }
+
     /// What a run's changes conflict with, for the list and the board.
     pub(super) fn conflict_note(&self, id: &str) -> Option<String> {
         let c = self.conflicts.lock().ok()?;

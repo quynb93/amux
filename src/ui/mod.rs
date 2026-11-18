@@ -55,6 +55,8 @@ type Shared<T> = std::sync::Arc<std::sync::Mutex<(T, bool)>>;
 
 /// How often parallel runs are checked for conflicts with each other.
 const CONFLICTS_EVERY: Duration = Duration::from_secs(20);
+/// How often worktree runs' ports are checked for a dev server.
+const PORTS_EVERY: Duration = Duration::from_secs(3);
 /// How often runs on other machines are fetched.
 const REMOTE_EVERY: Duration = Duration::from_secs(2);
 /// How often each account's usage (~/.amux/usage) is re-read for the header.
@@ -171,6 +173,7 @@ fn is_shortcut(c: char) -> bool {
                 | 'e'
                 | 'v'
                 | 'c'
+                | 'o'
                 | 'b'
                 | 't'
                 | '/'
@@ -377,6 +380,10 @@ struct App {
     /// a check in the background (`amux overlap`); and whether no check is running.
     conflicts: Shared<HashMap<String, Vec<String>>>,
     conflicts_at: Option<Instant>,
+    /// Ports of worktree runs that something (a dev server) is listening on, from a check
+    /// in the background; and whether no check is running.
+    listening: Shared<HashSet<u16>>,
+    ports_at: Option<Instant>,
     /// Where each tile and board card was drawn, and its run, for the mouse.
     panes: Vec<(Rect, usize)>,
     cards: Vec<(Rect, usize)>,
@@ -466,6 +473,8 @@ impl App {
             remote_at: None,
             conflicts: std::sync::Arc::new(std::sync::Mutex::new((HashMap::new(), true))),
             conflicts_at: None,
+            listening: std::sync::Arc::new(std::sync::Mutex::new((HashSet::new(), true))),
+            ports_at: None,
             cards: Vec::new(),
             quota: Vec::new(),
             quota_at: None,
@@ -554,6 +563,7 @@ impl App {
             self.quota = quota_items();
             self.quota_at = Some(Instant::now());
         }
+        self.refresh_ports();
         let ids: HashSet<&str> = self.rows.iter().map(|r| r.run.id.as_str()).collect();
         self.unseen.retain(|id| ids.contains(id.as_str()));
         self.last_kind.retain(|id, _| ids.contains(id.as_str()));
