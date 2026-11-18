@@ -43,6 +43,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
   - [Landing parallel runs](#landing-parallel-runs)
   - [Pull requests and CI](#pull-requests-and-ci)
   - [Issues and schedules](#issues-and-schedules)
+  - [Autopilot](#autopilot)
   - [Other machines](#other-machines)
   - [On your phone](#on-your-phone)
   - [Plugins and hooks](#plugins-and-hooks)
@@ -70,6 +71,7 @@ It also runs many agents at once, each in its own git worktree. You can watch th
 - **Parallel runs.** Start several agents in the background, across accounts and CLIs, each in its own git worktree if you like. See which are working and which are waiting, attach to any of them, and detach again.
 - **Auto-approve.** Permission prompts for what your rules allow, such as `cargo test` or edits inside the run's worktree, are answered for you. Everything else waits for you, and every answer is logged.
 - **Issues and schedules.** Turn a GitHub issue into a run on its own branch, pick up new issues by label, and run any amux command on a schedule, such as a morning triage.
+- **Autopilot.** Label an issue and come back to a pull request that passes CI and review. amux opens the PR when the agent commits, hands failing checks and review comments back to it, and tells you when the PR is ready, or merges it.
 - **Per-account options.** Privacy mode applies the CLI's documented telemetry opt-outs. A base URL sends that account's requests to a gateway you control.
 - **One small binary.** Written in Rust. It starts in a few milliseconds and needs no runtime such as Node.js.
 
@@ -488,7 +490,29 @@ amux schedule log triage        # what it printed
 amux schedule pause triage      # resume, rm
 ```
 
-Times are local: `every 30m`, `hourly`, `daily 9:00`, `weekdays 9:00`, `mondays 9:00`, or a cron line. One background process, the scheduler, starts each schedule when it's due. Any amux command starts the scheduler if it isn't running, and it exits when no schedules are left. It stops when you log out, so `amux revive --at-login` (or any amux command) brings it back after a restart. A schedule missed while the machine slept runs once when it wakes. The runs it starts notify you like any other, and a schedule whose command fails sends a `schedule` notification to your phone.
+Times are local: `every 30m`, `hourly`, `daily 9:00`, `weekdays 9:00`, `mondays 9:00`, or a cron line. One background process, the scheduler, starts each schedule when it's due. Any amux command starts the scheduler if it isn't running, and it exits when no schedules or runs on autopilot are left. It stops when you log out, so `amux revive --at-login` (or any amux command) brings it back after a restart. A schedule missed while the machine slept runs once when it wakes. The runs it starts notify you like any other, and a schedule whose command fails sends a `schedule` notification to your phone.
+
+### Autopilot
+
+A run on autopilot takes itself from its first commit to a pull request that's ready to merge. You don't have to watch it:
+
+```sh
+amux spawn --autopilot --prompt "Add a --json flag to status" claude   # tells you when the PR is ready
+amux spawn --issue 42 --autopilot=merge claude                         # and merges it
+amux intake --label agent-ready --autopilot claude@work                # each new issue, on autopilot
+amux autopilot                     # every run on autopilot: its phase, PR and what it's waiting for
+amux autopilot tests --log         # what it did, step by step
+amux autopilot tests [--merge]     # turn it on for a run that's already going (--off turns it off)
+```
+
+Once the agent's turn ends with commits on its branch, amux opens the pull request, as `amux pr` would. After that it checks the PR about once a minute:
+
+- **Failing checks** go back to the agent with the failed steps' logs, once per commit and at most 3 times (`--retries`). After that the run is marked stuck and you're told.
+- **New review comments**, from unresolved threads and reviews that request changes, go back to the agent once its turn is over. Each comment is sent once.
+- **Green, and approved or not needing review:** you're told the PR is ready to merge. With `=merge` (or `--merge`), amux merges it with `gh pr merge --squash`.
+- **Waiting for a review, merged by someone, or closed:** you're told, and autopilot stops for a merged or closed PR.
+
+Text is only typed into the agent when its turn has ended, never into a question or a permission prompt. With [auto-approve](#answering-permission-prompts) rules, that makes a whole issue-to-PR loop run without you. The scheduler drives autopilot, so it keeps going while any run is on it. Each step sends an `autopilot` notification to your phone and runs the `on-autopilot` hook. Progress is kept in `runs/<run>/autopilot.json`, and the history in `autopilot.log`.
 
 ### Other machines
 
@@ -559,7 +583,7 @@ amux plugin list
 ```
 
 - **Plugins** are any executable in `~/.amux/plugins/`, or named `amux-<name>` on PATH, the way git does it. They get `AMUX_BIN` (amux itself) and `AMUX_HOME`. In `amux ui`, `/plugin <name>` runs one on the selected run, with `AMUX_RUN` set, and shows what it printed. A line `# amux: <what it does>` describes it.
-- **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify`, `on-checks` or `on-approved`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
+- **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify`, `on-checks`, `on-approved` or `on-autopilot`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
 - amux runs a plugin or hook only if it belongs to you and no one else can write to it.
 
 ### Agents that run agents
@@ -688,6 +712,8 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux peek <run>` | Print what is on the run's screen right now, or its last screen if it has ended. |
 | `amux spawn --issue <n> …` | Work on a GitHub issue in its own worktree; the PR says it fixes it. |
 | `amux intake [--label <l>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open GitHub issue (with the label). |
+| `amux spawn --autopilot[=merge] …` | Open the PR when the agent commits, hand back failing CI and review comments, and say when it's ready (or merge it). |
+| `amux autopilot [--json] \| <run> [--merge] [--retries <n>] \| <run> --off \| <run> --log` | Runs on autopilot and how far each has got; turn it on or off for a run. |
 | `amux schedule [add <name> "<when>" <command…> \| rm \| run \| pause \| resume \| log <name>]` | Run amux commands by themselves at set times. |
 | `amux allow [<rule>… \| --deny <rule>… \| --rm <rule>… \| --starter \| --clear \| --check <rule> \| --log [<run>]]` | Rules for answering permission prompts by themselves. |
 | `amux stop <run> [--force]` | End a run with SIGTERM, or SIGKILL with `--force`. |
@@ -724,6 +750,7 @@ Commands never wait on the network. The notice comes from a cached result, which
   schedules.json       schedules (`amux schedule`); schedules/<name>.log is what each printed
   scheduler.log        when the scheduler started and stopped, and commands it couldn't start
   intake.json          issues `amux intake` started, per repo
+  autopilot.on         present while runs are on autopilot, so the scheduler keeps going
 ```
 
 | Variable | Effect |
@@ -770,7 +797,7 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, auto-approve rules, GitHub issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
 1. **Web push from the phone app**, now that it can be served over HTTPS.
 2. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.

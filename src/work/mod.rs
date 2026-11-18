@@ -3,6 +3,7 @@
 //! reviewing its changes (`review`). Nothing here prints; `commands/` and `ui/` show it.
 
 pub mod approve;
+pub mod autopilot;
 pub mod github;
 pub mod guards;
 pub mod issues;

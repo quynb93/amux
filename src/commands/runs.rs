@@ -14,7 +14,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const SPAWN_USAGE: &str =
-    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>] [--attach] <provider>[@name] [args...]";
+    "amux spawn [--on <machine>[:<dir>]] [--dir <folder>] [--name <run>] [--worktree] [--branch <name>] [--base <ref>] [--prompt <text>] [--issue <n>] [--autopilot[=merge]] [--attach] <provider>[@name] [args...]";
+
+/// What an agent on autopilot is told after its prompt.
+const AUTOPILOT_POSTSCRIPT: &str = "\n\nWhen you're done, commit your work on this branch. amux opens the pull request, and brings you CI failures and review comments to fix.";
 
 #[derive(Default)]
 struct SpawnOpts {
@@ -36,6 +39,8 @@ struct SpawnOpts {
     no_auto: bool,
     /// A GitHub issue to work on: it becomes the first prompt (`--issue`).
     issue: Option<String>,
+    /// Autopilot (`--autopilot`, `--autopilot=merge`): Some(true) merges when ready.
+    autopilot: Option<bool>,
     worktree: bool,
     branch: Option<String>,
     base: Option<String>,
@@ -75,6 +80,13 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
             "--worktree" | "-w" => o.worktree = true,
             "--attach" | "-a" => o.attach = true,
             "--no-auto-approve" => o.no_auto = true,
+            "--autopilot" => {
+                o.autopilot = Some(match inline.as_deref() {
+                    None | Some("on") => false,
+                    Some("merge") => true,
+                    Some(v) => bail!("--autopilot takes nothing or =merge, not \"{v}\"."),
+                })
+            }
             "--dir" | "-C" => o.dir = Some(value()?),
             "--adopt" => o.adopt = Some(value()?),
             "--group" => o.group = Some(value()?),
@@ -112,7 +124,9 @@ fn parse_spawn(argv: &[String]) -> Result<(SpawnOpts, &str, &[String])> {
         i += 1;
     }
     // An issue gets its own worktree and branch, ready for a pull request.
-    o.worktree |= o.branch.is_some() || o.base.is_some() || o.issue.is_some();
+    // So does a run on autopilot.
+    o.worktree |=
+        o.branch.is_some() || o.base.is_some() || o.issue.is_some() || o.autopilot.is_some();
     let acct = need(argv.get(i), SPAWN_USAGE)?;
     Ok((o, acct, argv.get(i + 1..).unwrap_or_default()))
 }
@@ -224,6 +238,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             "--base",
             "--dir",
             "--issue",
+            "--autopilot",
         ]
         .contains(&a.as_str())
     }) {
@@ -286,6 +301,9 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         let mut p = format!("{}{p}", crate::work::notes::preamble(&cwd));
         if let Some(l) = &lead {
             p.push_str(&crate::commands::team::worker_postscript(l));
+        }
+        if o.autopilot.is_some() && issue.is_none() {
+            p.push_str(AUTOPILOT_POSTSCRIPT);
         }
         let prompt = match &spec.prompt_args {
             Some(t) => crate::launch::fill_args(t, &[("prompt", &p)]),
@@ -367,6 +385,13 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         Some(wt) => format!("{} (branch {})", tildify(Path::new(&run.cwd)), wt.branch),
         None => tildify(Path::new(&run.cwd)),
     };
+    if let Some(merge) = o.autopilot {
+        crate::work::autopilot::enable(&id, merge, None)?;
+        eprintln!(
+            "amux: autopilot is on for {id}: it opens a PR when the agent commits, hands CI failures and review comments back, and {}. `amux autopilot` shows how it's doing.",
+            if merge { "merges it when it's ready" } else { "tells you when it's ready to merge" }
+        );
+    }
     let now = runs::load(&id)?;
     if now.state() == State::Queued {
         let why = now.queued.map(|q| q.reason).unwrap_or_default();

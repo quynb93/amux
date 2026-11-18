@@ -5,6 +5,8 @@ mod commands {
     #[cfg(unix)]
     pub mod attempts;
     #[cfg(unix)]
+    pub mod autopilot;
+    #[cfg(unix)]
     pub mod control;
     #[cfg(unix)]
     pub mod explain;
@@ -98,6 +100,8 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux spawn [--on <machine>[:<dir>]] [--stall <30m>] [--max-time <4h>] [--name <run>] [--worktree [--branch <b>] [--base <ref>]] [--attach] <provider>[@name] [args...]
       --no-auto-approve: every permission prompt waits for you, whatever `amux allow` says
       --issue <n>: work on a GitHub issue (its own worktree; the PR says it fixes it)
+      --autopilot[=merge]: open the PR when it commits, hand back failing CI and review
+        comments, and say when it's ready to merge (=merge: merge it)
       Start the CLI in the background. --worktree gives it its own git worktree and branch.
       --on starts it on another machine; then name it <machine>:<run> anywhere a run goes.
   amux ps [--json]                         List runs and whether each is working or idle
@@ -147,6 +151,8 @@ Parallel runs (each CLI in the background, in its own terminal):
       Run an amux command by itself: \"every 1h\", \"weekdays 9:00\", or cron (\"0 9 * * 1-5\")
   amux intake [--label <l>] [--limit <n>] <provider>[@name]
       A run for each new open GitHub issue (with the label), e.g. on a schedule
+  amux autopilot [<run> [--merge] [--retries <n>] | <run> --off | <run> --log]
+      Runs on autopilot and how far each has got; turn it on or off for a run
   amux ui                                  Watch, attach to, start and stop runs in one screen
   amux theme [<name>]                      List themes (Catppuccin, Tokyo Night, Dracula, Gruvbox,
                                            Nord, Solarized…) or choose one for amux ui and the phone app
@@ -301,6 +307,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "team" => commands::team::team_cmd(rest),
         #[cfg(unix)]
         "allow" => commands::allow::allow_cmd(rest),
+        #[cfg(unix)]
+        "autopilot" => commands::autopilot::autopilot_cmd(rest),
         #[cfg(unix)]
         "schedule" | "schedules" => commands::schedule::schedule_cmd(rest),
         #[cfg(unix)]

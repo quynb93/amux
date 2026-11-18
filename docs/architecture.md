@@ -17,7 +17,8 @@ remote.rs        other machines: SSH, forwarding, the socket pipe
 plugins.rs       `amux <plugin>` and ~/.amux/hooks
 work/            what runs do to code and to the machine:
                    slots (machine limits), verify (tests or push), github (PR, CI),
-                   issues (GitHub issues as prompts), approve (auto-approve rules), review (diff and line comments).
+                   issues (GitHub issues as prompts), approve (auto-approve rules), review (diff and line comments),
+                   autopilot (commits → PR → CI and review feedback → ready or merged).
                    Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
@@ -25,7 +26,7 @@ runs/            a run's life: host (pty + socket), client (connect, send input)
 git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   foundations
 ```
 
-`commands/schedule.rs` also holds the scheduler, `amux __scheduler`: one process (it holds `scheduler.lock`) that starts each schedule's amux command when it's due. `main.rs` starts it on any command when schedules exist and it isn't running.
+`commands/schedule.rs` also holds the scheduler, `amux __scheduler`: one process (it holds `scheduler.lock`) that starts each schedule's amux command when it's due. `main.rs` starts it on any command when schedules exist and it isn't running. It also drives autopilot (`work/autopilot.rs`): each tick it steps every run with an active `autopilot.json`, at most once per poll (60 s), and it keeps going while `autopilot.on` exists. A step asks `gh` for the PR, its checks and its reviews (one GraphQL call), types into the agent only when its turn has ended, and records each change of phase in `autopilot.log`.
 
 Remote runs reuse everything: `runs::client::connect("gpu:x")` returns a socket that `remote.rs` bridges to `amux __pipe x` over SSH. Previews, typing and attaching work on them unchanged. `serve.rs` keeps to the CLI's commands on purpose, so the phone can't do anything the CLI can't.
 
@@ -146,6 +147,7 @@ From the first report on, the reports decide instead of the text, bell and OSC 9
 | `schedules.json`, `schedules.lock`, `schedules/<name>.log` | `amux schedule`, `amux __scheduler` | Schedules and how each last went (edited under the lock), and each one's output |
 | `scheduler.lock`, `scheduler.log` | `amux __scheduler` | Held with `flock(2)` by the one scheduler while it runs; when it started and stopped |
 | `approve.json` | `amux allow` | Auto-approve rules: allow and deny lists, read by each run host every few seconds |
+| `runs/<id>/autopilot.json`, `autopilot.log`, `autopilot.on` | `amux spawn --autopilot`, `amux autopilot`, the scheduler | A run's autopilot settings and progress (phase, CI fixes sent, review comments sent), its history, and the marker that keeps the scheduler going |
 | `runs/<id>/approvals.jsonl` | the run host | Each permission prompt it judged: what it asked, approved, denied or left for you, and why |
 | `intake.json` | `amux intake` | Issue numbers already started, per repo, so none starts twice |
 | `launches.jsonl` | every launch | Time, account, directory and arguments (mode 0600) |

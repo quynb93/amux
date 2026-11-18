@@ -4,6 +4,12 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.9] - 2026-11-18
+
+### Added
+
+- Autopilot: `amux spawn --autopilot` (or `--autopilot=merge`, also through `amux intake`) takes a run from its first commit to a pull request that's ready to merge. When the agent's turn ends with commits, amux opens the PR. It then hands failing CI back with the failed logs (once per commit, 3 times at most) and hands back new review comments from unresolved threads and reviews. It tells you when the PR is ready, needs a review, is stuck or was merged, and with `=merge` merges it itself. Text only goes to the agent when its turn has ended. `amux autopilot` lists runs on autopilot with their phase and PR, `--log` shows a run's history, and `amux autopilot <run> [--merge] [--retries <n>] | --off` turns it on or off for a running run. The scheduler drives it. Each step sends an `autopilot` phone notification and runs the `on-autopilot` hook.
+
 ## [0.11.8] - 2026-11-18
 
 ### Fixed

@@ -91,6 +91,10 @@ label. `amux schedule add <name> "weekdays 9:00" <amux command...>` runs a comma
 itself (`every 1h`, cron lines too); `amux schedule` lists them. Only schedule what the user
 asked for.
 
+`amux spawn --autopilot claude` (or `--autopilot=merge`) opens the run's PR when it commits,
+hands failing CI and review comments back to it, and says when the PR is ready (or merges
+it). `amux autopilot` shows how far each run has got. Merging needs the user's say-so.
+
 ## Usage limits
 
 If a helper shows `waiting` with "hit your limit", its account ran out. `amux usage` shows
