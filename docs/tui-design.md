@@ -151,6 +151,7 @@ The spawn dialog (`ui/spawn.rs`) builds the same argument list you would type: `
 | Esc | Clear the filter, or return the preview to live |
 | f | Show only waiting, working, idle or ended runs (steps through them) |
 | e | Why the run shows its state (`amux explain`) |
+| c | Review the run's diff: Enter comments on a line, S sends the comments, Space marks a hunk to drop, D drops the marked hunks (y/n) |
 | ? | Help |
 | q, Ctrl-C | Quit (runs keep going) |
 

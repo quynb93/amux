@@ -239,7 +239,7 @@ Or see them all at once with **`amux ui`**: a list of runs with their state, and
 - **Views.** ![The board view](<https://raw.githubusercontent.com/quynb93/amux/main/docs/images/amux-board.png>)
 
   **`b`** shows a board with a column per state: needs you, working, idle and done. Each run is a card, and ←→ and ↑↓ move between cards. **`t`** shows tiles: up to four live runs side by side, each a terminal you can click into and type into. `b` or `t` again goes back to the list, and `/view` switches too.
-- **In the list**, letters are shortcuts: `a` gives the run the whole terminal, Tab jumps to the next run that is waiting for you, `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it. `?` lists every key. Quitting the UI leaves the runs going.
+- **In the list**, letters are shortcuts: `a` gives the run the whole terminal, Tab jumps to the next run that is waiting for you, `n` starts a run (account, prompt, worktree), `s` stops one and `d` removes it, and `c` reviews its changes (space marks a hunk to drop, `D` drops the marked ones). `?` lists every key. Quitting the UI leaves the runs going.
 
 Press **`/`** for the command palette. Type part of a command and its argument completes from your runs, accounts or themes:
 
@@ -312,7 +312,7 @@ amux ps --json                                  # every run's state, branch and 
 
 Read what a run changed and comment on lines, like a pull request review. The comments then go to the agent together, as one message:
 
-- In `amux ui`, press **`c`**: the run's diff opens, with new untracked files shown as added. Move with `j`/`k`, the wheel or a click, and `n`/`N` jump between files. **⏎** writes a comment on the line under the cursor (a removed line too), `x` deletes one, and **`S`** sends every pending comment to the agent. Each comment shows under its line, then as sent.
+- In `amux ui`, press **`c`**: the run's diff opens, with new untracked files shown as added. Move with `j`/`k`, the wheel or a click, PgUp/PgDn (or Ctrl-B/Ctrl-F) page, and `n`/`N` jump between files. **⏎** writes a comment on the line under the cursor (a removed line too), `x` deletes one, and **`S`** sends every pending comment to the agent. Each comment shows under its line, then as sent.
 - From the CLI:
 
 ```sh
@@ -322,6 +322,18 @@ amux comments tests --send     # one message: file:line, the line, and your note
 ```
 
 Comments are kept in `runs/<id>/review.json` until sent, so a review can be written over time.
+
+**Keep or drop single hunks**, like `git add -p` in reverse. In the review, **space** marks the hunk under the cursor to drop (on a file's name, every hunk in that file), and marked lines show crossed out with `✗`. **`D`** asks "Drop 3 hunks in 2 files from tests's worktree?" and `y` drops them. From the CLI:
+
+```sh
+amux review tests --hunks                 # each changed file's hunks, numbered 1, 2, …
+amux review tests --drop src/parser.rs:2  # drop that hunk; --drop src/parser.rs drops the whole file
+```
+
+- **What happens.** The hunks are taken out of the run's worktree with `git apply -R`. A new file git doesn't track yet is deleted. If the worktree had nothing else uncommitted, amux commits the result as "Drop N hunks (amux review)", so `land` can take the branch as it is. Otherwise the change stays uncommitted next to the agent's own work, and its next commit takes it.
+- **The agent is told** which file:lines were dropped and not to add them back (`--no-tell` skips that).
+- **Nothing is lost by surprise.** Everything is checked first, and if any hunk no longer matches what you reviewed (the agent changed those lines since), nothing is dropped and you're told why. While the agent is working on a turn, dropping is refused (`--force` skips this check in the CLI). Each drop is saved as a patch in `runs/<id>/dropped/`, and the command prints how to put it back with `git apply`.
+- Binary changes to tracked files can't be dropped hunk by hunk. Runs on another machine can't drop hunks yet; `c` opens their diff in your pager.
 
 ### Shared notes and separate ports
 
@@ -736,6 +748,7 @@ Commands never wait on the network. The notice comes from a cached result, which
 | `amux attach <run>` | Connect this terminal to a run. Ctrl-] detaches. |
 | `amux logs <run>` | Print everything the run has output. |
 | `amux peek <run>` | Print what is on the run's screen right now, or its last screen if it has ended. |
+| `amux review <run> [--hunks] [--drop <file>[:<n>]]… [--no-tell] [--force] [--json]` | List a run's hunks, numbered per file, or drop some from its worktree and tell the agent. |
 | `amux spawn --issue <n> …` | Work on a GitHub issue in its own worktree; the PR says it fixes it. |
 | `amux intake [--label <l>] [--limit <n>] [--dry-run] [spawn options] <cli>[@name]` | Start a run for each new open GitHub issue (with the label). |
 | `amux spawn --autopilot[=merge] …` | Open the PR when the agent commits, hand back failing CI and review comments, and say when it's ready (or merge it). |

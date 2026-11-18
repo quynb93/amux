@@ -1,19 +1,33 @@
 //! The review view in `amux ui` (`c`): a run's diff, line by line, where ⏎ writes a
 //! comment on the line under the cursor and `S` sends every pending comment to the agent.
+//! Space marks the hunk under the cursor to drop, and `D` drops the marked hunks from the
+//! run's worktree after a y/n confirm.
 
 use super::draw::{border_hints, hints, panel, span};
 use super::theme::Theme;
 use crate::runs::Run;
+use crate::work::hunks::{self, Hunk};
 use crate::work::review::{self, Comment, DiffLine, LineKind};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use std::collections::BTreeSet;
 
 pub struct ReviewView {
     pub id: String,
+    run: Run,
+    /// The diff the lines and hunks come from, for dropping hunks.
+    changes: review::Changes,
     pub lines: Vec<DiffLine>,
+    /// The hunks of the diff; `DiffLine::hunk` indexes into it.
+    hunks: Vec<Hunk>,
+    /// Hunks marked to drop (space).
+    marked: BTreeSet<usize>,
+    /// Asking whether to drop the marked hunks (`D`).
+    confirm: bool,
     pub comments: Vec<Comment>,
     /// The diff line under the cursor.
     pub cursor: usize,
@@ -33,6 +47,13 @@ pub enum Outcome {
     Send,
     /// Say something in the footer (and whether it is an error).
     Say(String, bool),
+    /// Hunks were dropped: say so, tell the agent this note if there is one, and close
+    /// the view if nothing is left to review.
+    Dropped {
+        say: String,
+        tell: Option<String>,
+        close: bool,
+    },
 }
 
 /// One screen row: a diff line, or a comment shown under it.
@@ -44,20 +65,32 @@ enum Row {
 
 impl ReviewView {
     pub fn open(run: &Run) -> Result<ReviewView, String> {
-        let lines = review::run_diff(run).map_err(|e| format!("{e:#}"))?;
+        let changes = review::changes(run).map_err(|e| format!("{e:#}"))?;
+        let lines = review::parse_diff(&changes.text);
         if lines.is_empty() {
             return Err(format!("{} hasn't changed anything yet.", run.id));
         }
+        let hunks = hunks::parse(&changes);
         let cursor = lines.iter().position(|l| l.anchor().is_some()).unwrap_or(0);
         Ok(ReviewView {
             id: run.id.clone(),
+            run: run.clone(),
+            changes,
             lines,
+            hunks,
+            marked: BTreeSet::new(),
+            confirm: false,
             comments: review::load(&run.id),
             cursor,
             top: 0,
             input: None,
             area: Rect::default(),
         })
+    }
+
+    /// Asking whether to drop the marked hunks.
+    pub fn confirming(&self) -> bool {
+        self.confirm
     }
 
     pub fn pending(&self) -> usize {
@@ -114,8 +147,88 @@ impl ReviewView {
         }
     }
 
+    /// The hunks a mark on line `i` covers: its own, or every hunk of the file on a
+    /// file's first line.
+    fn hunks_at(&self, i: usize) -> Vec<usize> {
+        let l = &self.lines[i];
+        match (l.hunk, l.kind) {
+            (Some(h), _) => vec![h],
+            (None, LineKind::File) => (0..self.hunks.len())
+                .filter(|h| self.hunks[*h].file == l.file)
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    /// Space: marks the hunk under the cursor to drop, or unmarks it.
+    fn toggle(&mut self) -> Outcome {
+        let hs = self.hunks_at(self.cursor);
+        if hs.is_empty() {
+            return Outcome::Say(
+                "Nothing to drop on this line: move to a change (binary changes can't be dropped here).".into(),
+                true,
+            );
+        }
+        if hs.iter().all(|h| self.marked.contains(h)) {
+            for h in &hs {
+                self.marked.remove(h);
+            }
+        } else {
+            self.marked.extend(&hs);
+        }
+        Outcome::Stay
+    }
+
+    /// The marked hunks: how many, and in how many files.
+    fn marked_counts(&self) -> (usize, usize) {
+        let files: BTreeSet<&str> = self
+            .marked
+            .iter()
+            .map(|h| self.hunks[*h].file.as_str())
+            .collect();
+        (self.marked.len(), files.len())
+    }
+
+    /// Drops the marked hunks from the run's worktree, then reads the diff again.
+    fn drop_marked(&mut self) -> Outcome {
+        let picked: Vec<&Hunk> = self.marked.iter().map(|h| &self.hunks[*h]).collect();
+        let done = match hunks::drop_from_run(&self.run, &self.changes, &picked, false) {
+            Ok(d) => d,
+            Err(e) => return Outcome::Say(format!("{e:#}"), true),
+        };
+        let fresh = crate::runs::load(&self.id).unwrap_or_else(|_| self.run.clone());
+        let live = fresh.state() == crate::runs::State::Running;
+        let mut say = format!("Dropped {} from {}", done.summary(), self.id);
+        say.push_str(&match (&done.commit, &done.commit_error) {
+            (Some(c), _) => format!(", committed as {c}."),
+            (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
+            (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
+        });
+        let close = match ReviewView::open(&fresh) {
+            Ok(mut v) => {
+                v.cursor = self.cursor.min(v.lines.len().saturating_sub(1));
+                v.top = self.top;
+                *self = v;
+                false
+            }
+            Err(_) => true,
+        };
+        Outcome::Dropped {
+            say,
+            tell: live.then(|| done.note()),
+            close,
+        }
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if self.confirm {
+            self.confirm = false;
+            return match k.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.drop_marked(),
+                _ => Outcome::Say("Nothing dropped.".into(), false),
+            };
+        }
         if let Some(text) = &mut self.input {
             match k.code {
                 KeyCode::Esc => self.input = None,
@@ -139,8 +252,23 @@ impl ReviewView {
             KeyCode::Esc | KeyCode::Char('q') => return Outcome::Close,
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
-            KeyCode::PageDown | KeyCode::Char(' ') => self.move_by(page),
+            KeyCode::PageDown => self.move_by(page),
+            KeyCode::Char('f' | 'd') if ctrl => self.move_by(page),
             KeyCode::PageUp => self.move_by(-page),
+            KeyCode::Char('b' | 'u') if ctrl => self.move_by(-page),
+            KeyCode::Char(' ') => return self.toggle(),
+            KeyCode::Char('D') => {
+                if self.marked.is_empty() {
+                    return Outcome::Say(
+                        "No hunks marked: space marks the one under the cursor.".into(),
+                        true,
+                    );
+                }
+                if let Some(why) = hunks::busy(&self.run) {
+                    return Outcome::Say(why, true);
+                }
+                self.confirm = true;
+            }
             KeyCode::Home | KeyCode::Char('g') => self.move_to(0),
             KeyCode::End | KeyCode::Char('G') => self.move_to(usize::MAX),
             KeyCode::Char('n') | KeyCode::Tab => self.jump_file(false),
@@ -249,6 +377,24 @@ impl ReviewView {
     }
 
     pub fn footer(&self, t: &Theme) -> Line<'static> {
+        if self.confirm {
+            let (h, f) = self.marked_counts();
+            let tell = if self.run.state() == crate::runs::State::Running {
+                " and tell its agent"
+            } else {
+                ""
+            };
+            let mut v = vec![span(
+                format!(
+                    " Drop {} from {}'s worktree{tell}? ",
+                    hunks::counted(h, f),
+                    self.id
+                ),
+                t.title,
+            )];
+            v.extend(hints(t, &[("y", "drop"), ("n", "keep")]));
+            return Line::from(v);
+        }
         if let Some(text) = &self.input {
             let at = self.lines[self.cursor]
                 .anchor()
@@ -263,12 +409,15 @@ impl ReviewView {
             return Line::from(v);
         }
         let send = format!("send {}", self.pending());
+        let drop = format!("drop {}", self.marked.len());
         let mut v = vec![span(" ", t.muted)];
         v.extend(hints(
             t,
             &[
                 ("⏎", "comment"),
                 ("S", send.as_str()),
+                ("␣", "mark hunk"),
+                ("D", drop.as_str()),
                 ("x", "delete"),
                 ("n N", "file"),
                 ("j k", "move"),
@@ -281,7 +430,7 @@ impl ReviewView {
     pub fn draw(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         super::draw::clear(f, area, t);
         let pending = self.pending();
-        let title = format!(
+        let mut title = format!(
             " Review {} · {} file{} · {} comment{} to send ",
             self.id,
             self.files(),
@@ -289,11 +438,21 @@ impl ReviewView {
             pending,
             if pending == 1 { "" } else { "s" },
         );
+        if !self.marked.is_empty() {
+            let (h, f) = self.marked_counts();
+            title.push_str(&format!("· {} to drop ", hunks::counted(h, f)));
+        }
         let block = panel(t, t.accent)
             .title(span(title, t.title))
             .title_bottom(border_hints(
                 t,
-                &[("⏎", "comment"), ("S", "send"), ("Esc", "close")],
+                &[
+                    ("⏎", "comment"),
+                    ("S", "send"),
+                    ("␣", "mark"),
+                    ("D", "drop"),
+                    ("Esc", "close"),
+                ],
             ));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -332,16 +491,25 @@ impl ReviewView {
                         LineKind::Meta => t.muted,
                         LineKind::Context => t.text,
                     };
-                    let text = match l.kind {
+                    let dropped = l.hunk.is_some_and(|h| self.marked.contains(&h));
+                    let mut text = match l.kind {
                         LineKind::File => format!("── {} ", l.file),
                         _ => l.text.replace('\t', "    "),
+                    };
+                    if dropped && (l.kind == LineKind::Hunk || l.text == review::UNTRACKED) {
+                        text.push_str("  ✗ drop");
+                    }
+                    let style = if dropped {
+                        t.muted.add_modifier(Modifier::CROSSED_OUT)
+                    } else {
+                        style
                     };
                     let room = width.saturating_sub(7);
                     let text: String = text.chars().take(room).collect();
                     let mut line = Line::from(vec![
                         span(format!("{num:>5}"), t.muted),
                         span(mark, t.accent),
-                        span(" ", t.muted),
+                        span(if dropped { "✗" } else { " " }, t.error),
                         span(text, style),
                     ]);
                     if i == self.cursor {

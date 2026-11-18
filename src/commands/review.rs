@@ -1,8 +1,10 @@
 //! `amux comment` and `amux comments`: review comments on a run's changes from the CLI.
-//! `amux ui` writes the same comments from its review view (`c`).
+//! `amux review`: list a run's hunks and drop some. `amux ui` does the same from its
+//! review view (`c`).
 
 use crate::runs;
 use crate::util::need;
+use crate::work::hunks::{self, Hunk};
 use crate::work::review::{self, Anchor};
 use anyhow::{anyhow, bail, Result};
 
@@ -126,6 +128,151 @@ pub fn comments_cmd(argv: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+const REVIEW_USAGE: &str =
+    "amux review <run> [--hunks] [--drop <file>[:<n>]]... [--no-tell] [--force] [--json]";
+
+/// `--drop` arguments → indexes into `hunks`, in diff order. `file` is every hunk of the
+/// file, `file:n` its n-th (as `--hunks` numbers them). Paths may hold colons.
+fn pick(hunks: &[Hunk], specs: &[String]) -> Result<Vec<usize>> {
+    let mut out = Vec::new();
+    for s in specs {
+        let s = s.trim_start_matches("./");
+        let whole: Vec<usize> = (0..hunks.len()).filter(|i| hunks[*i].file == s).collect();
+        if !whole.is_empty() {
+            out.extend(whole);
+            continue;
+        }
+        let found = s.rsplit_once(':').and_then(|(f, n)| {
+            let n: usize = n.parse().ok()?;
+            let mine: Vec<usize> = (0..hunks.len()).filter(|i| hunks[*i].file == f).collect();
+            Some((f, n, mine))
+        });
+        match found {
+            Some((f, n, mine)) if !mine.is_empty() => match mine.get(n.wrapping_sub(1)) {
+                Some(i) => out.push(*i),
+                None => bail!(
+                    "{f} has {} hunk{}; `--hunks` lists them.",
+                    mine.len(),
+                    if mine.len() == 1 { "" } else { "s" }
+                ),
+            },
+            _ => bail!("{s} is not a file this run changed; `--hunks` lists them."),
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+pub fn review_cmd(argv: &[String]) -> Result<i32> {
+    let (mut drops, mut tell, mut force, mut json, mut id) = (vec![], true, false, false, None);
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--hunks" => {}
+            "--drop" => drops.push(need(it.next(), REVIEW_USAGE)?.to_string()),
+            "--no-tell" => tell = false,
+            "--force" => force = true,
+            "--json" => json = true,
+            f if f.starts_with('-') => bail!("Unknown option {f}. Usage: {REVIEW_USAGE}"),
+            _ if id.is_some() => bail!("Usage: {REVIEW_USAGE}"),
+            _ => id = Some(a.clone()),
+        }
+    }
+    let id = need(id.as_ref(), REVIEW_USAGE)?;
+    if crate::remote::split(id).is_some() {
+        bail!(
+            "Hunks can be listed and dropped only for runs on this machine. Run `amux review` on the machine {id} is on."
+        );
+    }
+    let run = runs::find(id)?;
+    let changes = review::changes(&run)?;
+    let all = hunks::parse(&changes);
+    if drops.is_empty() {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        } else if all.is_empty() {
+            println!("{} has no hunks to drop.", run.id);
+        } else {
+            print_hunks(&run.id, &all);
+        }
+        return Ok(0);
+    }
+    let picked: Vec<&Hunk> = pick(&all, &drops)?.into_iter().map(|i| &all[i]).collect();
+    let done = hunks::drop_from_run(&run, &changes, &picked, force)?;
+    let mut told = None;
+    if tell && run.state() == runs::State::Running {
+        told = Some(
+            crate::runs::client::send_text(&run, &done.note(), true).map_err(|e| format!("{e:#}")),
+        );
+    }
+    if json {
+        let mut v = serde_json::to_value(&done)?;
+        v["told"] = serde_json::json!(matches!(told, Some(Ok(()))));
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(0);
+    }
+    println!("Dropped {} from {}.", done.summary(), run.id);
+    match (&done.commit, &done.commit_error) {
+        (Some(c), _) => println!("Committed as {c}."),
+        (None, Some(e)) => println!("Not committed ({e}); the change is in the worktree."),
+        (None, None) => println!(
+            "The change is uncommitted in the run's folder; the agent's next commit takes it."
+        ),
+    }
+    match told {
+        Some(Ok(())) => println!("Told the agent what was dropped."),
+        Some(Err(e)) => println!("Could not tell the agent: {e}"),
+        None => {}
+    }
+    println!(
+        "Undo: git -C {} apply {}",
+        crate::remote::sh_quote(&done.repo.to_string_lossy()),
+        crate::remote::sh_quote(&done.undo.to_string_lossy())
+    );
+    Ok(0)
+}
+
+fn print_hunks(id: &str, all: &[Hunk]) {
+    let mut file = "";
+    for h in all {
+        if h.file != file {
+            file = &h.file;
+            println!(
+                "{file}{}",
+                if h.untracked {
+                    "  (new, untracked)"
+                } else {
+                    ""
+                }
+            );
+        }
+        let what = if h.untracked {
+            match h.added {
+                0 => "the whole file".to_string(),
+                n => format!("the whole file, {n} line{}", if n == 1 { "" } else { "s" }),
+            }
+        } else {
+            format!("{}  +{} -{}", h.header, h.added, h.removed)
+        };
+        println!("  {:>3}  {:<10} {what}", h.number, place_lines(h));
+    }
+    println!(
+        "\nDrop one with `amux review {id} --drop <file>:<n>`, or a whole file with `--drop <file>`."
+    );
+}
+
+/// The changed lines alone: `18-19`, `2`, or empty for an untracked file.
+fn place_lines(h: &Hunk) -> String {
+    if h.untracked {
+        return String::new();
+    }
+    h.place()
+        .strip_prefix(&format!("{}:", h.file))
+        .unwrap_or_default()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +286,51 @@ mod tests {
         assert!(parse_anchor("x.rs:0", false).is_err());
         assert!(parse_anchor("../etc/passwd:1", false).is_err());
         assert!(parse_anchor("/etc/passwd:1", false).is_err());
+    }
+
+    #[test]
+    fn picks_hunks_by_file_and_number() {
+        let t = crate::testutil::TempDir::new();
+        let dir = t.path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let lines: String = (1..=20).map(|i| format!("{i}\n")).collect();
+        crate::testutil::write(&dir.join("a:b.txt"), &lines);
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qm",
+            "i",
+        ]);
+        let changed = lines.replace("2\n", "two\n").replace("19\n", "nineteen\n");
+        crate::testutil::write(&dir.join("a:b.txt"), &changed);
+        crate::testutil::write(&dir.join("new.txt"), "x\n");
+        let all = hunks::parse(&review::changes_in(dir, "HEAD").unwrap());
+        let p = |s: &[&str]| pick(&all, &s.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(p(&["a:b.txt"]).unwrap(), vec![0, 1]);
+        assert_eq!(
+            p(&["a:b.txt:2", "./new.txt", "a:b.txt:2"]).unwrap(),
+            vec![1, 2]
+        );
+        assert!(p(&["a:b.txt:3"])
+            .unwrap_err()
+            .to_string()
+            .contains("has 2 hunks"));
+        assert!(p(&["nope.txt"]).is_err());
+        assert!(p(&["a:b.txt:0"]).is_err());
     }
 }

@@ -117,6 +117,18 @@ impl App {
                     );
                     self.mode = Mode::Review(r);
                 }
+                review::Outcome::Dropped { say, tell, close } => {
+                    match tell {
+                        Some(note) => self.background(
+                            vec!["send".into(), r.id.clone(), "--".into(), note],
+                            format!("{say} Telling the agent"),
+                        ),
+                        None => self.say(say, false),
+                    }
+                    if !close {
+                        self.mode = Mode::Review(r);
+                    }
+                }
             },
         }
     }

@@ -448,7 +448,9 @@ impl App {
         let t = &self.theme;
         let line = match (&self.mode, &self.status) {
             (Mode::Review(r), Some((msg, err, at)))
-                if r.input.is_none() && at.elapsed() < Duration::from_secs(4) =>
+                if r.input.is_none()
+                    && !r.confirming()
+                    && at.elapsed() < Duration::from_secs(4) =>
             {
                 let (mark, style) = if *err {
                     ("✗", t.error)
@@ -857,6 +859,10 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("b  t", "a board by state, or live tiles side by side"),
     ("v", "verify: run its tests here, or push its branch for CI"),
     ("c", "review: the run's diff; ⏎ comments on a line, S sends"),
+    (
+        "",
+        "in review: space marks a hunk to drop, D drops the marked ones",
+    ),
     ("PgUp PgDn", "scroll the preview; Esc back to live"),
     ("/", "command palette"),
     ("q", "quit; runs keep going"),

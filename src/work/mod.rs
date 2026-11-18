@@ -6,6 +6,7 @@ pub mod approve;
 pub mod autopilot;
 pub mod github;
 pub mod guards;
+pub mod hunks;
 pub mod issues;
 pub mod limits;
 pub mod notes;

@@ -1227,6 +1227,111 @@ fn reviews_a_runs_changes_and_sends_line_comments() {
 }
 
 #[test]
+fn lists_and_drops_hunks_from_the_cli_and_the_ui() {
+    let s = Sandbox::new("hunks");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    let original: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    write(&repo.join("a.rs"), &original);
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let r = s.amux_with(
+        &["spawn", "--name", "dr", "--worktree", "fake"],
+        &[("FAKE_CHAT", "1")],
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "dr", "running");
+    let wt = s.amux_home.join("worktrees/repo-dr");
+    let changed = original
+        .replace("line 2\n", "line two\n")
+        .replace("line 18\n", "line eighteen\nline 18b\n");
+    write(&wt.join("a.rs"), &changed);
+    write(&wt.join("new.txt"), "brand new\n");
+
+    let list = s.amux(&["review", "dr", "--hunks"]);
+    assert_eq!(list.code, 0, "{}", list.err);
+    assert!(list.out.contains("a.rs\n    1  2 "), "{}", list.out);
+    assert!(list.out.contains("    2  18-19 "), "{}", list.out);
+    assert!(
+        list.out.contains("new.txt  (new, untracked)"),
+        "{}",
+        list.out
+    );
+    assert!(s.amux(&["review", "dr", "--drop", "a.rs:3"]).code != 0);
+
+    // The fake agent may still look busy: without --force that is refused.
+    let mut d = s.amux(&["review", "dr", "--drop", "a.rs:2"]);
+    if d.code != 0 {
+        assert!(d.err.contains("once its turn ends"), "{}", d.err);
+        d = s.amux(&["review", "dr", "--drop", "a.rs:2", "--force"]);
+    }
+    assert_eq!(d.code, 0, "{}", d.err);
+    assert!(
+        d.out.contains("Dropped 1 hunk in 1 file from dr."),
+        "{}",
+        d.out
+    );
+    assert!(d.out.contains("uncommitted"), "{}", d.out);
+    let now = fs::read_to_string(wt.join("a.rs")).unwrap();
+    assert!(
+        now.contains("line two\n") && !now.contains("eighteen"),
+        "{now}"
+    );
+    // The agent hears what was dropped.
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = s.amux(&["logs", "dr"]).out;
+        if seen.contains("a.rs:18-19") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(seen.contains("got I reviewed your changes"), "{seen}");
+    assert!(seen.contains("a.rs:18-19"), "{seen}");
+    s.amux(&["stop", "dr"]);
+    wait_ps(&s, "dr", "exited");
+
+    // In the UI: space marks the hunk under the cursor, D and y drop it.
+    let ui = |keys: &str| {
+        s.amux(&["ui", "--dump", "--size", "30x120", "--keys", keys])
+            .out
+    };
+    let marked = ui("c ");
+    assert!(marked.contains("1 hunk in 1 file to drop"), "{marked}");
+    assert!(marked.contains("✗ drop"), "{marked}");
+    let asked = ui("c D");
+    assert!(
+        asked.contains("Drop 1 hunk in 1 file from dr's worktree?"),
+        "{asked}"
+    );
+    let dropped = ui("c Dy");
+    assert!(
+        dropped.contains("Dropped 1 hunk in 1 file from dr"),
+        "{dropped}"
+    );
+    assert_eq!(fs::read_to_string(wt.join("a.rs")).unwrap(), original);
+    // A new untracked file goes whole; with nothing left, the review closes.
+    let last = ui("c Dy");
+    assert!(last.contains("Dropped 1 hunk in 1 file from dr"), "{last}");
+    assert!(!wt.join("new.txt").exists());
+    assert!(s.amux(&["review", "dr"]).out.contains("no hunks to drop"));
+}
+
+#[test]
 fn streams_events_and_shows_board_and_tiles() {
     use std::io::{BufRead, BufReader};
     let s = Sandbox::new("events");
