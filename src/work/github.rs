@@ -144,6 +144,9 @@ pub struct Opened {
     pub created: bool,
     /// Uncommitted files left out of the PR.
     pub left_out: usize,
+    /// For a run on a Linear or Jira issue: the issue the PR's link was posted on, or why
+    /// it couldn't be. None when nothing was tried.
+    pub commented: Option<std::result::Result<String, String>>,
 }
 
 /// Pushes the run's branch if GitHub doesn't have all of it, then opens a PR for it
@@ -166,9 +169,11 @@ pub fn open_pr(run: &Run, draft: bool, base: Option<&str>) -> Result<Opened> {
                 args.extend(["--base", b]);
             }
             // gh fills the title from the commits and leaves a given body alone.
-            let body = run
-                .issue
-                .map(|n| format!("Fixes #{n}\n\nStarted by amux from issue #{n}."));
+            let body = match (&run.tracker, run.issue) {
+                (Some(t), _) => Some(t.pr_body()),
+                (None, Some(n)) => Some(format!("Fixes #{n}\n\nStarted by amux from issue #{n}.")),
+                (None, None) => None,
+            };
             if let Some(b) = &body {
                 args.extend(["--body", b.as_str()]);
             }
@@ -179,10 +184,20 @@ pub fn open_pr(run: &Run, draft: bool, base: Option<&str>) -> Result<Opened> {
         }
     };
     write_json(&pr_file(&run.id), &pr)?;
+    // Back on the Linear or Jira issue, a link to the new PR.
+    let commented = match &run.tracker {
+        Some(t) if created && super::trackers::comment_enabled() => Some(
+            super::trackers::comment_pr(t, &pr.url)
+                .map(|_| t.key.clone())
+                .map_err(|e| format!("{e:#}")),
+        ),
+        _ => None,
+    };
     Ok(Opened {
         pr,
         created,
         left_out: plan.dirty,
+        commented,
     })
 }
 

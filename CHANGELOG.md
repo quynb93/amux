@@ -15,6 +15,9 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 - In the review view, space now marks a hunk instead of paging down. PgDn, Ctrl-F and Ctrl-D page down; PgUp, Ctrl-B and Ctrl-U page up.
 - The review diff shows a renamed file as removed and added, so each part can be dropped on its own.
+- Linear and Jira issues as runs. `amux spawn --issue linear:ENG-123` (or `jira:PROJ-45`, or the issue's URL) reads the issue's title, description and comments and starts a run on the branch `amux/eng-123`. Jira's rich text is turned into plain text. `amux intake --from linear --label <l> [--team <key>]` and `amux intake --from jira --jql <query>` (or `--label` with `--project`) start a run for each new issue, once, like GitHub intake, and work with `amux schedule` and `--autopilot`.
+- `amux tracker login linear` and `amux tracker login jira <site-url> <email>` check a Linear API key or Jira API token and store it in the macOS Keychain (a `0600` file in `~/.amux/trackers/` on Linux). `LINEAR_API_KEY`, and `JIRA_API_TOKEN` with `JIRA_URL` and `JIRA_EMAIL`, work instead. `amux tracker` shows what's set up, and `amux tracker logout` forgets a key.
+- The pull request of a run on a Linear issue starts with `Fixes ENG-123`, so Linear's GitHub integration links it; a Jira one starts with the key. Both link to the issue. When amux opens the PR (`amux pr` or autopilot), it comments the PR's link on the issue; `"trackers": { "comment": false }` in `config.json` turns that off. amux doesn't change an issue's status.
 
 ## [0.11.10] - 2026-11-18
 

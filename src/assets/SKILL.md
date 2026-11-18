@@ -89,7 +89,9 @@ To hand a whole goal to a lead agent: `amux lead --workers 3 claude -p "<goal>"`
 
 `amux spawn --issue 42 claude` works on GitHub issue #42 in its own worktree; its PR says
 `Fixes #42`. `amux intake --label <l> claude` starts one run per new open issue with the
-label. `amux schedule add <name> "weekdays 9:00" <amux command...>` runs a command by
+label. Linear and Jira issues work too: `--issue linear:ENG-123`, `--issue jira:PROJ-45`,
+`amux intake --from linear --label <l>` or `--from jira --jql <query>` (keys come from
+`amux tracker login`). `amux schedule add <name> "weekdays 9:00" <amux command...>` runs a command by
 itself (`every 1h`, cron lines too); `amux schedule` lists them. Only schedule what the user
 asked for.
 

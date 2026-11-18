@@ -315,11 +315,16 @@ fn no_pr(run: &Run, p: &mut Pilot, kind: Kind) -> Result<()> {
     let o = github::open_pr(run, false, None)?;
     let pr = o.pr;
     set(id, p, "checks", &format!("opened PR #{}", pr.number));
+    let issue = match &o.commented {
+        Some(Ok(key)) => format!(" (linked on {key})"),
+        Some(Err(e)) => format!(" (could not link it on the issue: {e})"),
+        None => String::new(),
+    };
     tell(
         id,
         p,
         "opened",
-        &format!("opened PR #{}: {}", pr.number, pr.url),
+        &format!("opened PR #{}: {}{issue}", pr.number, pr.url),
     );
     Ok(())
 }

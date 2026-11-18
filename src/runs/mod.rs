@@ -77,6 +77,10 @@ pub struct Run {
     /// The GitHub issue it works on (`amux spawn --issue`); its PR says it fixes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<u64>,
+    /// The Linear or Jira issue it works on (`amux spawn --issue linear:ENG-123`); its PR
+    /// links to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<crate::work::trackers::Tracked>,
     /// Text that means the account hit its usage limit (from the provider spec).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_patterns: Vec<String>,
