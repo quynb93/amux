@@ -56,6 +56,7 @@ mod overlay;
 #[cfg(unix)]
 mod palettes;
 mod paths;
+mod patterns;
 #[cfg(unix)]
 mod plugins;
 mod providers;
@@ -203,7 +204,8 @@ Maintenance:
                                            stalls, hits a limit, ends, or its tests/CI finish
   amux skill [--install]                   The agent skill for running other agents with amux
   amux plugin list | new <name> | run <name>   Plugins (`amux <name>`) and hooks (~/.amux/hooks)
-  amux update [--check]                    Install the latest amux release (--check: only look)
+  amux update [--check | --patterns]       Install the latest amux release (--check: only look;
+                                           --patterns: fetch the latest prompt and limit text)
   amux --version
 
 Docs: https://github.com/quynb93/amux#readme

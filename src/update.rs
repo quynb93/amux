@@ -160,8 +160,49 @@ pub fn internal_cmd(args: &[String]) -> i32 {
         spawn_refresh();
     } else {
         fetch_latest();
+        // The same daily request to GitHub also brings the prompt text CLIs show now. A
+        // file that doesn't check out is not saved.
+        let _ = crate::patterns::refresh();
     }
     0
+}
+
+/// A file in the amux repo, as raw.githubusercontent.com serves it (or the test stand-in).
+pub fn raw_url(path: &str) -> String {
+    let base = match std::env::var("AMUX_GITHUB_URL") {
+        Ok(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
+        _ => "https://raw.githubusercontent.com".into(),
+    };
+    format!("{base}/{REPO}/{path}")
+}
+
+/// `amux update --patterns`: fetch the latest prompt and limit text for the built-in CLIs.
+fn patterns_cmd() -> i32 {
+    match crate::patterns::refresh() {
+        Ok(r) => {
+            let file = paths::tildify(&crate::patterns::file());
+            if r.changed {
+                println!(
+                    "Updated the prompt and limit patterns for {} in {file}.",
+                    r.providers.join(", ")
+                );
+                println!("New runs use them; runs already going keep theirs.");
+            } else {
+                println!("The patterns in {file} are up to date.");
+            }
+            if !r.skipped.is_empty() {
+                println!(
+                    "Skipped {}: not built into this amux. `amux update` gets a newer one.",
+                    r.skipped.join(", ")
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("amux update --patterns: {e:#}");
+            1
+        }
+    }
 }
 
 /// `amux __update-check` with no terminal and its own process group.
@@ -310,8 +351,9 @@ pub fn update_cmd(args: &[String]) -> i32 {
     let check = match args.first().map(String::as_str) {
         None => false,
         Some("--check") => true,
+        Some("--patterns") => return patterns_cmd(),
         Some(_) => {
-            eprintln!("Usage: amux update [--check]");
+            eprintln!("Usage: amux update [--check | --patterns]");
             return 2;
         }
     };

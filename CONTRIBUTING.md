@@ -99,7 +99,7 @@ Most CLIs need only a definition, with no new code:
 
 1. Find out how the CLI moves its home directory (an environment variable such as `FOO_HOME`), which files in that home hold the login, and where it writes sessions. The CLI's docs or source are the authority. Don't guess file names.
 2. Try the definition in your sandbox's `~/.amux/config.json` first, sign in to two accounts, and check that each one keeps its own login. Field reference: [docs/providers.md](docs/providers.md).
-3. To ship it as a built-in, add it to `src/providers.rs`, add a row to the table in the README, and add a test.
+3. To ship it as a built-in, add it to `src/providers.rs`, add a row to the table in the README, copy its `waitingPatterns` and `limitPatterns` into `patterns.json` (a test checks that they match), and add a test.
 
 Reading a new session format (for `amux sessions` and handoff) needs a parser in `src/sessions.rs` and a fixture-based test next to it.
 
