@@ -453,7 +453,8 @@ const standalone = matchMedia("(display-mode: standalone)").matches || navigator
 let pushActive = false, swReady = null;
 if ("serviceWorker" in navigator && window.isSecureContext) {
   swReady = navigator.serviceWorker.register("/sw.js");
-  swReady.then((r) => r.pushManager && r.pushManager.getSubscription()).then((s) => { pushActive = !!s; }, () => {});
+  swReady.then((r) => r.pushManager && r.pushManager.getSubscription())
+    .then((s) => s && pushInfo(s)).then((i) => { pushActive = !!(i && i.active); }, () => {});
   // A tapped notification, with the app already open: go to its run.
   navigator.serviceWorker.addEventListener("message", (e) => { if (e.data && e.data.open) location.href = e.data.open; });
 }
@@ -469,6 +470,9 @@ function pushUnavailable() {
   if (Notification.permission === "denied") return "Notifications are blocked for this app. Allow them in the browser's site settings (iPhone: Settings → Notifications → amux), then come back.";
   return null;
 }
+// The server's key and setup, and whether it still has this browser's subscription (it
+// drops one the push service has forgotten); `active`: waiting runs reach it by push.
+const pushInfo = (sub) => api("/api/push" + (sub ? `?endpoint=${enc(sub.endpoint)}` : ""));
 const deviceName = () => (navigator.userAgent.match(/iPhone|iPad|Android|Macintosh|Windows|Linux/) || ["browser"])[0].replace("Macintosh", "Mac");
 function b64u(s) {
   const raw = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - s.length % 4) % 4));
@@ -497,19 +501,22 @@ async function loadPush(msg) {
   try {
     reg = await swReady;
     sub = await reg.pushManager.getSubscription();
-    info = await api("/api/push");
+    info = await pushInfo(sub);
   } catch (e) {
     note.textContent = `Notifications can't start here: ${e.message}. With --tls, the phone has to trust the certificate (install /amux-cert.pem).`;
     box.append(note);
     return;
   }
-  pushActive = !!sub;
-  const btn = el("button", sub ? "" : "primary", sub ? "Turn off on this device" : "Turn on for this device");
+  // On only if amux still has this subscription; a stale one is replaced by turning on.
+  const on = !!sub && info.subscribed;
+  pushActive = !!info.active;
+  const btn = el("button", on ? "" : "primary", on ? "Turn off on this device" : "Turn on for this device");
   const other = info.service && info.service !== "webpush" ? ` amux sends to ${info.service} now: \`amux phone webpush\` on the computer sends here instead.` : "";
-  note.textContent = msg || (sub ? "This device gets amux's notifications, even with the app closed." : "Get a notification when a run needs you, even with the app closed.") + other;
+  const off = sub ? "amux no longer has this device's subscription: turn it on again." : "Get a notification when a run needs you, even with the app closed.";
+  note.textContent = msg || (on ? "This device gets amux's notifications, even with the app closed." : off) + other;
   btn.onclick = () => {
     btn.disabled = true;
-    (sub ? pushOff(sub) : pushOn(reg, info.publicKey)).then((m) => loadPush(m), (e) => loadPush(e.message));
+    (on ? pushOff(sub) : pushOn(reg, info.publicKey)).then((m) => loadPush(m), (e) => loadPush(e.message));
   };
   box.append(btn, note);
 }
