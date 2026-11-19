@@ -71,6 +71,10 @@ pub fn validate(bytes: &[u8]) -> Result<(Map<String, Value>, Vec<String>)> {
             let Value::Array(list) = list else {
                 bail!("\"{id}\".{key} is not a list");
             };
+            if list.is_empty() {
+                // An empty list would quietly turn the detection off.
+                bail!("\"{id}\".{key} has no patterns");
+            }
             if list.len() > MAX_PER_LIST {
                 bail!("\"{id}\".{key} has more than {MAX_PER_LIST} patterns");
             }
@@ -195,6 +199,7 @@ mod tests {
                 "only waitingPatterns",
             ),
             (json!({"claude": {"waitingPatterns": "x"}}), "not a list"),
+            (json!({"claude": {"limitPatterns": []}}), "no patterns"),
             (json!({"claude": {"waitingPatterns": [1]}}), "not text"),
             (json!({"claude": {"waitingPatterns": ["a"]}}), "one line of"),
             (

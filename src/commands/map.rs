@@ -74,8 +74,11 @@ fn add(dir: &str, acct: &str) -> Result<i32> {
 fn remove(dir: &str, provider: Option<&str>) -> Result<i32> {
     let mut cfg = load_config()?;
     let folders = cfg.folders.get_or_insert_with(Map::new);
-    // The folder may be gone by now; then match the path as typed.
+    // The folder may be gone by now; then match the path as typed, made absolute and
+    // without a trailing slash, as `add` stored it.
     let key = canonical(dir)
+        .or_else(|_| std::path::absolute(expand_home(dir)))
+        .map(|p| p.components().collect::<PathBuf>())
         .unwrap_or_else(|_| expand_home(dir))
         .to_string_lossy()
         .into_owned();

@@ -61,6 +61,15 @@ impl App {
             .filter(|r| r.kind.is_live() && !r.run.id.contains(':'))
             .filter_map(|r| r.run.port)
             .collect();
+        if ports.is_empty() {
+            // Nothing to check: no thread, just forget any port seen before.
+            if let Ok(mut c) = self.listening.lock() {
+                if c.1 {
+                    c.0.clear();
+                }
+            }
+            return;
+        }
         let check = move || -> HashSet<u16> {
             ports
                 .into_iter()
@@ -87,7 +96,12 @@ impl App {
     }
 
     /// The run's port, when its dev server is up: for the list, the board and the preview.
+    /// Only for live runs on this machine: a finished run's port may now belong to another
+    /// run, and a remote run's port is on that machine, not here.
     pub(super) fn live_port(&self, run: &Run) -> Option<u16> {
+        if !run.state().is_live() || run.id.contains(':') {
+            return None;
+        }
         let port = run.port?;
         let l = self.listening.lock().ok()?;
         l.0.contains(&port).then_some(port)

@@ -734,13 +734,27 @@ pub fn open_cmd(argv: &[String]) -> Result<i32> {
             run.id
         );
     };
-    let url = crate::work::notes::port_url(port);
+    // Ports are handed out again once a run ends, so a finished run's port may be another
+    // run's dev server by now.
+    if !run.state().is_live() {
+        if let Some(other) = runs::list()
+            .iter()
+            .find(|r| r.id != run.id && r.port == Some(port) && r.state().is_live())
+        {
+            bail!(
+                "{} has ended, and its port {port} now belongs to {}.",
+                run.id,
+                other.id
+            );
+        }
+    }
     if !crate::work::notes::listening(port) {
         bail!(
             "Nothing is listening on port {port} yet. Start {}'s dev server; it gets PORT={port}.",
             run.id
         );
     }
+    let url = crate::work::notes::port_url(port);
     println!("{url}");
     crate::util::open_url(&url)?;
     Ok(0)
