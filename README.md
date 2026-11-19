@@ -679,6 +679,7 @@ amux send gpu:claude-1 "use the bigger batch"
 - `amux ui` shows every machine's runs in the list, the board and the tiles. Their screens are live, and you can type into them, attach, stop, verify, send and review them (`c`: comments and dropping hunks, through amux there), the same as local runs.
 - amux keeps one SSH connection per machine open for ten minutes and reuses it (OpenSSH ControlMaster), so it is quick. It stores no keys: SSH uses your own config, agent and known hosts. Background checks never wait for a password, so set up key or agent login.
 - `--amux <path>` on `machine add` points at amux there if it isn't on its PATH.
+- Arguments go over as one base64 payload (`amux __argv …`), so quotes, `$` and the like in a message arrive as typed whatever the login shell there (bash, zsh, fish, tcsh). With amux older than 0.11.15 there, they are quoted for a POSIX shell instead, and amux refuses if that machine's login shell isn't one. Only a command's run arguments are read as `<machine>:<run>`: text after the run, after `--`, or an option's value never is.
 
 ### On your phone
 

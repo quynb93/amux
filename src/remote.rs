@@ -108,8 +108,88 @@ impl Machine {
         c
     }
 
-    /// The remote shell command that runs amux with `args`, optionally in `dir`.
-    pub fn command_line(&self, args: &[String], dir: Option<&str>) -> String {
+    /// The remote command that runs amux with `args`, optionally in `dir`: `amux __argv
+    /// <payload>`, with the arguments as base64url JSON, which every login shell (sh,
+    /// fish, tcsh…) passes on unchanged. When amux there is too old for `__argv`, the
+    /// arguments are quoted for a POSIX shell instead, if its login shell is one.
+    pub fn command_line(&self, args: &[String], dir: Option<&str>) -> Result<String> {
+        if self.speaks_argv() {
+            return Ok(self.argv_line(args, dir));
+        }
+        match self.login_shell() {
+            Some(sh) if posix_shell(&sh) => Ok(self.legacy_line(args, dir)),
+            sh => bail!(
+                "amux on {} is too old to take arguments safely through its login shell ({}): update amux there.",
+                self.name,
+                sh.as_deref().unwrap_or("unknown")
+            ),
+        }
+    }
+
+    /// `amux __argv <base64url JSON {args, cwd}>`: only letters, digits, `-` and `_`
+    /// after the program, so no shell does anything to it.
+    pub fn argv_line(&self, args: &[String], dir: Option<&str>) -> String {
+        use base64::Engine;
+        let payload = serde_json::json!({ "args": args, "cwd": dir });
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!(
+            "{} __argv {b64}",
+            sh_quote(self.amux.as_deref().unwrap_or("amux"))
+        )
+    }
+
+    /// Whether amux on the machine has `__argv` (0.11.15 and later): asked once, and
+    /// remembered in ~/.amux/remote-caps.json once it has.
+    fn speaks_argv(&self) -> bool {
+        let key = format!(
+            "{} {} {}",
+            self.name,
+            self.target,
+            self.amux.as_deref().unwrap_or("amux")
+        );
+        let file = paths::AMUX_HOME.join("remote-caps.json");
+        let mut caps: serde_json::Map<String, serde_json::Value> =
+            read_json(&file).unwrap_or_default();
+        if caps.get(&key).and_then(|v| v["argv"].as_bool()) == Some(true) {
+            return true;
+        }
+        let probe = self
+            .ssh(false)
+            .arg(self.argv_line(&["--version".into()], None))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        match probe {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                caps.insert(key, serde_json::json!({ "argv": true }));
+                let _ = write_json(&file, &caps);
+                true
+            }
+            // ssh itself failed (255) or couldn't run: say nothing here, the command
+            // will fail the same way and say why.
+            Ok(o) if o.status.code() == Some(255) => true,
+            Err(_) => true,
+            Ok(_) => false,
+        }
+    }
+
+    /// The machine's login shell, from `$SHELL` there (every shell expands that).
+    fn login_shell(&self) -> Option<String> {
+        let o = self
+            .ssh(false)
+            .arg("echo $SHELL")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let sh = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        (!sh.is_empty()).then_some(sh)
+    }
+
+    /// The command for amux before 0.11.15, quoted for a POSIX shell.
+    fn legacy_line(&self, args: &[String], dir: Option<&str>) -> String {
         let amux = self.amux.as_deref().unwrap_or("amux");
         let mut s = String::new();
         if let Some(d) = dir {
@@ -135,7 +215,7 @@ impl Machine {
         let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
         let status = self
             .ssh(tty)
-            .arg(self.command_line(args, dir))
+            .arg(self.command_line(args, dir)?)
             .status()
             .context("could not run ssh")?;
         // ssh's own failures (can't connect) are 255.
@@ -149,7 +229,7 @@ impl Machine {
     pub fn output(&self, args: &[String]) -> Result<String> {
         let out = self
             .ssh(false)
-            .arg(self.command_line(args, None))
+            .arg(self.command_line(args, None)?)
             .stdin(Stdio::null())
             .output()
             .context("could not run ssh")?;
@@ -170,7 +250,10 @@ impl Machine {
         let (mine, theirs) = UnixStream::pair()?;
         let mut child = self
             .ssh(false)
-            .arg(self.command_line(&["__pipe".into(), run.into()], None))
+            .arg(
+                self.command_line(&["__pipe".into(), run.into()], None)
+                    .map_err(std::io::Error::other)?,
+            )
             .stdin(Stdio::from(std::os::fd::OwnedFd::from(theirs.try_clone()?)))
             .stdout(Stdio::from(std::os::fd::OwnedFd::from(theirs)))
             .stderr(Stdio::null())
@@ -178,6 +261,66 @@ impl Machine {
         std::thread::spawn(move || child.wait());
         Ok(mine)
     }
+}
+
+/// sh, bash, zsh and the like, by the path's last part.
+fn posix_shell(path: &str) -> bool {
+    let name = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches('-');
+    matches!(
+        name,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "yash" | "busybox"
+    )
+}
+
+/// `amux __argv <payload>` on the machine: decodes the arguments (and the folder to run
+/// in) that `Machine::argv_line` sent, and runs amux with them.
+pub fn argv_main(rest: &[String]) -> i32 {
+    use base64::Engine;
+    use std::os::unix::process::CommandExt;
+    let payload = rest
+        .first()
+        .and_then(|b| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(b.trim_end_matches('='))
+                .ok()
+        })
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let Some(p) = payload else {
+        eprintln!("amux: __argv: unreadable arguments");
+        return 2;
+    };
+    let Some(args) = p["args"].as_array().and_then(|a| {
+        a.iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect::<Option<Vec<String>>>()
+    }) else {
+        eprintln!("amux: __argv: unreadable arguments");
+        return 2;
+    };
+    if let Some(d) = p["cwd"].as_str() {
+        let dir = match d.strip_prefix("~/") {
+            Some(rest) => paths::HOME.join(rest),
+            None if d == "~" => paths::HOME.clone(),
+            None => PathBuf::from(d),
+        };
+        if let Err(e) = std::env::set_current_dir(&dir) {
+            eprintln!("amux: {}: {e}", dir.display());
+            return 1;
+        }
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return 1;
+    };
+    let err = Command::new(exe)
+        .args(&args)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .exec();
+    eprintln!("amux: {err}");
+    1
 }
 
 /// Where SSH keeps the shared connections: ~/.ssh, which is private and has a short path
@@ -340,31 +483,76 @@ fn check(m: &Machine) -> Result<i32> {
     }
 }
 
-/// Commands whose run arguments may name a run on another machine.
-const RUN_COMMANDS: &[&str] = &[
-    "attach", "logs", "peek", "stop", "rm", "explain", "send", "wait", "diff", "verify", "pr",
-    "checks", "comment", "comments", "events", "overlap", "land", "failover", "review",
+/// Commands whose run arguments may name a run on another machine: those that take one
+/// run (its first positional argument), and those that take several.
+const ONE_RUN: &[&str] = &[
+    "attach", "logs", "peek", "stop", "explain", "send", "diff", "verify", "pr", "checks",
+    "comment", "comments", "failover", "review",
 ];
+const RUNS: &[&str] = &["rm", "wait", "events", "overlap", "land"];
+
+/// Options of those commands that take a value, which is never a run.
+const VALUE_OPTIONS: &[&str] = &[
+    "--key",
+    "-k",
+    "--timeout",
+    "-t",
+    "--until",
+    "-u",
+    "--command",
+    "--into",
+    "--base",
+    "--to",
+    "--rm",
+    "--drop",
+    "--expect",
+];
+
+/// The positions in `rest` that name runs for `cmd`: positional arguments only (not an
+/// option's value, nothing after `--`), the first one only for a one-run command.
+fn run_positions(cmd: &str, rest: &[String]) -> Vec<usize> {
+    let many = RUNS.contains(&cmd);
+    if !many && !ONE_RUN.contains(&cmd) {
+        return vec![];
+    }
+    let mut out = vec![];
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i].as_str();
+        if a == "--" {
+            break;
+        }
+        if a.starts_with('-') {
+            if VALUE_OPTIONS.contains(&a) {
+                i += 1;
+            }
+        } else {
+            out.push(i);
+            if !many {
+                break;
+            }
+        }
+        i += 1;
+    }
+    out
+}
 
 /// If this command is about a run on another machine, runs it there and returns its exit
 /// code. All the runs named must be on the same machine.
 pub fn forward(cmd: &str, rest: &[String]) -> Option<Result<i32>> {
-    if !RUN_COMMANDS.contains(&cmd) {
-        return None;
-    }
     let mut machine: Option<Machine> = None;
-    let mut args = vec![cmd.to_string()];
-    for a in rest {
-        match split(a).filter(|_| !a.starts_with('-')) {
-            Some((m, run)) => {
-                if machine.as_ref().is_some_and(|x| x.name != m.name) {
-                    return Some(Err(anyhow!("Name runs on one machine at a time.")));
-                }
-                machine = Some(m);
-                args.push(run);
-            }
-            None => args.push(a.clone()),
+    let mut args: Vec<String> = std::iter::once(cmd.to_string())
+        .chain(rest.iter().cloned())
+        .collect();
+    for i in run_positions(cmd, rest) {
+        let Some((m, run)) = split(&rest[i]).filter(|(_, r)| crate::store::valid_name(r)) else {
+            continue;
+        };
+        if machine.as_ref().is_some_and(|x| x.name != m.name) {
+            return Some(Err(anyhow!("Name runs on one machine at a time.")));
         }
+        machine = Some(m);
+        args[i + 1] = run;
     }
     let m = machine?;
     Some(m.run(&args, None))
@@ -381,7 +569,7 @@ mod tests {
             target: "me@gpu".into(),
             amux: None,
         };
-        let line = m.command_line(
+        let line = m.legacy_line(
             &["send".into(), "r1".into(), "it's $HOME; rm -rf ~".into()],
             None,
         );
@@ -389,12 +577,53 @@ mod tests {
             line,
             "AMUX_NO_UPDATE_CHECK=1 amux send r1 'it'\\''s $HOME; rm -rf ~'"
         );
-        let line = m.command_line(&["ps".into()], Some("~/src/my app"));
+        let line = m.legacy_line(&["ps".into()], Some("~/src/my app"));
         assert_eq!(
             line,
             "cd \"$HOME\"/'src/my app' && AMUX_NO_UPDATE_CHECK=1 amux ps"
         );
         assert!(valid_target("me@host.example.com") && valid_target("box"));
         assert!(!valid_target("-oProxyCommand=x") && !valid_target("a b") && !valid_target("a;b"));
+
+        // What any shell gets: the program, `__argv` and base64url, nothing to expand.
+        let args: Vec<String> = ["send", "r1", "--", "it's $HOME; `x` %s\n!!\\ 'q' \"d\""]
+            .map(String::from)
+            .to_vec();
+        let line = m.argv_line(&args, Some("~/my dir"));
+        let b64 = line.strip_prefix("amux __argv ").unwrap();
+        assert!(b64
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        use base64::Engine;
+        let v: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["args"], serde_json::json!(args));
+        assert_eq!(v["cwd"], "~/my dir");
+        assert!(posix_shell("/bin/bash") && posix_shell("/usr/bin/zsh") && posix_shell("-sh"));
+        assert!(!posix_shell("/usr/local/bin/fish") && !posix_shell("/bin/tcsh"));
+    }
+
+    #[test]
+    fn finds_the_run_arguments_of_a_command() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // The message after the run, or after --, is never a run.
+        assert_eq!(run_positions("send", &v(&["gpu:w", "see gpu:x"])), [0]);
+        assert_eq!(run_positions("send", &v(&["w", "--", "gpu:x"])), [0]);
+        assert_eq!(run_positions("send", &v(&["--key", "gpu:x", "w"])), [2]);
+        assert_eq!(
+            run_positions("comment", &v(&["gpu:w", "a.rs:3", "box:y"])),
+            [0]
+        );
+        assert_eq!(
+            run_positions("land", &v(&["a", "--into", "gpu:main", "b"])),
+            [0, 3]
+        );
+        assert_eq!(run_positions("rm", &v(&["a", "b", "--", "c"])), [0, 1]);
+        assert!(run_positions("ps", &v(&["gpu:w"])).is_empty());
+        assert!(run_positions("send", &v(&["--", "gpu:w"])).is_empty());
     }
 }

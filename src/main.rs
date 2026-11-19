@@ -233,6 +233,9 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         // Internal: carries a remote run's socket over SSH (remote.rs).
         #[cfg(unix)]
         Some("__pipe") => return Ok(remote::pipe_main(rest)),
+        // Internal: a command from another machine, its arguments as base64url JSON.
+        #[cfg(unix)]
+        Some("__argv") => return Ok(remote::argv_main(rest)),
         // Internal: the Claude Code hook that `amux slots --hook` prints.
         // Internal: sends one phone notification (runs/push.rs).
         #[cfg(unix)]

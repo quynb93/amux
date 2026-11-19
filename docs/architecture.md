@@ -159,6 +159,7 @@ The same background process fetches `patterns.json` from the repo's main branch 
 | `worktrees/` | `amux spawn --worktree` | Git worktrees for runs |
 | `slots/<class>/` | `amux slot`, the run host | `<n>.lock` per slot, held with `flock(2)` by whoever runs in it (the content says who), and `queue/<pid>` per waiter, served oldest first. See `slots.rs`. |
 | `machines.json` | `amux machine` | Other machines: name, SSH destination, amux path |
+| `remote-caps.json` | remote commands | Machines whose amux takes `__argv` (asked once) |
 | `plugins/`, `hooks/` | you | Plugins (`amux <name>`) and event hooks (`on-<event>`) |
 | `serve-token` | `amux serve` | The phone app's token (mode 0600) |
 | `tls/self-<id>.pem`, `.key` | `amux serve --tls` | Self-signed certificates, one per set of addresses (key mode 0600) |
