@@ -15,7 +15,78 @@ struct Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        // Also when the test failed: its runs would otherwise go on forever.
+        self.stop_runs();
         let _ = fs::remove_dir_all(&self.home);
+    }
+}
+
+/// A process's command line and environment (`ps eww`), while it exists.
+fn ps_env(pid: i32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["eww", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}
+
+impl Sandbox {
+    /// Ends the run hosts this sandbox started and their CLIs' process groups: only the
+    /// pids recorded in its own runs/*/run.json, and only while ps says they still belong
+    /// to it (their command line or environment names its AMUX_HOME or HOME), so a pid
+    /// reused by someone else's process is left alone.
+    fn stop_runs(&self) {
+        let Ok(dirs) = fs::read_dir(self.amux_home.join("runs")) else {
+            return;
+        };
+        let home = self.home.to_string_lossy().into_owned();
+        let ours = |pid: i32| pid > 1 && ps_env(pid).is_some_and(|t| t.contains(&home));
+        // Negative: a process group (the CLI's pid is its group).
+        let mut targets: Vec<i32> = vec![];
+        for d in dirs.flatten() {
+            let Ok(text) = fs::read_to_string(d.path().join("run.json")) else {
+                continue;
+            };
+            let Ok(run) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let pid = |k: &str| run[k].as_i64().and_then(|p| i32::try_from(p).ok());
+            // The group, if its leader or any process left in it is ours (the CLI may
+            // have exited and left children running).
+            let group_is_ours = |g: i32| {
+                ours(g)
+                    || Command::new("pgrep")
+                        .args(["-g", &g.to_string()])
+                        .output()
+                        .map(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .filter_map(|l| l.trim().parse().ok())
+                                .any(ours)
+                        })
+                        .unwrap_or(false)
+            };
+            if let Some(cli) = pid("pid").filter(|p| *p > 1 && group_is_ours(*p)) {
+                targets.push(-cli);
+            }
+            if let Some(host) = pid("hostPid").filter(|p| ours(*p)) {
+                targets.push(host);
+            }
+        }
+        let alive = |t: i32| unsafe { libc::kill(t, 0) == 0 };
+        for sig in [libc::SIGTERM, libc::SIGKILL] {
+            targets.retain(|t| alive(*t));
+            for t in &targets {
+                unsafe {
+                    libc::kill(*t, sig);
+                }
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while targets.iter().any(|t| alive(*t)) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
     }
 }
 
