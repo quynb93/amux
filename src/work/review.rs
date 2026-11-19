@@ -196,6 +196,7 @@ pub fn diff_target(run: &Run) -> Result<(PathBuf, String)> {
 
 /// A run's changes as a diff, read once so the lines shown and the hunks that can be
 /// dropped come from the same text.
+#[derive(Clone)]
 pub struct Changes {
     /// The folder the diff was made in.
     pub dir: PathBuf,

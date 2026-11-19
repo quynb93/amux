@@ -316,6 +316,8 @@ struct Done {
     started: Option<String>,
     /// For a command whose whole output is shown: a title and the text.
     output: Option<(String, String)>,
+    /// For hunks dropped in the review: what happened and the review read again.
+    dropped: Option<Box<review::DropDone>>,
 }
 
 struct App {
@@ -647,6 +649,7 @@ impl App {
                 message: String::new(),
                 started: None,
                 output: Some((title, text)),
+                dropped: None,
             });
         });
     }
@@ -658,6 +661,11 @@ impl App {
             self.busy = self.busy.saturating_sub(1);
             if let Mode::Review(r) = &mut self.mode {
                 r.reload_comments();
+            }
+            if let Some(dd) = d.dropped {
+                self.finish_drop(*dd);
+                any = true;
+                continue;
             }
             if let Some((title, text)) = d.output {
                 let view = OutputView {
@@ -680,6 +688,27 @@ impl App {
             }
         }
         any
+    }
+
+    /// A drop of hunks finished: puts the review read again in place of the one open on
+    /// that run (or closes it when nothing is left), says how it went, and tells the agent.
+    fn finish_drop(&mut self, d: review::DropDone) {
+        if let Mode::Review(r) = &mut self.mode {
+            if r.id == d.id {
+                match d.view {
+                    Some(v) => r.replace_after_drop(v),
+                    None => self.mode = Mode::Normal,
+                }
+            }
+        }
+        match d.tell {
+            Some(note) => self.background(
+                vec!["send".into(), d.id.clone(), "--".into(), note],
+                format!("{} Telling the agent", d.say),
+            ),
+            None => self.say(d.say, !d.ok),
+        }
+        self.reload();
     }
 
     /// Shows command output that arrived while a dialog was open, once it has closed.
@@ -1032,6 +1061,7 @@ fn run_amux(argv: &[String]) -> Done {
             message: format!("Could not run amux: {e}"),
             started: None,
             output: None,
+            dropped: None,
         },
     }
 }
@@ -1077,6 +1107,7 @@ fn summarize(ok: bool, stdout: &str, stderr: &str) -> Done {
         message,
         started,
         output: None,
+        dropped: None,
     }
 }
 
@@ -1249,6 +1280,7 @@ mod tests {
             message: String::new(),
             started: None,
             output: Some(("Accounts".into(), "a\nb".into())),
+            dropped: None,
         });
         app.poll_done();
         assert!(matches!(app.mode, Mode::Help));
