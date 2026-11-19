@@ -346,7 +346,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     let first = match &issue {
         Some(i) => {
             // A Linear or Jira key comes from the tracker's answer: check it as --name is.
-            let name = o.name.get_or_insert_with(|| i.run_name());
+            let name = o.name.get_or_insert_with(|| i.new_run_name());
             if !valid_name(name) {
                 bail!("{} can't name a run; give it one with --name.", i.label());
             }

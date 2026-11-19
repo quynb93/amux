@@ -551,7 +551,7 @@ amux intake --label agent-ready claude@work           # a run for each new open 
 
 #### Linear and Jira
 
-Linear and Jira issues work the same way. amux reads the issue's title, description and comments from the tracker's API, and the run's branch is named after its key (`amux/eng-123`). The pull request still goes to GitHub:
+Linear and Jira issues work the same way. amux reads the issue's title, description and comments from the tracker's API, and the run's branch is named after its key (`amux/eng-123`; if a run on another tracker's ENG-123 already has that name, `amux/jira-eng-123`). The pull request still goes to GitHub:
 
 ```sh
 amux tracker login linear                                     # paste a personal API key (Linear: Settings → Security & access)

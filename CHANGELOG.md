@@ -10,6 +10,7 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 ### Fixed
 
 - Two Codex runs in the same folder under different accounts no longer record one account's usage for both. Each run is matched to the session its Codex started just after the run did (sub-agent sessions aside), a session another live run already reads is skipped, and the match is kept in `run.json` (`session`). A run that resumes a session (`amux failover`, `amux revive`) reads that session. `amux usage` only rereads runs whose session is known.
+- A Linear issue and a Jira issue with the same key (ENG-1) no longer share the run name `eng-1`. The second gets `jira-eng-1` (or `linear-eng-1`) and its own branch, so `amux spawn --issue jira:ENG-1` no longer fails with "run already exists", and `amux intake` starts it instead of marking it as taken. Intake now tells an issue started by hand by its tracker and key (and repo), not by whether a run with its name exists.
 
 ## [0.11.12] - 2026-11-19
 
