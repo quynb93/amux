@@ -8,8 +8,8 @@ use super::notify::Notifier;
 use super::program::{Report, PROBE_REPLY};
 use super::screen;
 use super::{
-    load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, STATE,
-    WATCH,
+    load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE,
+    SNAPSHOT, STATE, WATCH,
 };
 use crate::work::{approve, slots};
 use crate::{fsx, time};
@@ -853,6 +853,8 @@ enum Lead {
     Watch(bool),
     /// A state hook's report: the client wants nothing else, not even the screen.
     State,
+    /// WATCH and then SNAPSHOT: the current screen only, then the host closes.
+    Snapshot,
     Other,
 }
 
@@ -879,26 +881,43 @@ fn hook_reader(rx: &mpsc::Receiver<UnixStream>, hub: &Mutex<Hub>) {
 }
 
 /// A client may send WATCH as its first frame. It is read before the replay, so a preview
-/// never counts as attached, not even while the replay is being sent. A state hook sends
-/// one STATE frame and goes. Clients that send something else first (`amux attach` sends
+/// never counts as attached, not even while the replay is being sent. WATCH followed by
+/// SNAPSHOT (`amux peek`, `amux send`) asks for the screen alone. A state hook sends one
+/// STATE frame and goes. Clients that send something else first (`amux attach` sends
 /// RESIZE) are left alone.
 fn leading(stream: &UnixStream) -> Lead {
-    let mut head = [0u8; 6];
+    let mut head = [0u8; 11];
     let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
-    let n = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            head.as_mut_ptr().cast(),
-            head.len(),
-            libc::MSG_PEEK,
-        )
+    let peek = |head: &mut [u8; 11]| {
+        let n = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                head.as_mut_ptr().cast(),
+                head.len(),
+                libc::MSG_PEEK,
+            )
+        };
+        n.max(0) as usize
     };
-    let head = &head[..n.max(0) as usize];
+    let mut n = peek(&mut head);
+    // The SNAPSHOT frame is sent with the WATCH frame, but may arrive just after it.
+    if (6..11).contains(&n) && head[6] == SNAPSHOT {
+        n = peek(&mut head);
+    }
+    let head = &head[..n];
     let lead = if head.len() >= 5 && head[0] == STATE {
         // Its body is read off this thread (see `hook_reader`).
         Lead::State
     } else {
-        match watch_frame(head) {
+        match watch_frame(&head[..n.min(6)]) {
+            Some(on) if head.get(6..11) == Some(&[SNAPSHOT, 0, 0, 0, 0]) => {
+                let mut frames = [0u8; 11];
+                if (&*stream).read_exact(&mut frames).is_ok() && on {
+                    Lead::Snapshot
+                } else {
+                    Lead::Watch(false)
+                }
+            }
             Some(on) => {
                 let mut frame = [0u8; 6];
                 Lead::Watch((&*stream).read_exact(&mut frame).is_ok() && on)
@@ -933,6 +952,18 @@ fn serve(
     let watching = match leading(&stream) {
         Lead::State => {
             let _ = hooks.send(stream);
+            return;
+        }
+        Lead::Snapshot => {
+            // The screen as it is now, then the end of the stream marks the end of it.
+            let first = {
+                let h = lock(hub);
+                let mut first = screen::snapshot(&h.screen);
+                first.extend_from_slice(screen::unfinished(&h.tail));
+                first
+            };
+            let _ = (&stream).write_all(&first);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
             return;
         }
         Lead::Watch(on) => on,
@@ -998,6 +1029,12 @@ fn serve(
                 STATE => {
                     watching.store(true, Ordering::Relaxed);
                     lock(&hub).hook_report(&data);
+                }
+                // A request for the screen alone whose frame came apart from its WATCH:
+                // the snapshot has gone out, so the end of the stream ends it.
+                SNAPSHOT => {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    break;
                 }
                 _ => {}
             }

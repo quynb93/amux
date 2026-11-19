@@ -335,6 +335,11 @@ pub const WATCH: u8 = 2;
 /// A state hook's report (`amux __hook`): JSON `{"state", "kind", "message"}`, the same
 /// states as OSC 7501. Sent as the only frame of its connection. Older hosts ignore it.
 pub const STATE: u8 = 3;
+/// Empty payload, sent right after a leading `WATCH [1]` in the same write: the client
+/// wants only the current screen. The host sends the snapshot and closes the connection,
+/// so the end of the stream marks the end of the screen. Older hosts ignore the frame and
+/// go on streaming, so a client still stops reading when the output goes quiet.
+pub const SNAPSHOT: u8 = 4;
 const MAX_FRAME: usize = 1 << 20;
 
 pub fn write_frame(w: &mut impl Write, kind: u8, data: &[u8]) -> io::Result<()> {

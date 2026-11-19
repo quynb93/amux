@@ -6,7 +6,7 @@
 
 use super::{Run, State};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::time::{Duration, Instant};
 
@@ -145,15 +145,25 @@ pub fn capture(run: &Run) -> Parser {
     p
 }
 
+/// The frames that ask a host for its current screen only: WATCH, then SNAPSHOT, in one
+/// write, so the host sees both before it answers.
+pub fn snapshot_request() -> Vec<u8> {
+    let mut req = Vec::with_capacity(11);
+    let _ = super::write_frame(&mut req, super::WATCH, &[1]);
+    let _ = super::write_frame(&mut req, super::SNAPSHOT, &[]);
+    req
+}
+
 /// Connects as a watcher and draws what the host sends first: its current screen.
 fn live(run: &Run) -> Option<Parser> {
     let stream = super::client::connect(&run.id).ok()?;
     let mut w = &stream;
-    super::write_frame(&mut w, super::WATCH, &[1]).ok()?;
+    w.write_all(&snapshot_request()).ok()?;
     let (rows, cols) = last_size(run);
     let mut p = new_parser(rows, cols, 0);
-    // The host sends the snapshot first, though it may be held up for a moment (it writes
-    // to every client under the same lock); then stop when the connection goes quiet.
+    // A host that knows SNAPSHOT sends the snapshot and closes the connection. An older one
+    // (a run started before amux was upgraded keeps its host) goes on streaming: stop
+    // when the connection goes quiet.
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut buf = [0u8; 64 * 1024];
