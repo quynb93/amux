@@ -62,7 +62,8 @@ pub struct DropJob {
 }
 
 /// How a drop went, for the app: what to say, the note to tell the agent (when it is
-/// running), and the review read again (None when nothing is left to review).
+/// running), and the review read again (None when nothing is left to review, or when
+/// the drop failed and the open review stays).
 pub struct DropDone {
     pub id: String,
     pub ok: bool,
@@ -79,13 +80,14 @@ impl DropJob {
         let picked: Vec<&Hunk> = self.picked.iter().collect();
         let done = match hunks::drop_from_run(&self.run, &self.changes, &picked, false) {
             Ok(d) => d,
+            // Nothing was dropped: the review open stays as it is, hunks still marked.
             Err(e) => {
                 return DropDone {
                     id,
                     ok: false,
                     say: format!("{e:#}"),
                     tell: None,
-                    view: ReviewView::open(&self.run).ok(),
+                    view: None,
                 }
             }
         };
@@ -145,9 +147,9 @@ impl ReviewView {
         self.confirm
     }
 
-    /// Dropping the marked hunks in the background.
-    pub fn dropping(&self) -> bool {
-        self.dropping
+    /// The drop failed: the marked hunks stay marked, to try again.
+    pub fn drop_failed(&mut self) {
+        self.dropping = false;
     }
 
     /// Takes the review read again after a drop, keeping the place you were at.
@@ -300,7 +302,8 @@ impl ReviewView {
             KeyCode::Char('f' | 'd') if ctrl => self.move_by(page),
             KeyCode::PageUp => self.move_by(-page),
             KeyCode::Char('b' | 'u') if ctrl => self.move_by(-page),
-            KeyCode::Char(' ' | 'D') if self.dropping => {
+            // A comment typed meanwhile would be on a line the drop may take away.
+            KeyCode::Char(' ' | 'D' | 'm' | 'i') | KeyCode::Enter if self.dropping => {
                 return Outcome::Say("Still dropping the marked hunks…".into(), false)
             }
             KeyCode::Char(' ') => return self.toggle(),
@@ -642,7 +645,7 @@ mod tests {
             _ => panic!("no drop job"),
         };
         assert_eq!(job.picked.len(), 1);
-        assert!(v.dropping());
+        assert!(v.dropping);
         let f = text(&v.footer(&t));
         assert!(
             f.contains("Dropping 1 hunk in 1 file from dr's worktree"),

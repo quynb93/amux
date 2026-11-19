@@ -129,7 +129,7 @@ pub fn intake_cmd(argv: &[String]) -> Result<i32> {
             }
             continue;
         }
-        let (name, label) = (issue.new_run_name(), issue.label());
+        let (name, label) = (issue.new_run_name(&repo), issue.label());
         if dry {
             println!("Would start {name}: {label} {}", issue.title);
             continue;

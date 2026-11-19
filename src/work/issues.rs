@@ -108,22 +108,27 @@ impl Issue {
         }
     }
 
-    /// The name of a new run on it: `run_name`, unless a run on another issue has that
-    /// name, as when Linear's ENG-1 has a run and Jira's ENG-1 gets one: then the
-    /// source goes in front (jira-eng-1), so each has its own run and branch.
-    pub fn new_run_name(&self) -> String {
+    /// The name of a new run on it in `repo` (as `repo_key` names it): `run_name`, unless
+    /// a run on another issue, or on this one in another repo, has that name, as when
+    /// Linear's ENG-1 has a run and Jira's ENG-1 gets one: then the source goes in front
+    /// (jira-eng-1), so each has its own run and branch.
+    pub fn new_run_name(&self, repo: &str) -> String {
         let plain = self.run_name();
         let holder = crate::runs::run_dir(&plain)
             .exists()
             .then(|| crate::runs::load(&plain).ok());
-        self.name_beside(holder)
+        self.name_beside(holder, repo)
     }
 
     /// `holder`: None when no run has the plain name; Some(None) when one does but can't
     /// be read (being created, say), which counts as another issue's.
-    fn name_beside(&self, holder: Option<Option<crate::runs::Run>>) -> String {
+    fn name_beside(&self, holder: Option<Option<crate::runs::Run>>, repo: &str) -> String {
         match holder {
-            Some(r) if !r.as_ref().is_some_and(|r| self.is_run_of(r)) => {
+            Some(r)
+                if !r
+                    .as_ref()
+                    .is_some_and(|r| self.is_run_of(r) && run_repo(r) == repo) =>
+            {
                 format!("{}-{}", self.source.tag(), self.run_name())
             }
             _ => self.run_name(),
@@ -538,21 +543,38 @@ mod tests {
         let run_on = |i: &Issue| crate::runs::Run {
             id: i.run_name(),
             tracker: i.tracked(),
+            worktree: Some(crate::runs::Worktree {
+                repo: "/repo".into(),
+                path: String::new(),
+                branch: String::new(),
+                base: None,
+            }),
             ..Default::default()
         };
         let (linear, jira) = (issue(Source::Linear, "ENG-1"), issue(Source::Jira, "ENG-1"));
         assert!(linear.is_run_of(&run_on(&linear)));
         assert!(!jira.is_run_of(&run_on(&linear)));
         // Free: the plain name. Taken by the same issue: still the plain name (spawn then
-        // says the run exists). Taken by the other tracker's ENG-1: the source in front.
-        assert_eq!(jira.name_beside(None), "eng-1");
-        assert_eq!(jira.name_beside(Some(Some(run_on(&jira)))), "eng-1");
-        assert_eq!(jira.name_beside(Some(Some(run_on(&linear)))), "jira-eng-1");
+        // says the run exists). Taken by the other tracker's ENG-1, or by the same issue
+        // in another repo: the source in front.
+        assert_eq!(jira.name_beside(None, "/repo"), "eng-1");
         assert_eq!(
-            linear.name_beside(Some(Some(run_on(&jira)))),
+            jira.name_beside(Some(Some(run_on(&jira))), "/repo"),
+            "eng-1"
+        );
+        assert_eq!(
+            jira.name_beside(Some(Some(run_on(&linear))), "/repo"),
+            "jira-eng-1"
+        );
+        assert_eq!(
+            linear.name_beside(Some(Some(run_on(&jira))), "/repo"),
             "linear-eng-1"
         );
-        assert_eq!(jira.name_beside(Some(None)), "jira-eng-1");
+        assert_eq!(jira.name_beside(Some(None), "/repo"), "jira-eng-1");
+        assert_eq!(
+            jira.name_beside(Some(Some(run_on(&jira))), "/elsewhere"),
+            "jira-eng-1"
+        );
         // A GitHub issue is its number.
         let gh = Issue {
             number: 7,

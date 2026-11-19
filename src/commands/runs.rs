@@ -346,7 +346,9 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     let first = match &issue {
         Some(i) => {
             // A Linear or Jira key comes from the tracker's answer: check it as --name is.
-            let name = o.name.get_or_insert_with(|| i.new_run_name());
+            let name = o
+                .name
+                .get_or_insert_with(|| i.new_run_name(&crate::work::issues::repo_key(&cwd)));
             if !valid_name(name) {
                 bail!("{} can't name a run; give it one with --name.", i.label());
             }
@@ -899,9 +901,14 @@ fn nudge_when_ready(name: &str, since: i64, msg: &str) -> bool {
     false
 }
 
-/// The session a run was having, so another account can resume it: the newest session of
-/// its CLI in its folder that was active since the run started.
+/// The session a run was having, so another account can resume it: the one its host
+/// matched it to (`run.session`, Codex), else the newest session of its CLI in its folder
+/// that was active since the run started.
 fn session_of(run: &Run) -> Option<String> {
+    // The folder alone can't tell apart two runs in it.
+    if let Some(id) = &run.session {
+        return Some(id.clone());
+    }
     let provider = run.account.split('@').next()?;
     let spec = crate::store::get_provider(provider).ok()?;
     crate::sessions::list_sessions(&spec, None)

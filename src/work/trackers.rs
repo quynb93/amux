@@ -309,9 +309,14 @@ pub fn linear_issue(key: &str) -> Result<Issue> {
     })
 }
 
-/// The 100 oldest matching issues, oldest first (`last` on a createdAt connection), as
-/// Jira's `ORDER BY created ASC`: intake starts the issues that have waited longest.
-const LINEAR_OPEN: &str = "query($filter: IssueFilter) { issues(filter: $filter, last: 100, orderBy: createdAt) { nodes { id identifier title url createdAt } } }";
+/// A page of the oldest matching issues, oldest first (`last` on a createdAt connection),
+/// as Jira's `ORDER BY created ASC`: intake starts the issues that have waited longest.
+/// `before` pages on to newer ones.
+const LINEAR_OPEN: &str = "query($filter: IssueFilter, $before: String) { issues(filter: $filter, last: 100, before: $before, orderBy: createdAt) { nodes { id identifier title url createdAt } pageInfo { hasPreviousPage startCursor } } }";
+
+/// How many pages of 100 open issues intake reads at most. Issues it already started stay
+/// open until their PR merges, so it reads past them to newer ones.
+const OPEN_PAGES: usize = 5;
 
 /// Linear's IssueFilter for open issues with the label, in the team.
 fn linear_filter(label: Option<&str>, team: Option<&str>) -> Value {
@@ -328,15 +333,30 @@ fn linear_filter(label: Option<&str>, team: Option<&str>) -> Value {
 /// Open Linear issues (not completed or canceled) with the label and in the team,
 /// oldest first.
 pub fn linear_open(label: Option<&str>, team: Option<&str>) -> Result<Vec<Issue>> {
-    let d = linear(
-        &linear_key()?,
-        LINEAR_OPEN,
-        json!({ "filter": linear_filter(label, team) }),
-    )?;
-    let mut v: Vec<(String, Issue)> = d["issues"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let key = linear_key()?;
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut before = Value::Null;
+    for _ in 0..OPEN_PAGES {
+        let d = linear(
+            &key,
+            LINEAR_OPEN,
+            json!({ "filter": linear_filter(label, team), "before": before }),
+        )?;
+        nodes.extend(
+            d["issues"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        let page = &d["issues"]["pageInfo"];
+        if page["hasPreviousPage"] != true || !page["startCursor"].is_string() {
+            break;
+        }
+        before = page["startCursor"].clone();
+    }
+    let mut v: Vec<(String, Issue)> = nodes
+        .iter()
         .map(|i| {
             (
                 s(&i["createdAt"]),
@@ -469,18 +489,28 @@ pub fn jira_query(jql: Option<&str>, label: Option<&str>, project: Option<&str>)
     format!("{} ORDER BY created ASC", parts.join(" AND "))
 }
 
-/// The issues a JQL query finds, in its order (up to 100).
+/// The issues a JQL query finds, in its order (up to `OPEN_PAGES` pages of 100).
 pub fn jira_open(jql: &str) -> Result<Vec<Issue>> {
     let j = jira()?;
-    let req = jira_req(&j, "GET", "/rest/api/3/search/jql")
-        .query("jql", jql)
-        .query("fields", "summary")
-        .query("maxResults", "100");
-    let v = send("Jira", req, None)?;
-    Ok(v["issues"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let mut issues: Vec<Value> = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..OPEN_PAGES {
+        let mut req = jira_req(&j, "GET", "/rest/api/3/search/jql")
+            .query("jql", jql)
+            .query("fields", "summary")
+            .query("maxResults", "100");
+        if let Some(t) = &token {
+            req = req.query("nextPageToken", t);
+        }
+        let v = send("Jira", req, None)?;
+        issues.extend(v["issues"].as_array().into_iter().flatten().cloned());
+        match v["nextPageToken"].as_str() {
+            Some(t) if v["isLast"] != true && !t.is_empty() => token = Some(t.to_string()),
+            _ => break,
+        }
+    }
+    Ok(issues
+        .iter()
         .filter_map(|i| {
             let key = s(&i["key"]);
             (!key.is_empty()).then(|| Issue {

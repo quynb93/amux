@@ -696,6 +696,7 @@ impl App {
         if let Mode::Review(r) = &mut self.mode {
             if r.id == d.id {
                 match d.view {
+                    _ if !d.ok => r.drop_failed(),
                     Some(v) => r.replace_after_drop(v),
                     None => self.mode = Mode::Normal,
                 }

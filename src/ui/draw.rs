@@ -462,7 +462,6 @@ impl App {
             (Mode::Review(r), Some((msg, err, at)))
                 if r.input.is_none()
                     && !r.confirming()
-                    && !r.dropping()
                     && at.elapsed() < Duration::from_secs(4) =>
             {
                 let (mark, style) = if *err {

@@ -119,7 +119,9 @@ impl App {
                 }
                 review::Outcome::Drop(job) => {
                     // git apply and git commit (with the repo's hooks) can take seconds:
-                    // off the key handler, so the UI keeps drawing. The footer says it.
+                    // off the key handler, so the UI keeps drawing. The footer says it
+                    // (an older message would cover it).
+                    self.status = None;
                     self.busy += 1;
                     let tx = self.tx.clone();
                     std::thread::spawn(move || {
