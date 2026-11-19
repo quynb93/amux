@@ -3311,7 +3311,7 @@ fn start_serve(s: &Sandbox, args: &[&str], env: &[(&str, &str)]) -> (std::proces
         if line.contains("?t=") {
             link = line.trim().to_string();
         }
-        if line.contains("keep it private") || line.contains("Trust Settings") {
+        if line.contains("keep it private") || line.contains("vouch for other sites") {
             break;
         }
         line.clear();
@@ -3340,7 +3340,8 @@ fn serves_the_phone_app_over_https() {
         .trim()
         .to_string();
     assert!(link.starts_with("https://127.0.0.1:"), "{out}");
-    assert!(out.contains("fingerprint"), "{out}");
+    assert!(out.contains("fingerprint") && out.contains("--tailscale"), "{out}");
+    assert!(out.contains("not a CA"), "{out}");
     let (base, token) = link.split_once("/?t=").unwrap();
 
     let login = curl(&[&link]);

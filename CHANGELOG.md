@@ -18,6 +18,9 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 ### Fixed
 
 - One client that stopped reading (a frozen terminal, a suspended `amux attach`, a stuck preview) held up the CLI and every other client for up to 2 seconds. Measured: the longest gap seen by a reading client next to a non-reading one went from 2,014 ms to 17 ms.
+### Security
+
+- `amux serve --tls`: the self-signed certificate is now a server certificate (`basicConstraints=critical,CA:FALSE`, `keyUsage=digitalSignature`, `extendedKeyUsage=serverAuth`, with the same addresses). Before, openssl made a CA certificate, so trusting it on a phone as the instructions said let whoever had the key vouch for any site. An existing `~/.amux/tls/self-*` CA certificate is made again on the next start; remove the old one from the phone. The instructions now recommend `--tailscale` first.
 
 ## [0.11.14] - 2026-11-19
 

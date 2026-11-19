@@ -79,8 +79,11 @@ pub fn server_config(cert: &Path, key: &Path) -> Result<Arc<rustls::ServerConfig
 /// The self-signed certificate for these names and addresses, made the first time.
 /// Returns (cert, key).
 pub fn self_signed(names: &[String]) -> Result<(PathBuf, PathBuf)> {
-    let dir = paths::AMUX_HOME.join("tls");
-    crate::fsx::mkdir_private(&dir)?;
+    self_signed_in(&paths::AMUX_HOME.join("tls"), names)
+}
+
+fn self_signed_in(dir: &Path, names: &[String]) -> Result<(PathBuf, PathBuf)> {
+    crate::fsx::mkdir_private(dir)?;
     let mut sans: Vec<String> = vec!["DNS:localhost".into(), "IP:127.0.0.1".into()];
     for n in names {
         let san = if n.parse::<std::net::IpAddr>().is_ok() {
@@ -102,9 +105,27 @@ pub fn self_signed(names: &[String]) -> Result<(PathBuf, PathBuf)> {
         dir.join(format!("self-{id}.pem")),
         dir.join(format!("self-{id}.key")),
     );
-    if cert.exists() && key.exists() {
+    // Certificates made before 0.11.15 were CA certificates (openssl's default for
+    // `req -x509`): trusting one on a phone let whoever holds the key vouch for any site.
+    // Those are made again as server-only certificates.
+    if cert.exists() && key.exists() && cert_is_leaf(&cert) {
         return Ok((cert, key));
     }
+    // A config of our own, so openssl's default `v3_ca` extensions don't apply.
+    let cnf = dir.join(format!("self-{id}.cnf"));
+    std::fs::write(
+        &cnf,
+        format!(
+            "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n\
+             [dn]\nCN=amux serve\n\
+             [v3]\nbasicConstraints=critical,CA:FALSE\n\
+             keyUsage=critical,digitalSignature\n\
+             extendedKeyUsage=serverAuth\n\
+             subjectKeyIdentifier=hash\n\
+             subjectAltName={}\n",
+            sans.join(",")
+        ),
+    )?;
     let ok = Command::new("openssl")
         .args([
             "req",
@@ -116,20 +137,20 @@ pub fn self_signed(names: &[String]) -> Result<(PathBuf, PathBuf)> {
             "-nodes",
             "-days",
             "825",
-            "-subj",
-            "/CN=amux serve",
         ])
+        .arg("-config")
+        .arg(&cnf)
         .arg("-keyout")
         .arg(&key)
         .arg("-out")
         .arg(&cert)
-        .arg("-addext")
-        .arg(format!("subjectAltName={}", sans.join(",")))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
-        .context("could not run openssl to make a certificate (or pass --cert and --key)")?;
+        .output();
+    let _ = std::fs::remove_file(&cnf);
+    let ok =
+        ok.context("could not run openssl to make a certificate (or pass --cert and --key)")?;
     if !ok.status.success() {
         let _ = std::fs::remove_file(&key);
         bail!(
@@ -140,6 +161,42 @@ pub fn self_signed(names: &[String]) -> Result<(PathBuf, PathBuf)> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
     Ok((cert, key))
+}
+
+/// Whether a PEM certificate's first certificate says it is not a CA: it has the
+/// basicConstraints extension and `cA` is false. A missing extension counts as not a leaf,
+/// so an old certificate without it is made again.
+pub fn cert_is_leaf(cert: &Path) -> bool {
+    let Some(Ok(der)) = CertificateDer::pem_file_iter(cert)
+        .ok()
+        .and_then(|mut it| it.next())
+    else {
+        return false;
+    };
+    der_is_leaf(der.as_ref())
+}
+
+/// In DER: the basicConstraints OID (2.5.29.19), an optional `critical` BOOLEAN, then an
+/// OCTET STRING holding `SEQUENCE { cA BOOLEAN DEFAULT FALSE, ... }`.
+fn der_is_leaf(der: &[u8]) -> bool {
+    const OID: [u8; 5] = [0x06, 0x03, 0x55, 0x1d, 0x13];
+    let Some(at) = der.windows(OID.len()).position(|w| w == OID) else {
+        return false;
+    };
+    let mut i = at + OID.len();
+    if der.get(i) == Some(&0x01) {
+        i += 3; // BOOLEAN, length 1, value
+    }
+    if der.get(i) != Some(&0x04) {
+        return false;
+    }
+    i += 2; // OCTET STRING and a short length
+    if der.get(i) != Some(&0x30) {
+        return false;
+    }
+    let len = der.get(i + 1).copied().unwrap_or(0);
+    // An empty sequence: cA is FALSE by default. Otherwise cA is the first element.
+    len == 0 || !(der.get(i + 2) == Some(&0x01) && der.get(i + 4).is_some_and(|v| *v != 0))
 }
 
 /// The SHA-256 fingerprint of a PEM certificate's first certificate, as browsers show it.
@@ -225,5 +282,45 @@ mod tests {
         );
         let fp = fingerprint(&cert).unwrap();
         assert_eq!(fp.len(), 32 * 3 - 1);
+        // openssl's default for `req -x509` is a CA certificate.
+        assert!(!cert_is_leaf(&cert));
+    }
+
+    #[test]
+    fn self_signed_certificate_is_a_server_certificate_not_a_ca() {
+        if Command::new("openssl").arg("version").output().is_err() {
+            eprintln!("skipped: no openssl");
+            return;
+        }
+        let t = TempDir::new();
+        let dir = t.path().join("tls");
+        let (cert, key) = self_signed_in(&dir, &["192.168.1.5".to_string()]).unwrap();
+        assert!(cert_is_leaf(&cert));
+        assert!(server_config(&cert, &key).is_ok());
+        let text = Command::new("openssl")
+            .args(["x509", "-noout", "-text", "-in"])
+            .arg(&cert)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&text.stdout);
+        assert!(text.contains("CA:FALSE"), "{text}");
+        assert!(!text.contains("CA:TRUE"), "{text}");
+        assert!(text.contains("TLS Web Server Authentication"), "{text}");
+        assert!(text.contains("192.168.1.5"), "{text}");
+        // An old CA certificate under the same name is replaced on the next start.
+        let ok = Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "ec", "-pkeyopt"])
+            .args(["ec_paramgen_curve:prime256v1", "-nodes", "-days", "1"])
+            .args(["-subj", "/CN=old", "-keyout"])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(ok.success() && !cert_is_leaf(&cert));
+        let (cert2, _) = self_signed_in(&dir, &["192.168.1.5".to_string()]).unwrap();
+        assert_eq!(cert2, cert);
+        assert!(cert_is_leaf(&cert));
     }
 }
