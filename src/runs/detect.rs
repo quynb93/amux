@@ -72,12 +72,170 @@ enum Mode {
     OscEsc,
 }
 
+/// The text kept for matching, with an ASCII-lowercased copy kept as bytes arrive, and
+/// what has been searched of it, so each chunk costs only a search of its own text.
+///
+/// Before, every chunk lowercased the whole window (Unicode, from a lossy UTF-8 copy) and
+/// searched all of it. Searching the ASCII-lowercased bytes finds exactly the same as
+/// long as the window holds only ASCII, valid UTF-8 and characters that have no case
+/// (box drawing, ❯, CJK…); while it holds a cased non-ASCII character or invalid UTF-8,
+/// matching falls back to the old way, so the results are always the same.
+struct Window {
+    text: Vec<u8>,
+    lower: Vec<u8>,
+    /// How many bytes were dropped from the front since the start: positions below are
+    /// absolute, so they survive dropping.
+    base: u64,
+    /// A UTF-8 character that has started but not finished.
+    utf8: Vec<u8>,
+    /// Where the last cased non-ASCII character or invalid UTF-8 ended.
+    odd_at: Option<u64>,
+}
+
+impl Window {
+    fn new() -> Self {
+        Window {
+            text: Vec::with_capacity(WINDOW * 2),
+            lower: Vec::with_capacity(WINDOW * 2),
+            base: 0,
+            utf8: vec![],
+            odd_at: None,
+        }
+    }
+
+    fn end(&self) -> u64 {
+        self.base + self.text.len() as u64
+    }
+
+    /// Where the last WINDOW bytes start.
+    fn start(&self) -> u64 {
+        self.end() - self.text.len().min(WINDOW) as u64
+    }
+
+    /// The last WINDOW bytes, as they came.
+    fn window(&self) -> &[u8] {
+        &self.text[self.text.len().saturating_sub(WINDOW)..]
+    }
+
+    /// The lowercased bytes from absolute position `from` (at least the start of what
+    /// is kept) to the end.
+    fn lower_from(&self, from: u64) -> (u64, &[u8]) {
+        let from = from.max(self.base);
+        (from, &self.lower[(from - self.base) as usize..])
+    }
+
+    /// Whether the window holds text the ASCII-lowercased copy doesn't match like the
+    /// old Unicode lowercasing did.
+    fn odd(&self) -> bool {
+        self.odd_at.is_some_and(|at| at >= self.start())
+    }
+
+    fn last(&self) -> Option<&u8> {
+        self.text.last()
+    }
+
+    fn clear(&mut self) {
+        self.base = self.end();
+        self.text.clear();
+        self.lower.clear();
+        self.utf8.clear();
+        self.odd_at = None;
+    }
+
+    fn push(&mut self, b: u8) {
+        self.text.push(b);
+        self.lower.push(b.to_ascii_lowercase());
+        let at = self.end();
+        if b < 0x80 {
+            if !self.utf8.is_empty() {
+                self.utf8.clear();
+                self.odd_at = Some(at);
+            }
+        } else {
+            self.utf8.push(b);
+            match std::str::from_utf8(&self.utf8) {
+                Ok(c) => {
+                    let c = c.chars().next().unwrap_or_default();
+                    let mut lower = c.to_lowercase();
+                    if !(lower.next() == Some(c) && lower.next().is_none()) {
+                        self.odd_at = Some(at);
+                    }
+                    self.utf8.clear();
+                }
+                Err(e) if e.error_len().is_some() || self.utf8.len() >= 4 => {
+                    self.utf8.clear();
+                    self.odd_at = Some(at);
+                }
+                Err(_) => {}
+            }
+        }
+        if self.text.len() > WINDOW * 2 {
+            let drop = self.text.len() - WINDOW;
+            self.text.drain(..drop);
+            self.lower.drain(..drop);
+            self.base += drop as u64;
+        }
+    }
+}
+
+/// Patterns (lowercased) and, for each, where it last occurred in what was searched.
+struct Patterns {
+    lower: Vec<String>,
+    finders: Vec<memchr::memmem::FinderRev<'static>>,
+    longest: u64,
+    /// Never matched the fast way (a pattern with U+FFFD, which only the lossy copy has).
+    slow: bool,
+    found: Vec<Option<u64>>,
+    /// How far the window has been searched.
+    searched: u64,
+}
+
+impl Patterns {
+    fn new(lower: Vec<String>) -> Self {
+        Patterns {
+            finders: lower
+                .iter()
+                .map(|p| memchr::memmem::FinderRev::new(p.as_bytes()).into_owned())
+                .collect(),
+            longest: lower.iter().map(|p| p.len() as u64).max().unwrap_or(0),
+            slow: lower.iter().any(|p| p.contains('\u{FFFD}')),
+            found: vec![None; lower.len()],
+            searched: 0,
+            lower,
+        }
+    }
+
+    /// Searches what came since the last search, and the end before it that a match
+    /// could start in.
+    fn scan(&mut self, w: &Window) {
+        if self.searched < w.base {
+            self.found.iter_mut().for_each(|f| *f = None);
+        }
+        let back = self.longest.saturating_sub(1);
+        let (from, hay) = w.lower_from(self.searched.saturating_sub(back));
+        for (f, found) in self.finders.iter().zip(&mut self.found) {
+            if let Some(i) = f.rfind(hay) {
+                *found = Some(from + i as u64);
+            }
+        }
+        self.searched = w.end();
+    }
+
+    /// Which patterns occur in the window, as of the last scan, the fast way.
+    fn in_window(&self, w: &Window) -> impl Iterator<Item = usize> + '_ {
+        let start = w.start();
+        (0..self.lower.len()).filter(move |&i| self.found[i].is_some_and(|at| at >= start))
+    }
+}
+
 pub struct Detector {
     /// (lowercased for matching, as written for messages)
     patterns: Vec<(String, String)>,
+    pattern_scan: Patterns,
     /// Usage-limit messages, lowercased (see `take_limit`).
     limits: Vec<String>,
-    text: Vec<u8>,
+    limit_scan: Patterns,
+    text: Window,
     osc: Vec<u8>,
     mode: Mode,
     waiting: bool,
@@ -105,14 +263,17 @@ pub struct Detector {
 
 impl Detector {
     pub fn new(patterns: &[String]) -> Self {
+        let patterns: Vec<(String, String)> = patterns
+            .iter()
+            .filter(|p| !p.is_empty())
+            .map(|p| (p.to_lowercase(), p.clone()))
+            .collect();
         Detector {
-            patterns: patterns
-                .iter()
-                .filter(|p| !p.is_empty())
-                .map(|p| (p.to_lowercase(), p.clone()))
-                .collect(),
+            pattern_scan: Patterns::new(patterns.iter().map(|p| p.0.clone()).collect()),
+            patterns,
             limits: vec![],
-            text: Vec::with_capacity(WINDOW * 2),
+            limit_scan: Patterns::new(vec![]),
+            text: Window::new(),
             osc: vec![],
             mode: Mode::Ground,
             waiting: false,
@@ -137,6 +298,7 @@ impl Detector {
             .filter(|p| !p.is_empty())
             .map(|p| p.to_lowercase())
             .collect();
+        self.limit_scan = Patterns::new(self.limits.clone());
         self
     }
 
@@ -147,8 +309,19 @@ impl Detector {
         if self.limits.is_empty() {
             return None;
         }
-        let start = self.text.len().saturating_sub(WINDOW);
-        let text = String::from_utf8_lossy(&self.text[start..]).into_owned();
+        // Each chunk is searched as it comes, and a message found is taken at once, so
+        // the window holds one only if the new text does.
+        self.limit_scan.scan(&self.text);
+        let fast = !self.limit_scan.slow && !self.text.odd();
+        if fast && self.limit_scan.in_window(&self.text).next().is_none() {
+            return None;
+        }
+        self.take_limit_slow()
+    }
+
+    /// `take_limit` the old way: lowercase the whole window and search it.
+    fn take_limit_slow(&mut self) -> Option<String> {
+        let text = String::from_utf8_lossy(self.text.window()).into_owned();
         let lower = text.to_lowercase();
         let at = self
             .limits
@@ -455,17 +628,24 @@ impl Detector {
             return;
         }
         self.text.push(b);
-        if self.text.len() > WINDOW * 2 {
-            self.text.drain(..self.text.len() - WINDOW);
-        }
     }
 
-    fn matched(&self) -> Option<String> {
+    /// The first of `waitingPatterns` the window holds.
+    fn matched(&mut self) -> Option<String> {
         if self.patterns.is_empty() {
             return None;
         }
-        let start = self.text.len().saturating_sub(WINDOW);
-        let text = String::from_utf8_lossy(&self.text[start..]).to_lowercase();
+        self.pattern_scan.scan(&self.text);
+        if self.pattern_scan.slow || self.text.odd() {
+            return self.matched_slow();
+        }
+        let i = self.pattern_scan.in_window(&self.text).next()?;
+        Some(self.patterns[i].1.clone())
+    }
+
+    /// `matched` the old way: lowercase the whole window and search it.
+    fn matched_slow(&self) -> Option<String> {
+        let text = String::from_utf8_lossy(self.text.window()).to_lowercase();
         self.patterns
             .iter()
             .find(|(lower, _)| text.contains(lower.as_str()))
@@ -570,6 +750,97 @@ fn osc_message(osc: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fast matching finds exactly what lowercasing and searching the whole window
+    /// found, on random output: prompts and limit messages in any case, split across
+    /// chunks, cut by escape sequences, among cased and uncased non-ASCII text and
+    /// invalid UTF-8, with resets (answers, reports) in between.
+    #[test]
+    fn fast_matching_finds_what_the_old_matching_did() {
+        let pieces: &[&[u8]] = &[
+            b"Do you want to",
+            b"DO YOU WANT TO",
+            b"do you",
+            b" want to",
+            b"Enter to confirm",
+            b"enter TO",
+            b"You've hit your limit",
+            b"YOU'VE HIT",
+            b" your limit",
+            b"Limit",
+            b"\x1b[1C",
+            b"\x1b[2K\r",
+            b"\x1b]0;title\x07",
+            b"\x1b]9;note\x07",
+            b"\x1b]7501;?\x1b\\",
+            b"\r\n",
+            b"   ",
+            b"x",
+            b"some words ",
+            "é".as_bytes(),
+            "É".as_bytes(),
+            "❯ 1. Yes".as_bytes(),
+            "\u{212A}".as_bytes(),
+            "İ".as_bytes(),
+            "─╌".as_bytes(),
+            b"\xff",
+            b"\xe2\x9d",
+            b"\x9d\xaf",
+            "ΣΑΣ".as_bytes(),
+            "ÉTÉ".as_bytes(),
+            "日本".as_bytes(),
+        ];
+        let patterns = [
+            "Do you want to".to_string(),
+            "Enter to confirm".into(),
+            "ÉTÉ".into(),
+            "k".into(),
+        ];
+        let limits = ["You've hit your limit".to_string(), "limit".into()];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..300 {
+            let n = 1 + round % 4;
+            let pats = &patterns[..n.min(patterns.len())];
+            let lims: &[String] = if round % 2 == 0 { &[] } else { &limits };
+            let mut new = Detector::new(pats).with_limits(lims);
+            let mut old = Detector::new(pats).with_limits(lims);
+            old.pattern_scan.slow = true;
+            old.limit_scan.slow = true;
+            // A third of the rounds have no cased non-ASCII text or invalid UTF-8, so the
+            // fast way is taken throughout; a third have valid UTF-8 only.
+            let keep = |p: &&[u8]| match (round / 2) % 3 {
+                0 => true,
+                1 => std::str::from_utf8(p).is_ok_and(|t| {
+                    t.chars()
+                        .all(|c| c.is_ascii() || !(c.is_uppercase() || c.is_lowercase()))
+                }),
+                _ => std::str::from_utf8(p).is_ok(),
+            };
+            let pool: Vec<&[u8]> = pieces.iter().copied().filter(|p| keep(p)).collect();
+            let mut stream = Vec::new();
+            for _ in 0..(200 + next() % 2000) {
+                stream.extend_from_slice(pool[(next() % pool.len() as u64) as usize]);
+            }
+            let mut at = 0;
+            while at < stream.len() {
+                let len = (1 + next() % 300) as usize;
+                let chunk = &stream[at..(at + len).min(stream.len())];
+                at += len;
+                assert_eq!(new.feed(chunk), old.feed(chunk), "round {round} at {at}");
+                assert_eq!(new.take_limit(), old.take_limit(), "round {round} at {at}");
+                if next() % 50 == 0 {
+                    assert_eq!(new.answered(), old.answered());
+                }
+                assert_eq!(new.matched(), old.matched(), "round {round} at {at}");
+            }
+        }
+    }
 
     fn det() -> Detector {
         Detector::new(&["Do you want to".into(), "Enter to confirm".into()])
