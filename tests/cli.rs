@@ -625,7 +625,10 @@ fn a_client_that_never_reads_doesnt_stall_the_others() {
     // The stuck client's socket buffer fills within the first tens of KB; before, every
     // write to it then held up everyone for 2 seconds. Slow CI runners print less, so this
     // only checks that output kept coming; the gap is what matters.
-    assert!(total > 50_000, "read only {total} bytes (longest gap {gap:?})");
+    assert!(
+        total > 50_000,
+        "read only {total} bytes (longest gap {gap:?})"
+    );
     assert!(
         gap < std::time::Duration::from_millis(500),
         "a {gap:?} stall"
