@@ -4435,7 +4435,7 @@ fn works_on_linear_and_jira_issues() {
             ),
             ("GET", "/rest/api/3/issue/ENG-1") => (
                 200,
-                r#"{"key":"ENG-1","fields":{"summary":"Jira's own ENG-1","description":null,"comment":{"comments":[]}}}"#.into(),
+                r#"{"key":"ENG-1","fields":{"summary":"Jira's own ENG-1","description":null}}"#.into(),
             ),
             ("GET", "/rest/api/3/search/jql") => (
                 200,
@@ -4446,12 +4446,28 @@ fn works_on_linear_and_jira_issues() {
                 (
                     200,
                     format!(
-                        r#"{{"key":"{key}","fields":{{"summary":"Export to CSV","description":{},"comment":{{"comments":[{{"author":{{"displayName":"Bo"}},"body":{}}}]}}}}}}"#,
+                        r#"{{"key":"{key}","fields":{{"summary":"Export to CSV","description":{}}}}}"#,
                         adf("Export the table."),
+                    ),
+                )
+            }
+            // Newest first, as asked with orderBy=-created.
+            ("GET", "/rest/api/3/issue/PROJ-45/comment")
+            | ("GET", "/rest/api/3/issue/PROJ-46/comment")
+                if path.contains("orderBy=-created") =>
+            {
+                (
+                    200,
+                    format!(
+                        r#"{{"startAt":0,"maxResults":50,"total":2,"comments":[{{"author":{{"displayName":"Bo"}},"body":{}}},{{"author":{{"displayName":"Ann"}},"body":"Plain text."}}]}}"#,
                         adf("Use commas.")
                     ),
                 )
             }
+            ("GET", "/rest/api/3/issue/ENG-1/comment") => (
+                200,
+                r#"{"startAt":0,"maxResults":50,"total":0,"comments":[]}"#.into(),
+            ),
             ("POST", "/rest/api/3/issue/PROJ-45/comment") => (201, r#"{"id":"1"}"#.into()),
             _ => (
                 404,
@@ -4583,9 +4599,17 @@ fn works_on_linear_and_jira_issues() {
         .unwrap();
     assert!(
         list.contains(r#""labels":{"name":{"eqIgnoreCase":"agent"}}"#)
-            && list.contains(r#""team":{"key":{"eqIgnoreCase":"ENG"}}"#),
+            && list.contains(r#""team":{"key":{"eqIgnoreCase":"ENG"}}"#)
+            // The oldest open issues (Linear: newest first with `first`, oldest with `last`).
+            && list.contains("issues(filter: $filter, last: 100, orderBy: createdAt)"),
         "{list}"
     );
+    // An issue's newest comments.
+    assert!(linear_log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|q| q.contains("comments(first: 50, orderBy: createdAt)")));
     let again = s.amux_with(&linear_intake, &env, Some(&repo));
     assert!(
         again
@@ -4646,7 +4670,11 @@ fn works_on_linear_and_jira_issues() {
         )),
         "{p}"
     );
-    assert!(p.contains("- Bo: Use commas.\n\n  - a point"), "{p}");
+    // The newest comment last.
+    assert!(
+        p.contains("- Ann: Plain text.\n- Bo: Use commas.\n\n  - a point"),
+        "{p}"
+    );
     let pr = s.amux_with(&["pr", "proj-45"], &env, None);
     assert_eq!(pr.code, 0, "{}", pr.err);
     let log = fs::read_to_string(s.home.join("gh-log")).unwrap();

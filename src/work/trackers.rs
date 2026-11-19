@@ -272,7 +272,9 @@ pub fn linear_viewer(key: &str) -> Result<String> {
     Ok(format!("{} <{}>", s(&v["name"]), s(&v["email"])))
 }
 
-const LINEAR_ISSUE: &str = "query($id: String!) { issue(id: $id) { id identifier title description url comments(first: 50) { nodes { body createdAt user { name } } } } }";
+/// Linear's connections are newest first with `first` and oldest first with `last`, by
+/// `orderBy` (createdAt unless told): the issue's 50 newest comments, sorted back below.
+const LINEAR_ISSUE: &str = "query($id: String!) { issue(id: $id) { id identifier title description url comments(first: 50, orderBy: createdAt) { nodes { body createdAt user { name } } } } }";
 
 pub fn linear_issue(key: &str) -> Result<Issue> {
     let d = linear(&linear_key()?, LINEAR_ISSUE, json!({ "id": key }))?;
@@ -307,7 +309,9 @@ pub fn linear_issue(key: &str) -> Result<Issue> {
     })
 }
 
-const LINEAR_OPEN: &str = "query($filter: IssueFilter) { issues(filter: $filter, first: 100) { nodes { id identifier title url createdAt } } }";
+/// The 100 oldest matching issues, oldest first (`last` on a createdAt connection), as
+/// Jira's `ORDER BY created ASC`: intake starts the issues that have waited longest.
+const LINEAR_OPEN: &str = "query($filter: IssueFilter) { issues(filter: $filter, last: 100, orderBy: createdAt) { nodes { id identifier title url createdAt } } }";
 
 /// Linear's IssueFilter for open issues with the label, in the team.
 fn linear_filter(label: Option<&str>, team: Option<&str>) -> Value {
@@ -410,13 +414,19 @@ fn jira_text(v: &Value) -> String {
 pub fn jira_issue(key: &str) -> Result<Issue> {
     let j = jira()?;
     let req = jira_req(&j, "GET", &format!("/rest/api/3/issue/{key}"))
-        .query("fields", "summary,description,comment");
+        .query("fields", "summary,description");
     let v = send("Jira", req, None)?;
     let f = &v["fields"];
     let key = Some(s(&v["key"]))
         .filter(|k| !k.is_empty())
         .unwrap_or(key.into());
-    let comments = f["comment"]["comments"]
+    // The issue's `comment` field is a page of the oldest ones; Get comments can start
+    // from the newest. Its 50 newest, put back oldest first.
+    let req = jira_req(&j, "GET", &format!("/rest/api/3/issue/{key}/comment"))
+        .query("orderBy", "-created")
+        .query("maxResults", "50");
+    let c = send("Jira", req, None)?;
+    let mut comments: Vec<Comment> = c["comments"]
         .as_array()
         .into_iter()
         .flatten()
@@ -425,6 +435,7 @@ pub fn jira_issue(key: &str) -> Result<Issue> {
             body: jira_text(&c["body"]),
         })
         .collect();
+    comments.reverse();
     Ok(Issue {
         title: s(&f["summary"]),
         body: jira_text(&f["description"]),
