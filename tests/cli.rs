@@ -287,6 +287,18 @@ fn maps_a_folder_to_an_account() {
 #[test]
 fn doctor_skips_clis_you_have_no_accounts_for() {
     let s = Sandbox::new("doctor");
+    // A provider you defined yourself, whose binary is missing: that one is a problem.
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "ghost", "label": "Ghost", "bin": "ghost-cli-amux-test",
+            "sharedHome": s.home.join(".ghost"), "homeEnv": "GHOST_HOME"
+        }));
+    write(&cfg, &c.to_string());
     s.amux(&["account", "add", "fake", "a", "--no-login"]);
     let empty = s.home.join("empty-path");
     fs::create_dir_all(&empty).unwrap();
@@ -299,6 +311,14 @@ fn doctor_skips_clis_you_have_no_accounts_for() {
     );
     assert!(r.out.contains("ok   fake: binary"), "{}", r.out);
     assert!(!r.out.contains("FAIL qwen"), "{}", r.out);
+    assert!(
+        r.out
+            .contains("FAIL ghost: binary \"ghost-cli-amux-test\" not found"),
+        "{}",
+        r.out
+    );
+    assert!(!r.out.contains("--   ghost"), "{}", r.out);
+    assert_ne!(r.code, 0);
     assert!(s.amux(&["providers"]).out.contains("qwen"));
 }
 
@@ -2026,6 +2046,28 @@ fn spots_usage_limits_and_moves_the_session_to_another_account() {
         "{}",
         r.err
     );
+    // But a folder mapped to the limited account never moves to another one: it stops
+    // and says how to choose.
+    let work = s.home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    assert_eq!(
+        s.amux_with(&["map", ".", "fake@one"], &[], Some(&work))
+            .code,
+        0
+    );
+    let r = s.amux_with(&["spawn", "--name", "mapped", "fake"], &[], Some(&work));
+    assert_ne!(r.code, 0);
+    assert!(
+        r.err.contains("fake@one is limited")
+            && r.err.contains("until ")
+            && r.err.contains("`amux map` chose it for ~/work")
+            && r.err.contains("amux spawn … fake@<name>")
+            && !r.err.contains("using fake@two"),
+        "{}",
+        r.err
+    );
+    assert!(!s.amux(&["ps"]).out.contains("mapped"));
+    s.amux(&["map", "--rm", work.to_str().unwrap()]);
 
     // Failover: the same session, under the other account, told to carry on.
     let f = s.amux(&["failover", "lim"]);
