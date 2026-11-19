@@ -4,7 +4,7 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
-## [0.11.11] - 2026-11-19
+## [0.11.12] - 2026-11-19
 
 Accounts that switch before the limit, state hooks, sandboxed runs, Linear and Jira issues, and hunk-level review.
 
@@ -29,6 +29,14 @@ Accounts that switch before the limit, state hooks, sandboxed runs, Linear and J
 - In the review view, space now marks a hunk instead of paging down. PgDn, Ctrl-F and Ctrl-D page down; PgUp, Ctrl-B and Ctrl-U page up.
 - The review diff shows a renamed file as removed and added, so each part can be dropped on its own.
 - `amux doctor` no longer fails for a built-in CLI that isn't installed when you have no accounts for it, and notes any provider's home variable set in your shell.
+
+### Fixed
+
+- Typing an answer into a run could clear the *next* question a fast CLI printed right after it, so the run showed working instead of waiting and no notification went out. amux now clears the wait before the answer reaches the CLI.
+
+## [0.11.11] - 2026-11-19
+
+Tagged, but not published: a test failed in the release build. Everything in it is in 0.11.12.
 
 ## [0.11.10] - 2026-11-18
 

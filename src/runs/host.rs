@@ -944,19 +944,20 @@ fn serve(
         while let Ok((kind, data)) = read_frame(&mut stream) {
             match kind {
                 INPUT => {
+                    // Clear the wait before the CLI gets the answer: whatever it prints
+                    // after that (maybe its next question) must not be cleared by it.
+                    // Focus reports and moving through a menu don't answer anything.
+                    if keys.answers(&data) {
+                        let mut h = lock(&hub);
+                        let change = h.detector.answered();
+                        // A hook-reported block goes back to working: record that too.
+                        let record = h.detector.take_record();
+                        h.set_status(record);
+                        h.apply(change);
+                    }
                     if (&*master).write_all(&data).is_err() {
                         break;
                     }
-                    // Focus reports and moving through a menu don't answer anything.
-                    if !keys.answers(&data) {
-                        continue;
-                    }
-                    let mut h = lock(&hub);
-                    let change = h.detector.answered();
-                    // A hook-reported block goes back to working: record that too.
-                    let record = h.detector.take_record();
-                    h.set_status(record);
-                    h.apply(change);
                 }
                 RESIZE => {
                     if let Some((rows, cols)) = parse_size(&data) {
