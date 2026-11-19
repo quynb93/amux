@@ -2129,7 +2129,8 @@ fn serves_a_phone_app_behind_a_token() {
     // Everything else the app does: accounts, load, starting a run, live events, comments.
     assert!(get("/api/accounts", &cookie).contains("\"id\": \"fake@one\""));
     assert!(get("/api/slots", &cookie).contains("\"classes\""));
-    let events = {
+    // Two phones watching: they share one `amux events`, and both get each line.
+    let open_events = || {
         use std::io::{Read, Write};
         let mut es = std::net::TcpStream::connect(addr).unwrap();
         es.write_all(
@@ -2141,9 +2142,10 @@ fn serves_a_phone_app_behind_a_token() {
         let mut head = [0u8; 256];
         let n = es.read(&mut head).unwrap();
         assert!(String::from_utf8_lossy(&head[..n]).contains("text/event-stream"));
-        std::thread::sleep(std::time::Duration::from_millis(600));
         es
     };
+    let streams = [open_events(), open_events()];
+    std::thread::sleep(std::time::Duration::from_millis(600));
     let started = post(
         "/api/spawn",
         r#"{"account":"fake@one","name":"q","prompt":"hello from the phone"}"#,
@@ -2154,9 +2156,8 @@ fn serves_a_phone_app_behind_a_token() {
         "{started}"
     );
     assert!(post("/api/spawn", r#"{"account":"--x"}"#, "X-Amux: 1\r\n").starts_with("HTTP/1.1 400"));
-    {
+    for mut es in streams {
         use std::io::Read;
-        let mut es = events;
         let mut got = String::new();
         let mut buf = [0u8; 4096];
         while !got.contains("\"run\":\"q\"") {

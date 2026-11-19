@@ -619,38 +619,85 @@ fn known_dirs() -> Vec<String> {
     out
 }
 
+/// One `amux events` for every phone watching: started for the first, stopped after the
+/// last goes, its lines handed to each.
+struct EventFeed {
+    subs: Vec<(u64, std::sync::mpsc::Sender<String>)>,
+    next: u64,
+    child: Option<std::process::Child>,
+}
+
+static FEED: std::sync::Mutex<EventFeed> = std::sync::Mutex::new(EventFeed {
+    subs: Vec::new(),
+    next: 0,
+    child: None,
+});
+
+fn feed() -> std::sync::MutexGuard<'static, EventFeed> {
+    FEED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Starts receiving `amux events` lines; None if it can't be started.
+fn subscribe() -> Option<(u64, std::sync::mpsc::Receiver<String>)> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut f = feed();
+    if f.child.is_none() {
+        let exe = std::env::current_exe().ok()?;
+        let mut child = Command::new(exe)
+            .arg("events")
+            .env("AMUX_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let out = child.stdout.take();
+        let pid = child.id();
+        f.child = Some(child);
+        std::thread::spawn(move || {
+            if let Some(out) = out {
+                for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    feed().subs.retain(|(_, t)| t.send(line.clone()).is_ok());
+                }
+            }
+            // It ended: let the phones' streams end too, so they reconnect.
+            let mut f = feed();
+            if f.child.as_ref().is_some_and(|c| c.id() == pid) {
+                f.subs.clear();
+                if let Some(mut c) = f.child.take() {
+                    let _ = c.wait();
+                }
+            }
+        });
+    }
+    let id = f.next;
+    f.next += 1;
+    f.subs.push((id, tx));
+    Some((id, rx))
+}
+
+fn unsubscribe(id: u64) {
+    let mut f = feed();
+    f.subs.retain(|(i, _)| *i != id);
+    if f.subs.is_empty() {
+        if let Some(mut c) = f.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 /// `GET /api/events`: Server-Sent Events from `amux events`, so the app updates the
-/// moment a run changes. Ends when the phone goes away.
+/// moment a run changes. Ends when the phone goes away. All phones share one reader.
 fn events(mut s: &Conn) {
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
                 X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n: hi\n\n";
     if s.write_all(head.as_bytes()).is_err() {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
+    let Some((id, rx)) = subscribe() else {
         return;
     };
-    let Ok(mut child) = Command::new(exe)
-        .arg("events")
-        .env("AMUX_NO_UPDATE_CHECK", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-    let out = child.stdout.take();
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        if let Some(out) = out {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        }
-    });
     loop {
         // A comment every 20s keeps proxies and phones from closing an idle stream, and
         // finds out when the phone has gone.
@@ -663,8 +710,7 @@ fn events(mut s: &Conn) {
             break;
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    unsubscribe(id);
 }
 
 const USAGE: &str =

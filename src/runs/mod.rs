@@ -7,6 +7,7 @@
 //!   sock         the host's Unix socket, present while the run is alive
 
 pub mod attach;
+pub mod cache;
 pub mod client;
 pub mod detect;
 pub mod host;
