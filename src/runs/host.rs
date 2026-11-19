@@ -122,15 +122,18 @@ struct Hub {
     rules_at: i64,
     /// The prompt last judged, so each is judged (and answered) once.
     judged: Option<String>,
-    /// `amux failover` has been started for this run (at its limit, or before it), so it
-    /// is started once.
-    moving: bool,
+    /// `amux failover` is running for this run (at its limit, or before it), so it is
+    /// started once at a time. Cleared when that failover fails, so a later limit can
+    /// still move the run.
+    moving: Arc<AtomicBool>,
 }
 
 /// Starts `amux failover <run> [extra…]` in its own session: failover stops this run,
-/// which ends this host.
-fn start_failover(id: &str, extra: &[&str]) {
+/// which ends this host. Clears `moving` when it can't start or fails (no session to
+/// resume, no account left), so the run isn't stuck as "moving".
+fn start_failover(id: &str, extra: &[&str], moving: Arc<AtomicBool>) {
     let Ok(exe) = std::env::current_exe() else {
+        moving.store(false, Ordering::SeqCst);
         return;
     };
     let mut c = Command::new(exe);
@@ -146,8 +149,15 @@ fn start_failover(id: &str, extra: &[&str]) {
             Ok(())
         });
     }
-    if let Ok(mut child) = c.spawn() {
-        std::thread::spawn(move || child.wait());
+    match c.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                if !child.wait().is_ok_and(|s| s.success()) {
+                    moving.store(false, Ordering::SeqCst);
+                }
+            });
+        }
+        Err(_) => moving.store(false, Ordering::SeqCst),
     }
 }
 
@@ -164,7 +174,7 @@ impl Default for Hub {
             rules: approve::Rules::default(),
             rules_at: 0,
             judged: None,
-            moving: false,
+            moving: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -213,9 +223,10 @@ impl Hub {
             self.notifier
                 .send(&self.run.id, "limited", &self.title(), &msg);
         }
-        if crate::work::limits::on_limit() == "failover" && !self.moving {
-            self.moving = true;
-            start_failover(&self.run.id, &[]);
+        if crate::work::limits::on_limit() == "failover"
+            && !self.moving.swap(true, Ordering::SeqCst)
+        {
+            start_failover(&self.run.id, &[], self.moving.clone());
         }
     }
 
@@ -544,12 +555,18 @@ fn quota_watch(hub: &Mutex<Hub>) {
     let mut seen = None;
     // Whether you were told the account is past switchAt, since it last was under it.
     let mut told = false;
+    // A move before the limit was started; it is tried once. If it fails, the run stays
+    // and keeps being watched (and can still fail over at the limit itself).
+    let mut tried = false;
     loop {
         std::thread::sleep(Duration::from_millis(tick));
         let run = {
             let h = lock(hub);
-            if h.run.exit_code.is_some() || h.moving {
+            if h.run.exit_code.is_some() {
                 return;
+            }
+            if h.moving.load(Ordering::SeqCst) {
+                continue;
             }
             h.run.clone()
         };
@@ -573,7 +590,7 @@ fn quota_watch(hub: &Mutex<Hub>) {
         let target = failover
             .then(|| quota::pick_switch(&provider, &account, at))
             .flatten();
-        let mut h = lock(hub);
+        let h = lock(hub);
         let between = !h.attached()
             && quota::turn_boundary(
                 h.run.status.as_ref(),
@@ -582,15 +599,18 @@ fn quota_watch(hub: &Mutex<Hub>) {
                 now,
             );
         match target {
-            Some(t) if between => {
-                h.moving = true;
+            Some(t) if between && !tried => {
+                if h.moving.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                tried = true;
                 let msg = format!("{near}; moving {} to {}", run.id, t.id());
                 crate::plugins::hook("near-limit", &run.id, &msg);
                 let title = h.title();
                 h.notifier.send(&run.id, "limited", &title, &msg);
+                let moving = h.moving.clone();
                 drop(h);
-                start_failover(&run.id, &["--to", &t.id(), "--near-limit"]);
-                return;
+                start_failover(&run.id, &["--to", &t.id(), "--near-limit"], moving);
             }
             // Wait for the turn to end.
             Some(_) => {}

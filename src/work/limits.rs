@@ -235,11 +235,8 @@ pub fn on_limit() -> String {
 /// headroom (work/quota.rs), then the fewest live runs; never `avoid`.
 pub fn pick(provider: &str, avoid: &str) -> Option<Account> {
     use crate::work::quota;
-    let all = quota::candidates(provider);
-    let c: Vec<_> = all.iter().map(|(_, c)| c.clone()).collect();
     let high = quota::switch_at().unwrap_or(quota::HIGH);
-    let i = quota::choose(&c, avoid, None, high)?;
-    Some(all[i].0.clone())
+    quota::best(provider, avoid, None, high).map(|(a, _)| a)
 }
 
 /// The account `amux spawn <provider>` (no account named) should use instead of
@@ -261,15 +258,12 @@ pub fn pick_for_spawn(provider: &str, default: Option<&Account>) -> Option<(Acco
         }
     }
     let at = quota::switch_at()?;
-    let all = quota::candidates(provider);
-    let c: Vec<_> = all.iter().map(|(_, c)| c.clone()).collect();
-    let i = quota::choose(&c, "", Some(at), at)?;
-    let (best, bc) = &all[i];
+    let (best, bc) = quota::best(provider, "", Some(at), at)?;
     let pct = |u: Option<f64>| u.map_or("no numbers yet".to_string(), |u| format!("{u:.0}% used"));
     let why = match default {
         Some(d) if d.id() == best.id() => return None,
         Some(d) => {
-            let du = c.iter().find(|x| x.id == d.id()).and_then(|x| x.used);
+            let du = quota::load(&d.id()).and_then(|q| q.used());
             format!(
                 "using {}, which has the most headroom ({}; {}: {})",
                 best.id(),
@@ -284,7 +278,7 @@ pub fn pick_for_spawn(provider: &str, default: Option<&Account>) -> Option<(Acco
             pct(bc.used)
         ),
     };
-    Some((best.clone(), why))
+    Some((best, why))
 }
 
 #[cfg(test)]
