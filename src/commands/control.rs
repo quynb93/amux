@@ -242,13 +242,19 @@ struct Snapshot {
     checks: Option<String>,
 }
 
-fn snapshot(run: &Run, now: i64) -> Snapshot {
+fn snapshot(run: &Run, files: &mut runs::cache::RunFiles, now: i64) -> Snapshot {
+    let state = run.state();
+    // Only a running run's state depends on when it last printed.
+    let out = matches!(state, runs::State::Running)
+        .then(|| runs::state::last_output(run))
+        .flatten();
+    let kind = runs::state::classify(&state, run.waiting.as_ref(), run.status.as_ref(), out, now).0;
     Snapshot {
-        kind: run_kind(run, now).0,
-        queued: run.state() == runs::State::Queued,
+        kind,
+        queued: state == runs::State::Queued,
         reason: run.waiting.as_ref().map(|w| w.reason.clone()),
-        verify: crate::work::verify::load(&run.id).map(|v| v.label()),
-        checks: crate::work::github::load(&run.id).map(|p| p.label()),
+        verify: files.verify(&run.id).map(|v| v.label()),
+        checks: files.pr(&run.id).map(|p| p.label()),
     }
 }
 
@@ -310,12 +316,14 @@ pub fn events_cmd(argv: &[String]) -> Result<i32> {
         .collect::<Result<_>>()?;
     let mut seen: HashMap<String, Snapshot> = HashMap::new();
     let mut first = true;
+    // Only files that changed since the last look are parsed again.
+    let mut files = runs::cache::RunFiles::default();
     loop {
         let now = time::now_ms();
         let mut current: HashMap<String, Snapshot> = HashMap::new();
-        for run in runs::list() {
+        for run in files.list() {
             if only.is_empty() || only.contains(&run.id) {
-                current.insert(run.id.clone(), snapshot(&run, now));
+                current.insert(run.id.clone(), snapshot(&run, &mut files, now));
             }
         }
         if !first {
