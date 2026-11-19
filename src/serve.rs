@@ -837,8 +837,9 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
     } else if let Some(c) = &self_signed {
         say!(
             "HTTPS with a self-signed certificate: the browser warns once. Check the fingerprint is\n  {}\n\
-             To stop the warning, install {base}/amux-cert.pem on the phone and trust it\n\
-             (iOS: Settings → General → About → Certificate Trust Settings).",
+             For no warning at all, use `--tailscale` (a real certificate). Or install\n\
+             {base}/amux-cert.pem on the phone: it's a server certificate for this address only\n\
+             (not a CA), so trusting it can't let anyone vouch for other sites.",
             crate::tls::fingerprint(c).unwrap_or_default()
         );
     } else if tls {
