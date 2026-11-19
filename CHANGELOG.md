@@ -4,6 +4,21 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+
+- `amux peek`, `amux explain`, `amux send` and the phone app's screen ask the run's host for its screen alone (a new `SNAPSHOT` frame after `WATCH`); the host sends it and closes, so they no longer wait for the output to go quiet. Measured on macOS (release build, median of 30): `amux peek` 161 ms → 3 ms on an idle run and 3,053 ms → 3 ms on a busy one. Runs started before upgrading keep their old host, which ignores the frame; for those, the client still reads until 150 ms of quiet as before.
+- `amux send` looks at the screen only for multi-line text (to know whether the CLI takes a bracketed paste): 378 ms → 225 ms idle, 3,255 ms → 224 ms on a busy run (what is left is its deliberate pauses before Enter and before closing).
+- The run host queues output for each client and writes it from a thread per client, instead of writing to every client in turn under its lock. A client that falls 4 MB behind, or whose socket takes nothing for 2 seconds, is disconnected; an `amux attach` in a terminal that froze that long ends, and you can attach again.
+- Auto-approve reads the screen when new output has a prompt's words, at most every 100 ms otherwise, and once more when output has been quiet 100 ms, instead of rendering the whole screen for every chunk. With any allow rule, throughput of a 50 MB burst went from 28 MB/s to 62 MB/s and the host's CPU for it from 1.76 s to 0.79 s; a prompt on screen is still answered within about 100 ms.
+- Prompt and usage-limit detection keeps its 4 KB window lowercased as it arrives and searches only the new text (memchr), falling back to the old full search while the window holds cased non-ASCII text or invalid UTF-8, so it finds exactly what it did. With `limitPatterns`, 43 → 60 MB/s.
+- `output.log` is written through a 64 KB buffer, flushed whenever the host is about to wait for more output and at least every 100 ms, instead of one write per chunk. With the changes above, a plain 50 MB burst: 51 → 61 MB/s, host CPU 0.92 s → 0.81 s. `amux logs` shows new output within a few milliseconds.
+- `amux events` and `amux ui` parse a run's `run.json`, `verify.json` and `pr.json` again only when the file changed (modification time, size, inode), and look at `output.log` only for running runs. With 104 runs, `amux events` used 0.68 s of CPU per 30 s and now 0.41 s; `amux ui` 0.66 s → 0.32 s. `amux serve` runs one `amux events` for all phones instead of one per open app.
+- The run host's hook reader sleeps until there is something to do instead of waking every 250 ms.
+
+### Fixed
+
+- One client that stopped reading (a frozen terminal, a suspended `amux attach`, a stuck preview) held up the CLI and every other client for up to 2 seconds. Measured: the longest gap seen by a reading client next to a non-reading one went from 2,014 ms to 17 ms.
+
 ## [0.11.14] - 2026-11-19
 
 An MCP server for agent teams, and reviewing runs on other machines in the UI.
