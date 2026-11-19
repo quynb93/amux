@@ -258,11 +258,24 @@ pub fn read_codex_rollout(f: &Path) -> Option<Quota> {
 
 /// The rollout file of a Codex run: the newest one under `<home>/sessions` written since
 /// the run started, whose session started in the run's folder (as `amux failover` picks a
-/// session). Only files changed since then are opened.
+/// session). Only files changed since then are opened. Every folder is listed: a
+/// folder's own mtime doesn't change when a file in it is written to (a resumed session
+/// appends to a file in an older day folder).
 pub fn codex_rollout_of(run: &Run, home: &Path) -> Option<PathBuf> {
+    use crate::sessions::{mtime_ms, walk};
     let since = run.started_at - 60_000;
-    let mut found: Vec<(i64, PathBuf)> = Vec::new();
-    collect_rollouts(&home.join("sessions"), 3, since, &mut found);
+    let mut files = Vec::new();
+    walk(
+        &home.join("sessions"),
+        &|n| n.ends_with(".jsonl"),
+        3,
+        &mut files,
+    );
+    let mut found: Vec<(i64, PathBuf)> = files
+        .into_iter()
+        .map(|p| (mtime_ms(&p), p))
+        .filter(|(t, _)| *t >= since)
+        .collect();
     found.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
     found
         .into_iter()
@@ -270,30 +283,13 @@ pub fn codex_rollout_of(run: &Run, home: &Path) -> Option<PathBuf> {
         .find(|p| codex_cwd(p).as_deref() == Some(run.cwd.as_str()))
 }
 
-fn collect_rollouts(dir: &Path, depth: usize, since: i64, out: &mut Vec<(i64, PathBuf)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let Ok(m) = e.metadata() else { continue };
-        let modified = m.modified().map(time::to_ms).unwrap_or(0);
-        if m.is_dir() {
-            // A day folder can't hold files newer than its own last change.
-            if depth > 0 && modified >= since {
-                collect_rollouts(&e.path(), depth - 1, since, out);
-            }
-        } else if modified >= since && e.file_name().to_string_lossy().ends_with(".jsonl") {
-            out.push((modified, e.path()));
-        }
-    }
-}
-
-/// The folder a Codex session started in, from its `session_meta` line.
+/// The folder a Codex session started in, from its `session_meta` line (which carries
+/// the base instructions, so it can run long: read as much as sessions.rs does).
 fn codex_cwd(f: &Path) -> Option<String> {
     let mut head = String::new();
     std::fs::File::open(f)
         .ok()?
-        .take(64 * 1024)
+        .take(256 * 1024)
         .read_to_string(&mut head)
         .ok();
     head.lines()
@@ -322,7 +318,9 @@ pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) 
     {
         return;
     }
-    if let Some(q) = read_codex_rollout(&path) {
+    // Numbers from before the run started belong to whichever account ran the session
+    // then (a session resumed by `amux failover` appends to its old file).
+    if let Some(q) = read_codex_rollout(&path).filter(|q| q.at >= run.started_at) {
         record(&run.account, &q);
     }
     *seen = Some((path, modified));
@@ -441,14 +439,24 @@ pub fn candidates(provider: &str) -> Vec<(Account, Candidate)> {
         .collect()
 }
 
+/// The best account of `provider` for work, as `choose` ranks them, with its numbers.
+pub fn best(
+    provider: &str,
+    avoid: &str,
+    ceiling: Option<f64>,
+    high: f64,
+) -> Option<(Account, Candidate)> {
+    let mut all = candidates(provider);
+    let c: Vec<Candidate> = all.iter().map(|(_, c)| c.clone()).collect();
+    let i = choose(&c, avoid, ceiling, high)?;
+    Some(all.swap_remove(i))
+}
+
 /// Where a run on `account` should move before the limit: another account of the same
 /// CLI that is under `switch_at`, if any. Accounts at or over it are never picked, so a
 /// session doesn't bounce back to an account that is just as full.
 pub fn pick_switch(provider: &str, account: &str, switch_at: f64) -> Option<Account> {
-    let all = candidates(provider);
-    let c: Vec<Candidate> = all.iter().map(|(_, c)| c.clone()).collect();
-    let i = choose(&c, account, Some(switch_at), switch_at)?;
-    Some(all[i].0.clone())
+    best(provider, account, Some(switch_at), switch_at).map(|(a, _)| a)
 }
 
 /// "92% of its 5-hour window, resets in 1h 3m".

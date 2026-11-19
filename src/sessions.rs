@@ -64,7 +64,12 @@ fn json_lines(text: &str) -> impl Iterator<Item = Value> + '_ {
 }
 
 /// Collects matching files under `dir`, descending at most `max_depth` directory levels.
-fn walk(dir: &Path, matches: &dyn Fn(&str) -> bool, max_depth: usize, out: &mut Vec<PathBuf>) {
+pub(crate) fn walk(
+    dir: &Path,
+    matches: &dyn Fn(&str) -> bool,
+    max_depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -112,7 +117,7 @@ fn text_of(content: Option<&Value>) -> String {
     }
 }
 
-fn mtime_ms(file: &Path) -> i64 {
+pub(crate) fn mtime_ms(file: &Path) -> i64 {
     fs::metadata(file)
         .and_then(|m| m.modified())
         .map(time::to_ms)

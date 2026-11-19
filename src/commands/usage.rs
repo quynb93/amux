@@ -174,8 +174,10 @@ fn settings_file() -> Result<PathBuf> {
     Ok(get_provider("claude")?.shared_home.join("settings.json"))
 }
 
+/// `amux __statusline` or `'<path>' __statusline`, not a command of your own whose name
+/// merely contains it.
 fn is_wrapper(cmd: &str) -> bool {
-    cmd.contains("__statusline")
+    cmd.trim_end().ends_with(" __statusline")
 }
 
 fn wrapped(settings: &Value) -> bool {
