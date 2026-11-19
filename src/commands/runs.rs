@@ -226,6 +226,28 @@ fn remove_worktree(wt: &Worktree, drop_branch: bool) -> Option<String> {
     }
 }
 
+/// An amux option written after the account, where it goes to the CLI instead. Not
+/// `--sandbox` for Codex and Gemini, which have a `--sandbox` of their own.
+fn misplaced_option<'a>(provider: &str, args: &'a [String]) -> Option<&'a str> {
+    let own_sandbox = matches!(provider, "codex" | "gemini");
+    args.iter().map(String::as_str).find(|a| {
+        [
+            "--prompt",
+            "--worktree",
+            "--name",
+            "--branch",
+            "--base",
+            "--dir",
+            "--issue",
+            "--autopilot",
+            "--sandbox",
+            "--image",
+        ]
+        .contains(a)
+            && !(own_sandbox && *a == "--sandbox")
+    })
+}
+
 pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     // `--on <machine>[:<dir>]`: the same spawn, on that machine, in that folder.
     if let Some(i) = argv.iter().position(|a| a == "--on") {
@@ -242,28 +264,6 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         return m.run(&rest, dir);
     }
     let (mut o, acct_ref, args) = parse_spawn(argv)?;
-    // An easy mistake, for people and agents alike: amux's options after the account go
-    // to the CLI instead.
-    if let Some(f) = args.iter().find(|a| {
-        [
-            "--prompt",
-            "--worktree",
-            "--name",
-            "--branch",
-            "--base",
-            "--dir",
-            "--issue",
-            "--autopilot",
-            "--sandbox",
-            "--image",
-        ]
-        .contains(&a.as_str())
-    }) {
-        eprintln!(
-            "amux: {f} comes after the account, so it goes to the CLI, not to amux. \
-             Put amux's options first: amux spawn {f} … {acct_ref}"
-        );
-    }
     if let Some(n) = &o.name {
         if !valid_name(n) {
             bail!("Run names use letters, digits, '.', '_' and '-'.");
@@ -283,6 +283,14 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
             None => default?,
         }
     };
+    // An easy mistake, for people and agents alike: amux's options after the account go
+    // to the CLI instead.
+    if let Some(f) = misplaced_option(&acct.provider, args) {
+        eprintln!(
+            "amux: {f} comes after the account, so it goes to the CLI, not to amux. \
+             Put amux's options first: amux spawn {f} … {acct_ref}"
+        );
+    }
     let (spec, mut env) = prepare(&acct)?;
     let cwd = match &o.dir {
         Some(d) => {
@@ -392,6 +400,7 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
         }
         if let Some((req, cfg)) = &sandbox {
             run.sandbox = Some(crate::runs::sandbox::plan(
+                &run.id,
                 req,
                 cfg,
                 &spec,
@@ -1179,6 +1188,16 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn warns_of_amux_options_after_the_account() {
+        let a = args(&["--model", "x", "--sandbox", "--worktree"]);
+        assert_eq!(misplaced_option("claude", &a), Some("--sandbox"));
+        // Codex and Gemini have a --sandbox of their own.
+        assert_eq!(misplaced_option("codex", &a), Some("--worktree"));
+        assert_eq!(misplaced_option("gemini", &args(&["--sandbox"])), None);
+        assert_eq!(misplaced_option("claude", &args(&["--model", "x"])), None);
     }
 
     #[test]

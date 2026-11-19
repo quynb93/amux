@@ -587,13 +587,13 @@ amux spawn --sandbox=podman --image amux-agents --worktree codex@me
 amux try 3 claude@ci -p "speed up the parser" --sandbox --image amux-agents
 ```
 
-- **The run host stays on your machine** and owns the terminal. Only what it starts changes: `docker run --rm -it --name amux-<run> --user <your uid>:<gid> … <image> claude <args>`. Attach, `ui`, auto-approve, `diff`, `verify`, `pr` and autopilot work as usual. `amux ps` shows the account as `claude@ci [sandbox]`.
+- **The run host stays on your machine** and owns the terminal. Only what it starts changes: `docker run --rm -it --name amux-<home>-<run> --user <your uid>:<gid> … <image> claude <args>`. Attach, `ui`, auto-approve, `diff`, `verify`, `pr` and autopilot work as usual. `amux ps` shows the account as `claude@ci [sandbox]`.
 - **Mounted, each at the same path as on your machine:** the run's checkout (for a worktree, also the repository's `.git` folder it points to), the account's overlay, and the shared home its links point into. Nothing else from your home folder. Add more with `"mounts"`.
 - **Sign-in.** On macOS, Claude Code keeps its login in the Keychain, which a container can't read. Give the account a token instead (`claude setup-token`, then `amux account token claude@ci`). A login kept in a file in the overlay, such as Codex's `auth.json`, works as it is. amux refuses an account that has neither, and says how to fix it.
 - **Image.** amux never pulls one and has no default. Build your own with the CLIs in it; [docs/sandbox.md](docs/sandbox.md) has a short Dockerfile. amux checks that the engine and the image are there before it starts.
 - **`--network off`** runs the container with `--network none`. That also cuts off a hosted model's API.
 - **Inside the container there is no `amux`**, so `amux report`, `slot` and a lead's `amux spawn` don't work there. Use `amux report --run <run>` from your machine.
-- `amux stop` removes the container (`<engine> rm -f amux-<run>`) if the run doesn't end on its own.
+- `amux stop` removes the container if the run doesn't end on its own. `<home>` is a short hash of your amux home and uid, and amux only removes containers labelled with it, never another home's or user's.
 
 Defaults go in `~/.amux/config.json`. With `"always": true`, every spawn is sandboxed, including those autopilot, `intake` and schedules start; `--no-sandbox` opts one out.
 
