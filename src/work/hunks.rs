@@ -8,7 +8,7 @@
 //! `git apply <patch>` puts it back.
 
 use super::review::{self, Changes, UNTRACKED};
-use crate::git::git;
+use crate::git::{git, git_raw};
 use crate::runs::{self, state, Run};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
@@ -62,22 +62,6 @@ impl Hunk {
     }
 }
 
-/// `-a[,b] +c[,d] @@ …` → (a, b, c, d). A missing length is 1.
-fn ranges(h: &str) -> (u32, u32, u32, u32) {
-    let mut nums = h.split_whitespace();
-    let mut range = |sign: char| -> (u32, u32) {
-        let r = nums
-            .next()
-            .and_then(|s| s.strip_prefix(sign))
-            .unwrap_or("0");
-        let (start, len) = r.split_once(',').unwrap_or((r, "1"));
-        (start.parse().unwrap_or(0), len.parse().unwrap_or(1))
-    };
-    let (a, b) = range('-');
-    let (c, d) = range('+');
-    (a, b, c, d)
-}
-
 /// The hunks of a diff from `review::changes`, in the order `review::parse_diff` numbers
 /// them (`DiffLine::hunk`).
 pub fn parse(changes: &Changes) -> Vec<Hunk> {
@@ -88,6 +72,9 @@ pub fn parse(changes: &Changes) -> Vec<Hunk> {
     let mut in_file = 0;
     // The new file's line number at this point of the hunk.
     let mut line = 0u32;
+    // Untracked files come after the tracked diff, in the order `changes.untracked` lists
+    // them: taken from there, their paths needn't be read back out of `diff --git`.
+    let mut next_untracked = changes.untracked.iter();
     for raw in changes.text.split_inclusive('\n') {
         let l = raw.trim_end_matches('\n');
         if let Some(rest) = l.strip_prefix("diff --git ") {
@@ -99,11 +86,13 @@ pub fn parse(changes: &Changes) -> Vec<Hunk> {
         if !in_hunk {
             if l == UNTRACKED {
                 untracked = true;
-                let print = changes
-                    .untracked
-                    .iter()
-                    .find(|(f, _)| *f == file)
-                    .and_then(|(_, p)| *p);
+                let print = match next_untracked.next() {
+                    Some((f, p)) => {
+                        file = f.clone();
+                        *p
+                    }
+                    None => None,
+                };
                 out.push(Hunk {
                     file: file.clone(),
                     number: 1,
@@ -145,7 +134,7 @@ pub fn parse(changes: &Changes) -> Vec<Hunk> {
         }
         if let Some(h) = l.strip_prefix("@@ ") {
             in_hunk = true;
-            let (a, b, c, d) = ranges(h);
+            let (a, b, c, d) = review::hunk_ranges(h);
             if untracked {
                 if let Some(u) = out.last_mut() {
                     (u.new_start, u.new_lines) = (c, d);
@@ -311,6 +300,10 @@ fn new_file_patch(top: &Path, rel: &str) -> Result<String> {
             "--binary",
             "--no-color",
             "--no-ext-diff",
+            "--no-textconv",
+            // a/ and b/ whatever diff.noprefix says: `git apply` strips one part.
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--",
             "/dev/null",
             rel,
@@ -343,6 +336,8 @@ pub fn drop_hunks(
     let top = top.canonicalize().unwrap_or(top);
     let here = dir.canonicalize().unwrap_or(dir.clone());
     let mut text = patch(picked);
+    // The untracked files dropped, as paths from the top.
+    let mut gone: Vec<String> = Vec::new();
     for h in picked.iter().filter(|h| h.untracked) {
         let path = dir.join(&h.file);
         if h.print.is_none() || review::fingerprint(&path) != h.print {
@@ -358,6 +353,7 @@ pub fn drop_hunks(
             .map(|p| p.to_string_lossy().into_owned())
             .map_err(|_| anyhow!("{} is outside the checkout.", h.file))?;
         text.push_str(&new_file_patch(&top, &rel)?);
+        gone.push(rel);
     }
     std::fs::create_dir_all(save_dir)?;
     let undo = save_dir.join(format!("{}.patch", crate::time::now_ms()));
@@ -372,9 +368,19 @@ pub fn drop_hunks(
             "Nothing was dropped: the files no longer match the diff you reviewed (the agent may have changed them since). Look again and retry.\n{e:#}"
         );
     }
+    // Nothing else uncommitted: the untracked files being dropped don't count, as they
+    // are part of the drop. Porcelain paths are from the top, like `gone`.
     let clean = commit
-        && git(&top, &["status", "--porcelain", "--untracked-files=all"])
-            .is_ok_and(|s| s.is_empty());
+        && git_raw(
+            &top,
+            &["status", "--porcelain", "-z", "--untracked-files=all"],
+        )
+        .is_ok_and(|s| {
+            s.split('\0').filter(|e| !e.is_empty()).all(|e| {
+                e.strip_prefix("?? ")
+                    .is_some_and(|p| gone.iter().any(|g| g == p))
+            })
+        });
     git(&top, &["apply", "-R", "--whitespace=nowarn", &undo_s])
         .context("git apply failed after its check passed")?;
     let mut files: Vec<&str> = picked.iter().map(|h| h.file.as_str()).collect();
@@ -600,7 +606,24 @@ mod tests {
     }
 
     #[test]
+    fn commits_tracked_hunks_dropped_with_an_untracked_file() {
+        let t = TempDir::new();
+        let (dir, base) = repo(&t);
+        two_hunks(&dir);
+        sh(&dir, &["commit", "-qam", "agent work"]);
+        write(&dir.join("scratch.txt"), "tmp\n");
+        let c = review::changes_in(&dir, &base).unwrap();
+        let h = parse(&c);
+        let picked: Vec<&Hunk> = vec![&h[1], &h[2]];
+        let d = drop_hunks(&c, &picked, true, &t.path().join("saved")).unwrap();
+        assert!(d.commit.is_some(), "{d:?}");
+        assert!(!dir.join("scratch.txt").exists());
+        assert!(sh(&dir, &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
     fn reads_hunk_ranges() {
+        let ranges = review::hunk_ranges;
         assert_eq!(ranges("-10,3 +10,4 @@ fn x"), (10, 3, 10, 4));
         assert_eq!(ranges("-1 +1 @@"), (1, 1, 1, 1));
         assert_eq!(ranges("-0,0 +1,2 @@"), (0, 0, 1, 2));

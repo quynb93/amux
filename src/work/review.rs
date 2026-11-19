@@ -130,16 +130,7 @@ pub fn parse_diff(text: &str) -> Vec<DiffLine> {
                 hunk = Some(hunks);
                 hunks += 1;
             }
-            // "-a[,b] +c[,d] @@ …"
-            let mut nums = h.split_whitespace();
-            let start = |s: Option<&str>, sign: char| -> u32 {
-                s.and_then(|s| s.strip_prefix(sign))
-                    .and_then(|s| s.split(',').next())
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(0)
-            };
-            old = start(nums.next(), '-');
-            new = start(nums.next(), '+');
+            (old, _, new, _) = hunk_ranges(h);
             in_hunk = true;
             out.push(line(LineKind::Hunk, None, None, &file, hunk));
             continue;
@@ -169,6 +160,23 @@ pub fn parse_diff(text: &str) -> Vec<DiffLine> {
         out.push(line(LineKind::Meta, None, None, &file, hunk));
     }
     out
+}
+
+/// `-a[,b] +c[,d] @@ …` (a hunk header after its `@@ `) → (a, b, c, d). A missing length
+/// is 1.
+pub fn hunk_ranges(h: &str) -> (u32, u32, u32, u32) {
+    let mut nums = h.split_whitespace();
+    let mut range = |sign: char| -> (u32, u32) {
+        let r = nums
+            .next()
+            .and_then(|s| s.strip_prefix(sign))
+            .unwrap_or("0");
+        let (start, len) = r.split_once(',').unwrap_or((r, "1"));
+        (start.parse().unwrap_or(0), len.parse().unwrap_or(1))
+    };
+    let (a, b) = range('-');
+    let (c, d) = range('+');
+    (a, b, c, d)
 }
 
 /// The note under `diff --git` that marks a new file git doesn't track yet.
@@ -217,6 +225,9 @@ pub fn changes_in(dir: &Path, base: &str) -> Result<Changes> {
     let mut text = git_raw(
         dir,
         &[
+            // Paths as they are, not octal-quoted: the parser and `--drop` match them.
+            "-c",
+            "core.quotePath=false",
             "diff",
             "--no-color",
             "--no-ext-diff",
@@ -242,19 +253,26 @@ pub fn changes_in(dir: &Path, base: &str) -> Result<Changes> {
     })
 }
 
-/// A fingerprint of a file's content (or a symlink's target), to notice a change.
+/// A fingerprint of a file's content (or a symlink's target), to notice a change. A file
+/// too large to show is fingerprinted by its size and modification time, not read whole.
 pub fn fingerprint(path: &Path) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
     let m = std::fs::symlink_metadata(path).ok()?;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
     if m.file_type().is_symlink() {
-        std::fs::read_link(path).ok()?.hash(&mut h);
+        Some(hash(&std::fs::read_link(path).ok()?))
+    } else if m.is_file() && m.len() > MAX_NEW_FILE {
+        Some(hash(&(m.len(), m.modified().ok())))
     } else if m.is_file() {
-        std::fs::read(path).ok()?.hash(&mut h);
+        Some(hash(&std::fs::read(path).ok()?))
     } else {
-        return None;
+        None
     }
-    Some(h.finish())
+}
+
+fn hash<T: std::hash::Hash + ?Sized>(v: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
 }
 
 /// A file git doesn't track yet, as the diff that would add it, and its fingerprint.
@@ -280,11 +298,8 @@ fn new_file_diff(dir: &Path, f: &str) -> (String, Option<u64>) {
                         out.push('\n');
                     }
                 }
-                // The bytes shown are the bytes fingerprinted.
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                b.hash(&mut h);
-                return (out, Some(h.finish()));
+                // The bytes shown are the bytes fingerprinted, as `fingerprint` does.
+                return (out, Some(hash(&b)));
             }
             Err(_) => out.push_str("(unreadable)\n"),
         },
