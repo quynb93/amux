@@ -1830,13 +1830,89 @@ fn fake_ssh(local: &Sandbox, remote: &Sandbox) -> PathBuf {
     write(
         &ssh,
         &format!(
-            "#!/bin/sh\nfor a; do last=\"$a\"; done\nexport HOME={h} AMUX_HOME={a}\nexec sh -c \"$last\"\n",
+            "#!/bin/sh\nfor a; do last=\"$a\"; done\nexport HOME={h} AMUX_HOME={a} SHELL=\"${{FAKE_REMOTE_SHELL:-/bin/sh}}\"\nexec sh -c \"$last\"\n",
             h = remote.home.display(),
             a = remote.amux_home.display()
         ),
     );
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
     ssh
+}
+
+/// Arguments reach the other machine as they were, whatever its login shell; an older
+/// amux there gets them quoted for a POSIX shell, or a clear error.
+#[test]
+fn remote_arguments_arrive_intact() {
+    let s = Sandbox::new("argv-local");
+    let r = Sandbox::new("argv-box");
+    r.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let ssh = fake_ssh(&s, &r);
+    let env = [("AMUX_SSH", ssh.to_str().unwrap()), ("FAKE_CHAT", "1")];
+    let bin = env!("CARGO_BIN_EXE_amux");
+    let add = s.amux_with(
+        &["machine", "add", "box", "me@box", "--amux", bin],
+        &env,
+        None,
+    );
+    assert_eq!(add.code, 0, "{}{}", add.out, add.err);
+    let sp = s.amux_with(
+        &["spawn", "--on", "box:~", "--name", "w", "fake"],
+        &env,
+        None,
+    );
+    assert_eq!(sp.code, 0, "{}", sp.err);
+    let peek = |m: &str, want: &str, env: &[(&str, &str)]| {
+        let mut seen = String::new();
+        for _ in 0..100 {
+            seen = s.amux_with(&["peek", &format!("{m}:w")], env, None).out;
+            if seen.contains(want) {
+                return seen;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("{want:?} never showed:\n{seen}");
+    };
+    peek("box", "ENV AMUX_RUN=w", &env);
+    // Quotes, $, backquotes and ; are text; a machine:run in the message is text too.
+    let text = "it's $HOME `echo x` ; see box:zz";
+    let sent = s.amux_with(&["send", "box:w", "--", text], &env, None);
+    assert_eq!(sent.code, 0, "{}", sent.err);
+    peek("box", &format!("got {text}"), &env);
+    assert!(s.amux_home.join("remote-caps.json").exists());
+
+    // amux there before __argv: quoted for its POSIX shell.
+    let old = s.home.join("bin/old-amux");
+    write(
+        &old,
+        &format!("#!/bin/sh\n[ \"$1\" = __argv ] && {{ echo 'Unknown command' >&2; exit 1; }}\nexec {bin} \"$@\"\n"),
+    );
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+    let add = s.amux_with(
+        &[
+            "machine",
+            "add",
+            "old",
+            "me@box",
+            "--amux",
+            old.to_str().unwrap(),
+        ],
+        &env,
+        None,
+    );
+    assert_eq!(add.code, 0, "{}{}", add.out, add.err);
+    let sent = s.amux_with(&["send", "old:w", "--", "old $HOME"], &env, None);
+    assert_eq!(sent.code, 0, "{}", sent.err);
+    peek("old", "got old $HOME", &env);
+    // …and a clear error when its login shell isn't a POSIX one.
+    let fish = [env[0], env[1], ("FAKE_REMOTE_SHELL", "/usr/local/bin/fish")];
+    let p = s.amux_with(&["peek", "old:w"], &fish, None);
+    assert!(p.code != 0 && p.err.contains("too old"), "{}", p.err);
+    // The new amux works whatever the shell.
+    assert!(s
+        .amux_with(&["peek", "box:w"], &fish, None)
+        .out
+        .contains("got it's"));
+    assert_eq!(s.amux_with(&["stop", "box:w"], &env, None).code, 0);
 }
 
 #[test]
@@ -2032,7 +2108,7 @@ fn reviews_comments_on_and_drops_hunks_of_a_run_on_another_machine() {
     write(
         &old,
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = __review-data ]; then echo \"amux: Unknown command \\\"$1\\\". See \\`amux help\\`.\" >&2; exit 1; fi\nexec {bin} \"$@\"\n"
+            "#!/bin/sh\nif [ \"$1\" = __review-data ] || [ \"$1\" = __argv ]; then echo \"amux: Unknown command \\\"$1\\\". See \\`amux help\\`.\" >&2; exit 1; fi\nexec {bin} \"$@\"\n"
         ),
     );
     fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
