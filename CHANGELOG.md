@@ -14,6 +14,7 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 - A Jira issue's prompt now has its 50 newest comments (from Get comments, newest first, put back in order) instead of the first page of the issue's `comment` field. Linear's queries now say how they are ordered: an issue's 50 newest comments, and for `amux intake` the 100 oldest open issues (`last: 100, orderBy: createdAt`), so with more than 100 open issues, the ones that have waited longest are started first, as with Jira.
 - Dropping hunks in `amux ui`'s review no longer freezes the screen while `git apply` and `git commit` (with your pre-commit hooks) run: the drop runs in the background, the footer says it is dropping, and the review is read again when it is done.
 - The end-to-end tests no longer leave run hosts and fake CLIs running when a test fails or doesn't stop its runs: each test sandbox stops the hosts and CLI process groups recorded in its own `runs/*/run.json` when it is dropped, after checking with `ps` that each process still belongs to that sandbox.
+- The end-to-end tests wait up to 15 seconds (was 5) for a run to reach a state, so they pass on slower CI runners. They still go on as soon as the state is reached.
 
 ## [0.11.12] - 2026-11-19
 

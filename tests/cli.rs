@@ -447,8 +447,13 @@ fn keeps_unknown_top_level_keys_in_accounts_json() {
 }
 
 /// Polls `amux ps` until the run's row contains `want`.
+/// How long `wait_ps` and `eventually` wait: generous for slow CI runners, and they
+/// return as soon as the condition holds.
+const WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn wait_ps(s: &Sandbox, run: &str, want: &str) -> String {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + WAIT;
+    while std::time::Instant::now() < deadline {
         let ps = s.amux(&["ps"]).out;
         if ps.lines().any(|l| l.starts_with(run) && l.contains(want)) {
             return ps;
@@ -781,7 +786,8 @@ fn shows_when_a_run_waits_for_you_and_notifies() {
 
 /// Polls until `f` holds, for up to five seconds.
 fn eventually(what: &str, mut f: impl FnMut() -> bool) {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + WAIT;
+    while std::time::Instant::now() < deadline {
         if f() {
             return;
         }
