@@ -465,6 +465,32 @@ fn wait_ps(s: &Sandbox, run: &str, want: &str) -> String {
 }
 
 #[test]
+fn ps_prints_no_terminal_escapes_from_a_runs_args_or_branch() {
+    let s = Sandbox::new("escps");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let evil = "\x1b]0;pwned\x07\x1b[2Jhi\u{9b}31m";
+    let r = s.amux(&["spawn", "--name", "e", "fake", evil]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "e", "exited");
+    let file = s.amux_home.join("runs/e/run.json");
+    let mut run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    run["worktree"] = serde_json::json!({
+        "repo": "/nonexistent", "path": "/nonexistent/e",
+        "branch": "amux/e\x1b[31m\x1b]8;;http://x\x07"
+    });
+    fs::write(&file, run.to_string()).unwrap();
+    let ps = s.amux(&["ps"]).out;
+    assert!(ps.contains("hi"), "{ps}");
+    for c in ['\x1b', '\x07', '\u{9b}'] {
+        assert!(!ps.contains(c), "{ps:?}");
+    }
+    // JSON escapes them instead.
+    let json = s.amux(&["ps", "--json"]).out;
+    assert!(!json.contains('\x1b') && json.contains("\\u001b"), "{json}");
+}
+
+#[test]
 fn spawns_a_background_run_in_a_terminal() {
     let s = Sandbox::new("spawn");
     s.amux(&["account", "add", "fake", "one", "--no-login"]);

@@ -78,7 +78,7 @@ pub fn checks_cmd(argv: &[String]) -> Result<i32> {
             } else {
                 format!("{} / {}", c.workflow, c.name)
             };
-            println!("  {mark} {name}");
+            println!("  {mark} {}", crate::util::clean(&name, false));
         }
     }
     if send {
