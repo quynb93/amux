@@ -72,10 +72,31 @@ fn width(s: &str) -> usize {
     s.chars().count()
 }
 
-/// A header row plus rows in left-aligned columns; the last column is not padded.
+/// `s` without what a terminal would act on rather than show: ESC and the other C0
+/// controls, DEL, and the C1 controls (U+0080–U+009F, which some terminals also take as
+/// escapes). Tabs and newlines stay when `keep_lines`, else they become spaces. For text
+/// from outside amux (issue titles, branch names, a run's arguments, another machine's
+/// answers) before it is printed.
+pub fn clean(s: &str, keep_lines: bool) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\n' | '\t' if keep_lines => Some(c),
+            '\n' | '\t' | '\r' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// A header row plus rows in left-aligned columns; the last column is not padded. Cells
+/// are `clean`ed: one line each, with nothing a terminal would act on.
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let header: Vec<String> = header.iter().map(|h| h.to_string()).collect();
-    let all: Vec<&Vec<String>> = std::iter::once(&header).chain(rows).collect();
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(|c| clean(c, false)).collect())
+        .collect();
+    let all: Vec<&Vec<String>> = std::iter::once(&header).chain(&rows).collect();
     let widths: Vec<usize> = (0..header.len())
         .map(|i| all.iter().map(|r| width(&r[i])).max().unwrap_or(0))
         .collect();
@@ -119,9 +140,12 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Shortens to one line of at most `max` characters.
+/// Shortens to one line of at most `max` characters, without control characters.
 pub fn one_line(s: &str, max: usize) -> String {
-    let t = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = clean(s, false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if t.chars().count() > max {
         let mut cut: String = t.chars().take(max - 1).collect();
         cut.push('…');
@@ -219,6 +243,20 @@ pub fn read_secret(prompt: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleans_what_a_terminal_would_act_on() {
+        let evil = "a\x1b]0;pwned\x07b\x1b[2Jc\u{9b}31md\x7fe\r\nf\tg";
+        assert_eq!(clean(evil, false), "a]0;pwnedb[2Jc31mde  f g");
+        assert_eq!(clean("x\ny\tz\x1b", true), "x\ny\tz");
+        assert_eq!(clean("ünïcödé ✓", false), "ünïcödé ✓");
+        let t = table(
+            &["A", "B"],
+            &[vec!["\x1b[31mred".into(), "two\nlines".into()]],
+        );
+        assert!(!t.contains('\x1b') && t.ends_with("two lines"), "{t:?}");
+        assert_eq!(one_line("\x1b[1mbold\u{85}\n x", 20), "[1mbold x");
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

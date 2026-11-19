@@ -131,7 +131,10 @@ pub fn intake_cmd(argv: &[String]) -> Result<i32> {
         }
         let (name, label) = (issue.new_run_name(&repo), issue.label());
         if dry {
-            println!("Would start {name}: {label} {}", issue.title);
+            println!(
+                "Would start {name}: {label} {}",
+                crate::util::clean(&issue.title, false)
+            );
             continue;
         }
         let mut args = vec!["--issue".to_string(), issue.spawn_ref()];
@@ -139,7 +142,10 @@ pub fn intake_cmd(argv: &[String]) -> Result<i32> {
         match super::runs::spawn_cmd(&args) {
             Ok(0) => {
                 issues::mark_taken(&repo, issue)?;
-                println!("Started {name}: {label} {}", issue.title);
+                println!(
+                    "Started {name}: {label} {}",
+                    crate::util::clean(&issue.title, false)
+                );
             }
             Ok(_) => failed += 1,
             Err(e) => {
