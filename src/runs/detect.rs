@@ -3,7 +3,9 @@
 //! a notification escape sequence (OSC 9, OSC 777 or OSC 99).
 //!
 //! When the CLI reports its own state with OSC 7501 (see program.rs), that wins: from the
-//! first report on, only the reports decide whether it is waiting.
+//! first report on, only the reports decide whether it is waiting. Reports from state hooks
+//! (`amux state-hooks`, see state_hooks.rs) count the same way until the first OSC 7501
+//! report, which then takes over: OSC 7501 > hooks > patterns and timing.
 //!
 //! Escape sequences are stripped as bytes arrive, across chunk boundaries, and the text
 //! that remains is matched case-insensitively against the last few KB of output.
@@ -14,14 +16,20 @@ const WINDOW: usize = 4096;
 const CLEAR_AFTER: usize = 4096;
 /// OSC 7501 allows up to 4096 bytes; longer sequences are discarded whole.
 const MAX_OSC: usize = 4096;
+/// How long after you (or auto-approve) answered a hook-reported block a repeat of it
+/// (Claude Code's permission notification, see `HookReport::echo`) is old news.
+const ECHO_AFTER: Duration = Duration::from_secs(10);
 
-use super::program::{self, Osc, Report};
+use super::program::{self, HookReport, Osc, Report};
+use std::time::{Duration, Instant};
 
 /// What showed that the CLI is waiting, for `amux explain`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     /// The CLI's own OSC 7501 report.
     Report,
+    /// A report from a state hook the CLI ran (`amux __hook`).
+    Hook,
     /// Text matching the provider's `waitingPatterns`.
     Pattern,
     Bell,
@@ -33,6 +41,7 @@ impl Source {
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Report => "report",
+            Source::Hook => "hook",
             Source::Pattern => "pattern",
             Source::Bell => "bell",
             Source::Notification => "notification",
@@ -78,6 +87,12 @@ pub struct Detector {
     osc_overflow: bool,
     /// The CLI has sent an OSC 7501 report, so its reports decide the state.
     reports: bool,
+    /// A state hook has reported (and no OSC 7501 yet): hook reports decide the state.
+    hooked: bool,
+    /// The tool call a hook-reported block is about (see `HookReport::tool`).
+    blocked_tool: Option<String>,
+    /// When a hook-reported block was last answered.
+    answered_at: Option<Instant>,
     /// Its current root record.
     record: Option<Report>,
     /// `waiting` came from `waitingPatterns` while the CLI reported idle or done (a
@@ -104,6 +119,9 @@ impl Detector {
             source: Source::Pattern,
             osc_overflow: false,
             reports: false,
+            hooked: false,
+            blocked_tool: None,
+            answered_at: None,
             record: None,
             pattern_wait: false,
             record_changed: false,
@@ -154,10 +172,24 @@ impl Detector {
         self.waiting
     }
 
-    /// The user typed something: whatever the CLI was waiting for has been answered.
+    /// You answered (see `Keys`), or auto-approve did: whatever the CLI was waiting for
+    /// has been answered.
     pub fn answered(&mut self) -> Option<Change> {
+        // A hook-reported block: no hook says when it ends (an answered permission prompt
+        // reports nothing until the tool has run), so your answer does, and the CLI goes on.
+        if !self.reports && self.hooked && self.waiting && !self.pattern_wait {
+            self.waiting = false;
+            self.blocked_tool = None;
+            self.answered_at = Some(Instant::now());
+            self.set_record(Some(Report {
+                state: "working".into(),
+                kind: None,
+                message: None,
+            }));
+            return Some(Change::Cleared);
+        }
         // The CLI says itself when it stops being blocked.
-        if self.reports {
+        if self.reports || self.hooked {
             // A reported block ends when the CLI says so; a matched dialog when you answer.
             if !(self.waiting && self.pattern_wait) {
                 return None;
@@ -223,7 +255,7 @@ impl Detector {
                 }
             }
         }
-        if self.reports {
+        if self.reports || self.hooked {
             return self.reported(chunk.len());
         }
         let signal = match signal {
@@ -263,6 +295,63 @@ impl Detector {
         std::mem::take(&mut self.record_changed).then(|| self.record.clone())
     }
 
+    /// A state hook reported the CLI's state. Ignored once the CLI reports with OSC 7501,
+    /// which is exact. While blocked, a second block keeps the first message: Claude Code's
+    /// permission notification follows its PermissionRequest hook, which says more.
+    ///
+    /// A block stays until a report not about another tool call: a parallel tool call
+    /// starting or finishing while the CLI asks about one doesn't end it. A repeat of a
+    /// block that was just answered (`echo`) is ignored.
+    pub fn hook(&mut self, h: HookReport) -> Option<Change> {
+        if self.reports {
+            return None;
+        }
+        self.hooked = true;
+        let HookReport {
+            report: mut r,
+            tool,
+            echo,
+        } = h;
+        let blocked = self.record.as_ref().is_some_and(|o| o.state == "blocked");
+        if blocked {
+            if r.state == "working" && tool.is_some() && tool != self.blocked_tool {
+                return None;
+            }
+        } else if r.state == "blocked"
+            && echo
+            && self.answered_at.is_some_and(|t| t.elapsed() < ECHO_AFTER)
+        {
+            return None;
+        }
+        if r.state == "blocked" {
+            let old = self.record.as_ref().filter(|_| blocked);
+            if let Some(old) = old.filter(|o| o.message.is_some()) {
+                r.message.clone_from(&old.message);
+                r.kind.clone_from(&old.kind);
+            }
+            if !blocked || self.blocked_tool.is_none() {
+                self.blocked_tool = tool;
+            }
+        } else {
+            self.blocked_tool = None;
+        }
+        self.set_record(Some(r));
+        self.reported(0)
+    }
+
+    /// The kind of the block the CLI reported, if it is blocked.
+    pub fn blocked_kind(&self) -> Option<&str> {
+        self.record
+            .as_ref()
+            .filter(|r| r.state == "blocked")
+            .and_then(|r| r.kind.as_deref())
+    }
+
+    /// Whether the state comes from state hooks only (no OSC 7501 report yet).
+    pub fn hooks_only(&self) -> bool {
+        self.hooked && !self.reports
+    }
+
     /// The process ended: records that live only as long as it does are dropped.
     pub fn exited(&mut self) -> Option<Option<Report>> {
         if self.record.as_ref().is_some_and(Report::ends_with_process) {
@@ -292,7 +381,11 @@ impl Detector {
         if state == Some("blocked") {
             let reason = self.record.as_ref().map(Report::reason).unwrap_or_default();
             self.pattern_wait = false;
-            self.source = Source::Report;
+            self.source = if self.reports {
+                Source::Report
+            } else {
+                Source::Hook
+            };
             return (!std::mem::replace(&mut self.waiting, true))
                 .then_some(Change::Waiting(reason));
         }
@@ -377,6 +470,63 @@ impl Detector {
             .iter()
             .find(|(lower, _)| text.contains(lower.as_str()))
             .map(|(_, orig)| orig.clone())
+    }
+}
+
+/// Reads what you type into a run, to tell an answer from keys that only look around.
+/// A waiting run stays waiting while you attach, move through a menu or switch windows;
+/// Enter, a choice (a digit or letter), Esc or Ctrl-C answer it. Escape sequences (arrow
+/// keys, focus reports, mouse reports) aren't answers, and neither is pasted text until
+/// you press Enter. Remembers a paste that goes on into the next read.
+#[derive(Default)]
+pub struct Keys {
+    paste: bool,
+}
+
+impl Keys {
+    pub fn answers(&mut self, input: &[u8]) -> bool {
+        let mut answer = false;
+        let mut i = 0;
+        while i < input.len() {
+            let b = input[i];
+            if b == 0x1b {
+                match input.get(i + 1) {
+                    Some(b'[') => {
+                        // CSI: parameters, then a final byte.
+                        let start = i + 2;
+                        let mut j = start;
+                        while j < input.len() && !(0x40..=0x7e).contains(&input[j]) {
+                            j += 1;
+                        }
+                        if input.get(j) == Some(&b'~') {
+                            match &input[start..j] {
+                                b"200" => self.paste = true,
+                                b"201" => self.paste = false,
+                                _ => {}
+                            }
+                        }
+                        i = j + 1;
+                    }
+                    // SS3: arrow and function keys in application mode.
+                    Some(b'O') => i += 3,
+                    // Esc on its own (or twice) cancels; Esc and a key is Alt and that key.
+                    _ => {
+                        answer |= !self.paste;
+                        i += 2;
+                    }
+                }
+                continue;
+            }
+            if !self.paste {
+                answer |= match b {
+                    b'\r' | b'\n' | 0x03 | 0x04 => true,
+                    0x00..=0x1f | 0x7f => false,
+                    _ => true,
+                };
+            }
+            i += 1;
+        }
+        answer
     }
 }
 
@@ -556,6 +706,149 @@ mod tests {
         );
         assert_eq!(d.answered(), None);
         assert_eq!(d.feed(b"\x1b]7501;state=idle\x07"), Some(Change::Cleared));
+    }
+
+    fn rep(state: &str, msg: Option<&str>) -> HookReport {
+        HookReport {
+            report: Report {
+                state: state.into(),
+                kind: (state == "blocked").then(|| "permission".into()),
+                message: msg.map(Into::into),
+            },
+            tool: None,
+            echo: false,
+        }
+    }
+
+    fn tool(mut h: HookReport, t: &str) -> HookReport {
+        h.tool = Some(t.into());
+        h
+    }
+
+    #[test]
+    fn other_tool_calls_dont_end_a_hook_block() {
+        let mut d = det();
+        d.hook(tool(rep("working", None), "Bash:1"));
+        assert_eq!(
+            d.hook(tool(rep("blocked", Some("approve Bash: rm")), "Bash:2")),
+            Some(Change::Waiting("approve Bash: rm".into()))
+        );
+        assert_eq!(d.blocked_kind(), Some("permission"));
+        // A parallel call starting and finishing while the dialog is open.
+        assert_eq!(d.hook(tool(rep("working", None), "Read:3")), None);
+        assert_eq!(d.hook(tool(rep("working", None), "Bash:1")), None);
+        assert!(d.waiting());
+        // The notification that follows keeps the block and its tool.
+        assert_eq!(d.hook(rep("blocked", Some("Claude needs you"))), None);
+        // The asked-about call finishing ends it (answered elsewhere).
+        assert_eq!(
+            d.hook(tool(rep("working", None), "Bash:2")),
+            Some(Change::Cleared)
+        );
+        // A report about no tool call (a new prompt, the turn's end) ends one too.
+        d.hook(tool(rep("blocked", None), "Bash:4"));
+        assert_eq!(d.hook(rep("idle", None)), Some(Change::Cleared));
+        assert_eq!(d.blocked_kind(), None);
+    }
+
+    #[test]
+    fn ignores_a_repeat_of_a_block_just_answered() {
+        let mut d = det();
+        d.hook(tool(rep("blocked", Some("approve Bash: ls")), "Bash:1"));
+        assert_eq!(d.answered(), Some(Change::Cleared));
+        // Claude Code's permission notification, after the prompt was answered.
+        let mut echo = rep("blocked", Some("Claude needs your permission"));
+        echo.echo = true;
+        assert_eq!(d.hook(echo.clone()), None);
+        assert_eq!(d.take_record().unwrap().unwrap().state, "working");
+        assert!(!d.waiting());
+        // A new block is not a repeat.
+        assert_eq!(
+            d.hook(rep("blocked", Some("approve Edit"))),
+            Some(Change::Waiting("approve Edit".into()))
+        );
+        // With nothing answered lately, a repeat counts (its hook may have been the only one).
+        let mut d = det();
+        assert_eq!(
+            d.hook(echo),
+            Some(Change::Waiting("Claude needs your permission".into()))
+        );
+    }
+
+    #[test]
+    fn only_answers_end_a_wait() {
+        let mut k = Keys::default();
+        // Focus in and out, arrows (normal and application mode), mouse, Tab, Backspace.
+        for keys in [
+            &b"\x1b[I"[..],
+            b"\x1b[O",
+            b"\x1b[A\x1b[B",
+            b"\x1bOA",
+            b"\x1b[<0;10;5M",
+            b"\t\x7f",
+            b"",
+        ] {
+            assert!(!k.answers(keys), "{keys:?}");
+        }
+        // Enter, a choice, Esc, Ctrl-C.
+        for keys in [
+            &b"\r"[..],
+            b"1",
+            b"y",
+            b"\x1b",
+            b"\x1b\x1b",
+            b"\x03",
+            b"\x1b[B\r",
+        ] {
+            assert!(k.answers(keys), "{keys:?}");
+        }
+        // Pasted text isn't an answer, even across reads; Enter after it is.
+        assert!(!k.answers(b"\x1b[200~some"));
+        assert!(!k.answers(b" text\r\x1b[201~"));
+        assert!(k.answers(b"\r"));
+    }
+
+    #[test]
+    fn hook_reports_decide_until_the_cli_reports_itself() {
+        let mut d = det();
+        assert_eq!(d.hook(rep("working", None)), None);
+        assert!(d.hooks_only());
+        assert_eq!(d.take_record().unwrap().unwrap().state, "working");
+        // Like OSC 7501: prompt text and bells don't count while it reports working.
+        assert_eq!(d.feed(b"Do you want to\x07"), None);
+        assert_eq!(
+            d.hook(rep("blocked", Some("approve Bash: cargo test"))),
+            Some(Change::Waiting("approve Bash: cargo test".into()))
+        );
+        assert_eq!(d.source(), Source::Hook);
+        // A second block (the notification) keeps the better message.
+        assert_eq!(
+            d.hook(rep("blocked", Some("Claude needs your permission"))),
+            None
+        );
+        d.take_record();
+        assert_eq!(
+            d.record.as_ref().unwrap().message.as_deref(),
+            Some("approve Bash: cargo test")
+        );
+        // Output doesn't end it; your answer does, and the CLI goes back to work.
+        assert_eq!(d.feed(&[b'x'; CLEAR_AFTER * 2]), None);
+        assert_eq!(d.answered(), Some(Change::Cleared));
+        assert_eq!(d.take_record().unwrap().unwrap().state, "working");
+        assert_eq!(d.feed(b"more"), None);
+        // Idle: patterns count again, as with OSC 7501.
+        assert_eq!(d.hook(rep("idle", None)), None);
+        assert_eq!(
+            d.feed(b"Enter to confirm"),
+            Some(Change::Waiting("Enter to confirm".into()))
+        );
+        assert_eq!(d.source(), Source::Pattern);
+        d.answered();
+        // The first OSC 7501 report takes over, and hooks are ignored from then on.
+        d.feed(b"\x1b]7501;state=working\x07");
+        assert!(!d.hooks_only());
+        assert_eq!(d.hook(rep("blocked", Some("x"))), None);
+        assert_eq!(d.take_record().unwrap().unwrap().state, "working");
     }
 
     #[test]

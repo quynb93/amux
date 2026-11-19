@@ -297,7 +297,23 @@ A light terminal background that reports itself (`COLORFGBG`, with truecolor) ge
 A color is `#rrggbb`, a number from 0 to 255, a name (`red`, `bright-blue`, `default`…), plus `bold`, `dim`, `italic`, `underline` or `reverse`, and `on <color>` for the background. The roles are `background`, `text`, `muted`, `border`, `title`, `accent`, `key`, `selection`, `header`, `input`, `starting`, `working`, `waiting`, `idle`, `done`, `failed`, `lost`, `stopped`, `success` and `error`. `/theme` lists them too.
 
 - **STATE** is `waiting <time>` when the CLI is asking you something: a permission or confirmation prompt, a terminal bell, or a notification it sent to the terminal. Otherwise it is `running` while the CLI prints and `idle <time>` once it has been quiet for a few seconds. Typing into the run clears `waiting`.
-- **Self-reported state.** CLIs that report their own state with OSC 7501 (Codex, and Claude Code 2.1.295 and later) get exact states: `waiting` with the CLI's own message ("approve Write: a.rs"), `running`, `idle` once the turn is done, and `error`. amux answers Claude Code's request to report. For other CLIs, amux falls back to the prompt text in `waitingPatterns` and to output timing.
+- **Self-reported state.** CLIs that report their own state with OSC 7501 (Codex, and Claude Code 2.1.295 and later) get exact states: `waiting` with the CLI's own message ("approve Write: a.rs"), `running`, `idle` once the turn is done, and `error`. amux answers Claude Code's request to report. For other CLIs, amux uses state hooks if you installed them (below), and otherwise falls back to the prompt text in `waitingPatterns` and to output timing.
+- **State hooks.** For CLIs that don't send OSC 7501, such as Gemini CLI or an older Claude Code, `amux state-hooks install` gets exact states from the CLI's own hooks instead of from the screen. It adds entries to `~/.claude/settings.json` and `~/.gemini/settings.json` that run `amux __hook <cli> <event>`:
+
+  | CLI | Event | State |
+  |---|---|---|
+  | Claude Code | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | working |
+  | Claude Code | `PermissionRequest` | waiting: "approve Bash: cargo test" |
+  | Claude Code | `PreToolUse` for `AskUserQuestion` or `ExitPlanMode` | waiting: the question, or "approve the plan" |
+  | Claude Code | `Notification` (`permission_prompt`, `elicitation_dialog`) | waiting, with the notification's message |
+  | Claude Code | `Stop` / `StopFailure` | idle / error |
+  | Gemini CLI | `BeforeAgent`, `BeforeTool`, `AfterTool` | working |
+  | Gemini CLI | `Notification` (`ToolPermission`) | waiting, with its message |
+  | Gemini CLI | `AfterAgent` | idle |
+
+  The hook does something only inside an amux run (`AMUX_RUN` set, and called by the run's own CLI). Then it sends the state to the run's host over its socket. Everywhere else it exits at once. It always exits 0 and prints nothing, so it never changes what the CLI decides, and it gives up after 2 seconds. OSC 7501 wins over hooks: once a CLI reports with OSC 7501, its hook reports are ignored. Hook reports in turn win over prompt text and output timing. A hook can't say when you answer a prompt or interrupt a turn, so typing into a run ends a hook's `waiting`, and a hook's `working` holds only while the CLI prints. Codex isn't covered: it always reports with OSC 7501.
+
+  `amux state-hooks` (or `status`) shows whether they are installed for each CLI, and `amux doctor` mentions it. `amux state-hooks remove` takes out exactly amux's entries, recognized by their `__hook` command, and leaves your other hooks and settings alone. Files are rewritten atomically, through a symlink if `settings.json` is one. A `settings.json` with comments isn't rewritten. These are not the hooks in `~/.amux/hooks/` (see [Plugins and hooks](#plugins-and-hooks)), which are your own scripts that amux runs.
 - **Notifications.** When a run starts waiting, or exits, and no terminal is attached to it, amux shows a desktop notification (Notification Center on macOS, `notify-send` on Linux). Set `"notify": false` in `~/.amux/config.json` to turn them off, or `"notifyCommand": ["my-notifier"]` to run your own command. It gets `AMUX_RUN`, `AMUX_EVENT` (`waiting` or `exited`), `AMUX_TITLE` and `AMUX_MESSAGE` in its environment.
 - **`--worktree`** runs `git worktree add` on a new branch (`amux/<run>`, or `--branch <name>`) from `HEAD` (or `--base <ref>`). The run starts in the same subdirectory you spawned from. Worktrees live in `~/.amux/worktrees/`.
 - **`amux rm`** removes a run's worktree only if git reports no uncommitted or untracked files. Otherwise the worktree is kept and amux tells you where it is. Branches are always kept.
@@ -690,6 +706,7 @@ amux plugin list
 - **Plugins** are any executable in `~/.amux/plugins/`, or named `amux-<name>` on PATH, the way git does it. They get `AMUX_BIN` (amux itself) and `AMUX_HOME`. In `amux ui`, `/plugin <name>` runs one on the selected run, with `AMUX_RUN` set, and shows what it printed. A line `# amux: <what it does>` describes it.
 - **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify`, `on-checks`, `on-approved` or `on-autopilot`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
 - amux runs a plugin or hook only if it belongs to you and no one else can write to it.
+- These hooks are amux's events, run by amux. **State hooks** (`amux state-hooks install`) go the other way: they are entries in Claude Code's and Gemini CLI's settings that the CLI runs to tell amux its state. See [State hooks](#parallel-runs).
 
 ### Agents that run agents
 
@@ -864,7 +881,8 @@ amux update --patterns     # fetch patterns.json from the repo's main branch now
 | `amux providers` | List providers, shared homes and private entries. |
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
-| `amux doctor` | Check binaries, shared homes and overlays. |
+| `amux doctor` | Check binaries, shared homes and overlays, and say whether state hooks are installed. |
+| `amux state-hooks [status] \| install [claude\|gemini] \| remove [claude\|gemini]` | Add or remove hooks in Claude Code's and Gemini CLI's settings that report a run's exact state to amux (only inside amux runs). |
 | `amux update [--check \| --patterns]` | Install the latest amux release, or with `--check` only look for one. `--patterns` fetches the latest prompt and limit text for the built-in CLIs. |
 | `amux --version`, `amux help` | |
 

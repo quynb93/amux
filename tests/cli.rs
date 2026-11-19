@@ -44,6 +44,17 @@ impl Sandbox {
                && printf '\\033]7501;?\\033\\\\' && sleep 0.3 \\
                && st \"blocked:kind=permission:msg=$(printf 'approve Write: a.rs' | base64)\" && read a \\
                && st \"working:msg=$(printf 'writing a.rs' | base64)\" && read b && st done && read c && exit 3\n\
+             [ -n \"$FAKE_HOOK\" ] && h() { printf '%s' \"$2\" | \"$FAKE_HOOK\" __hook claude \"$1\"; } \\
+               && h UserPromptSubmit '{}' && sleep 0.3 \\
+               && h PermissionRequest '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cargo test\"}}' \\
+               && read a && h Stop '{}' && read b && exit 4\n\
+             [ -n \"$FAKE_HOOKPERM\" ] && stty -icanon -echo && h() { printf '%s' \"$2\" | \"$FAKE_HOOKPERM\" __hook claude \"$1\"; } \\
+               && for c in 'cargo test --all' 'git push origin main'; do \
+               h PermissionRequest \"$(printf '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"%s\"}}' \"$c\")\"; sleep 0.3; \
+               printf '%s\\n' '────────────────' ' Bash command' ' approve this?' '╌╌╌╌╌╌╌╌╌╌' \" $c\" '╌╌╌╌╌╌╌╌╌╌' ' Do you want to proceed?' ' ❯ 1. Yes' '   2. No'; \
+               a=$(dd bs=1 count=1 2>/dev/null); echo \"answer $a to $c\"; \
+               h Notification '{\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs your permission\"}'; done && \
+               read x && exit 5\n\
              [ -n \"$FAKE_PERM\" ] && stty -icanon -echo && for c in 'cargo test --all' 'git push origin main'; do \
                printf '%s\\n' '────────────────' ' Bash command' ' approve this?' '╌╌╌╌╌╌╌╌╌╌' \" $c\" '╌╌╌╌╌╌╌╌╌╌' ' Do you want to proceed?' ' ❯ 1. Yes' '   2. No'; \
                a=$(dd bs=1 count=1 2>/dev/null); echo \"answer $a to $c\"; done\n\
@@ -4438,4 +4449,185 @@ fn works_on_linear_and_jira_issues() {
     for r in ["eng-1", "eng-2", "again", "proj-45", "proj-46"] {
         s.amux(&["stop", r]);
     }
+}
+
+#[test]
+fn state_hooks_install_and_remove_leave_your_settings_as_they_were() {
+    let s = Sandbox::new("statehooks");
+    let settings = s.home.join(".claude/settings.json");
+    let mine = serde_json::json!({
+        "model": "opus",
+        "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "my-check" }] }] },
+        "permissions": { "allow": ["Bash(npm test)"] }
+    });
+    write(&settings, &serde_json::to_string_pretty(&mine).unwrap());
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap()
+    };
+
+    let st = s.amux(&["state-hooks", "status"]).out;
+    assert!(st.contains("claude: not installed"), "{st}");
+    assert!(st.contains("gemini: no ~/.gemini yet"), "{st}");
+
+    let r = s.amux(&["state-hooks", "install"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(r.out.contains("claude: installed 8 hooks"), "{}", r.out);
+    assert!(r.out.contains("gemini: skipped"), "{}", r.out);
+    let v = read();
+    assert_eq!(v["hooks"]["PreToolUse"][0], mine["hooks"]["PreToolUse"][0]);
+    let cmd = v["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(cmd.ends_with(" __hook claude PermissionRequest"), "{cmd}");
+    assert_eq!(v["model"], "opus");
+    // Twice is the same as once.
+    s.amux(&["state-hooks", "install", "claude"]);
+    assert_eq!(read(), v);
+    assert!(s
+        .amux(&["state-hooks"])
+        .out
+        .contains("claude: installed in ~/.claude/settings.json"));
+    let doctor = s.amux(&["doctor"]).out;
+    assert!(
+        doctor.contains("note state hooks, claude: installed"),
+        "{doctor}"
+    );
+
+    let r = s.amux(&["state-hooks", "remove"]);
+    assert!(r.out.contains("claude: removed 8 hooks"), "{}", r.out);
+    assert_eq!(read(), mine);
+    assert!(s
+        .amux(&["state-hooks", "remove"])
+        .out
+        .contains("claude: nothing to remove"));
+    assert_ne!(s.amux(&["state-hooks", "install", "codex"]).code, 0);
+}
+
+#[test]
+fn the_hook_does_nothing_outside_a_run() {
+    use std::io::Write;
+    let s = Sandbox::new("hooknoop");
+    let names = || -> Vec<_> {
+        let mut v: Vec<_> = fs::read_dir(&s.amux_home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        v.sort();
+        v
+    };
+    let before = names();
+    for run in [None, Some("no-such-run")] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_amux"));
+        cmd.args(["__hook", "claude", "PermissionRequest"])
+            .env("HOME", &s.home)
+            .env("AMUX_HOME", &s.amux_home)
+            .env_remove("AMUX_RUN")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(r) = run {
+            cmd.env("AMUX_RUN", r);
+        }
+        let started = std::time::Instant::now();
+        let mut child = cmd.spawn().unwrap();
+        let _ = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+    // No update check, no scheduler, no files.
+    assert_eq!(before, names());
+}
+
+#[test]
+fn a_run_shows_what_its_state_hooks_report() {
+    let s = Sandbox::new("hookrun");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let r = s.amux_with(
+        &["spawn", "--name", "hk", "fake"],
+        &[("FAKE_HOOK", env!("CARGO_BIN_EXE_amux"))],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let run_json = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/hk/run.json")).unwrap())
+            .unwrap()
+    };
+
+    // PermissionRequest: waiting, with the command it asks about.
+    wait_ps(&s, "hk", "waiting");
+    assert_eq!(run_json()["waiting"]["reason"], "approve Bash: cargo test");
+    assert_eq!(run_json()["waiting"]["source"], "hook");
+    assert_eq!(run_json()["status"]["state"], "blocked");
+    assert_eq!(run_json()["status"]["via"], "hook");
+    let notes = s.home.join("notes");
+    eventually("a notification", || {
+        fs::read_to_string(&notes).is_ok_and(|t| t.contains("approve Bash: cargo test"))
+    });
+    let why = s.amux(&["explain", "hk"]).out;
+    assert!(why.contains("a state hook"), "{why}");
+
+    // Looking around isn't answering: moving through the menu leaves it waiting.
+    assert_eq!(s.amux(&["send", "hk", "--key", "down"]).code, 0);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(run_json()["waiting"]["reason"], "approve Bash: cargo test");
+
+    // Your answer ends the wait; the Stop hook then says the turn is done.
+    assert_eq!(s.amux(&["send", "hk", "y"]).code, 0);
+    eventually("idle", || run_json()["status"]["state"] == "idle");
+    assert!(run_json().get("waiting").is_none());
+    wait_ps(&s, "hk", "idle");
+    s.amux(&["send", "hk", "bye"]);
+    wait_ps(&s, "hk", "exited 4");
+}
+
+#[test]
+fn auto_approved_prompts_a_hook_reported_never_notify() {
+    let s = Sandbox::new("hookallow");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    assert_eq!(s.amux(&["allow", "bash: cargo test*"]).code, 0);
+    let r = s.amux_with(
+        &["spawn", "--name", "hp", "fake"],
+        &[("FAKE_HOOKPERM", env!("CARGO_BIN_EXE_amux"))],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let run_json = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(s.amux_home.join("runs/hp/run.json")).unwrap())
+            .unwrap()
+    };
+    let notes = s.home.join("notes");
+    let read_notes = || fs::read_to_string(&notes).unwrap_or_default();
+
+    // cargo test: the hook reports the block before the prompt shows; auto-approve
+    // answers it, and the permission notification after that is old news. git push
+    // isn't allowed: that one waits for you, and you hear about it once.
+    eventually("git push to wait", || {
+        run_json()["waiting"]["reason"] == "approve Bash: git push origin main"
+    });
+    eventually("a notification", || read_notes().contains("git push"));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let n = read_notes();
+    assert!(!n.contains("cargo test"), "{n}");
+    assert_eq!(n.matches("waiting hp").count(), 1, "{n}");
+    assert!(s
+        .amux(&["peek", "hp"])
+        .out
+        .contains("answer 1 to cargo test --all"));
+
+    // You answer; the notification that follows doesn't bring the wait back.
+    assert_eq!(s.amux(&["send", "hp", "--key", "2"]).code, 0);
+    eventually("answered", || run_json().get("waiting").is_none());
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    assert!(run_json().get("waiting").is_none(), "{}", run_json());
+    assert_eq!(read_notes().matches("waiting hp").count(), 1);
+    s.amux(&["send", "hp", "bye"]);
+    wait_ps(&s, "hp", "exited 5");
 }

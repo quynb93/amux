@@ -61,9 +61,9 @@ pub fn explain_cmd(argv: &[String]) -> Result<i32> {
 pub struct Explanation {
     /// The state as `amux ui` shows it: "waiting 2m", "idle 5s", "stopped"…
     pub label: String,
-    /// What decided it: report, pattern, bell, notification, output, exit, host.
+    /// What decided it: report, hook, pattern, bell, notification, output, exit, host.
     pub source: &'static str,
-    /// Whether the CLI reports its own state (OSC 7501).
+    /// Whether the CLI reports its own state (OSC 7501, or state hooks).
     pub reports: bool,
     pub why: Vec<String>,
     pub how: Vec<String>,
@@ -86,7 +86,17 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
         || run
             .waiting
             .as_ref()
-            .is_some_and(|w| w.source.as_deref() == Some("report"));
+            .is_some_and(|w| matches!(w.source.as_deref(), Some("report" | "hook")));
+    let hooked = run.status.as_ref().is_some_and(|s| s.via.is_some())
+        || run
+            .waiting
+            .as_ref()
+            .is_some_and(|w| w.source.as_deref() == Some("hook"));
+    let by = if hooked {
+        "a state hook (`amux state-hooks`)"
+    } else {
+        "OSC 7501"
+    };
     let age = |t: i64| short_age(now - t);
     let mut why = vec![];
     let mut source = "output";
@@ -148,6 +158,7 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
             (Some(w), _) => {
                 source = match w.source.as_deref() {
                     Some("report") => "report",
+                    Some("hook") => "hook",
                     Some("bell") => "bell",
                     Some("notification") => "notification",
                     Some("limit") => "limit",
@@ -156,14 +167,14 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
                     None => "unknown",
                 };
                 why.push(match source {
-                    "report" => {
+                    "report" | "hook" => {
                         let kind = run
                             .status
                             .as_ref()
                             .and_then(|s| s.kind.as_deref())
                             .map(|k| format!(" ({k})"))
                             .unwrap_or_default();
-                        format!("The CLI said so itself (OSC 7501): it is blocked{kind}: “{}”.", w.reason)
+                        format!("The CLI said so itself ({by}): it is blocked{kind}: “{}”.", w.reason)
                     }
                     "bell" => "The CLI rang the terminal bell, which CLIs do when they need you.".into(),
                     "notification" => format!("The CLI sent a notification: “{}”.", w.reason),
@@ -189,13 +200,15 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
                     age(w.since),
                     if source == "report" {
                         "Its next report ends it."
+                    } else if source == "hook" {
+                        "Its next hook report, or your answer, ends it."
                     } else {
                         "Typing into the run ends it."
                     }
                 ));
             }
             (None, Some(s)) => {
-                source = "report";
+                source = if hooked { "hook" } else { "report" };
                 let msg = s.message.as_deref().map(|m| format!(": “{m}”")).unwrap_or_default();
                 why.push(match s.state.as_str() {
                     "working" => format!("The CLI reports it is working{msg}."),
@@ -203,7 +216,13 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
                     "error" => format!("The CLI reports an error{msg}."),
                     _ => "The CLI reports it is idle, waiting for your next prompt.".into(),
                 });
-                why.push(format!("Reported {} ago (OSC 7501).", age(s.since)));
+                why.push(format!("Reported {} ago ({by}).", age(s.since)));
+                if hooked && s.state == "working" {
+                    why.push(format!(
+                        "A hook can't tell when you interrupt a turn, so it counts as working only while the CLI prints (in the last {} seconds).",
+                        IDLE_AFTER_MS / 1000
+                    ));
+                }
             }
             (None, None) => why.push(match out {
                 Some(t) if now - t < IDLE_AFTER_MS => format!(
@@ -222,7 +241,11 @@ pub fn explain(run: &Run, state: &State, out: Option<i64>, now: i64) -> Explanat
     let patterns = quote_list(&run.waiting_patterns);
     let mut how = vec![];
     if reports {
-        how.push("This CLI reports its own state (OSC 7501), so its reports decide.".into());
+        how.push(if hooked {
+            "This CLI's state hooks report its state (`amux state-hooks`), so their reports decide until it reports with OSC 7501.".into()
+        } else {
+            "This CLI reports its own state (OSC 7501), so its reports decide.".into()
+        });
         how.push(format!(
             "While it reports idle or done, prompts on screen still count: {patterns}."
         ));
@@ -308,11 +331,30 @@ mod tests {
             source: Some("report".into()),
             ..waiting(None)
         });
+        let mut h = r.clone();
+        h.waiting.as_mut().unwrap().source = Some("hook".into());
+        h.status = Some(ProgramStatus {
+            state: "blocked".into(),
+            kind: Some("permission".into()),
+            message: Some("approve Edit: a.rs".into()),
+            since: NOW - 30_000,
+            via: Some("hook".into()),
+        });
+        let e = explain(&h, &State::Running, None, NOW);
+        assert_eq!((e.source, e.reports), ("hook", true));
+        assert!(
+            e.why[0].contains("(a state hook (`amux state-hooks`)): it is blocked (permission)"),
+            "{:?}",
+            e.why
+        );
+        assert!(e.how[0].contains("state hooks"), "{:?}", e.how);
+
         r.status = Some(ProgramStatus {
             state: "blocked".into(),
             kind: Some("permission".into()),
             message: Some("approve Edit: a.rs".into()),
             since: NOW - 30_000,
+            via: None,
         });
         let e = explain(&r, &State::Running, None, NOW);
         assert_eq!((e.source, e.reports), ("report", true));
@@ -337,6 +379,7 @@ mod tests {
             kind: None,
             message: Some("editing a.rs".into()),
             since: NOW - 2_000,
+            via: None,
         });
         let e = explain(&r, &State::Running, Some(NOW - 60_000), NOW);
         assert_eq!(e.label, "working");

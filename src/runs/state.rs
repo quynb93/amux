@@ -68,6 +68,14 @@ pub fn classify(
             let s = status.expect("checked above");
             let age = short_age(now - s.since);
             match s.state.as_str() {
+                // A state hook can't say when you interrupt a turn, so a hook's "working"
+                // only holds while the CLI prints.
+                "working" if s.via.is_some() => match last_output {
+                    Some(t) if now - t >= IDLE_AFTER_MS => {
+                        (Kind::Idle, format!("idle {}", short_age(now - t)))
+                    }
+                    _ => (Kind::Working, "working".into()),
+                },
                 "working" => (Kind::Working, "working".into()),
                 // An error stops the CLI until you step in, but it is still running.
                 "error" => (Kind::Attention, format!("error {age}")),
@@ -186,6 +194,7 @@ mod tests {
             kind: None,
             message: None,
             since: now - 3_000,
+            via: None,
         };
         let c = |s: &ProgramStatus, out: Option<i64>| {
             classify(&State::Running, None, Some(s), out, now)
@@ -207,6 +216,16 @@ mod tests {
         assert_eq!(
             classify(&State::Running, Some(&w), Some(&st("blocked")), None, now),
             (Kind::Attention, "waiting 5s".into())
+        );
+        // A hook's working needs output to back it.
+        let hooked = ProgramStatus {
+            via: Some("hook".into()),
+            ..st("working")
+        };
+        assert_eq!(c(&hooked, Some(now - 1_000)).0, Kind::Working);
+        assert_eq!(
+            c(&hooked, Some(now - 60_000)),
+            (Kind::Idle, "idle 1m".into())
         );
         // A finished run is finished, whatever it last reported.
         assert_eq!(
