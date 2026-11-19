@@ -251,7 +251,7 @@ struct Hub {
     approve_due: bool,
     /// Wakes the hook reader (see `hook_reader`), which otherwise sleeps until a hook
     /// connects: for a held-back block, or output auto-approve hasn't read yet.
-    wake: Option<mpsc::Sender<Option<UnixStream>>>,
+    wake: Option<mpsc::Sender<Option<(UnixStream, Gate)>>>,
 }
 
 /// Starts `amux failover <run> [extra…]` in its own session: failover stops this run,
@@ -658,7 +658,7 @@ fn host(id: &str) -> Result<i32> {
     }
     // State hooks' connections, in the order they came, read off the accept thread so a
     // slow one never holds up a client attaching. It also announces held-back blocks.
-    let (hooks_tx, hooks_rx) = mpsc::channel::<Option<UnixStream>>();
+    let (hooks_tx, hooks_rx) = mpsc::channel::<Option<(UnixStream, Gate)>>();
     lock(&hub).wake = Some(hooks_tx.clone());
     {
         let (master, hub) = (master.clone(), hub.clone());
@@ -1067,7 +1067,7 @@ enum Lead {
 /// only wakes it), announces held-back blocks when their time is up (see `Hub::settle`),
 /// and has auto-approve read the screen once output it skipped has gone quiet. With
 /// nothing of that to do, it sleeps until woken.
-fn hook_reader(rx: &mpsc::Receiver<Option<UnixStream>>, hub: &Mutex<Hub>, master: &File) {
+fn hook_reader(rx: &mpsc::Receiver<Option<(UnixStream, Gate)>>, hub: &Mutex<Hub>, master: &File) {
     let mut timeout = None;
     loop {
         let got = match timeout {
@@ -1075,13 +1075,15 @@ fn hook_reader(rx: &mpsc::Receiver<Option<UnixStream>>, hub: &Mutex<Hub>, master
             None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match got {
-            Ok(Some(stream)) => {
+            // Who sent it is checked here, not in the accept loop: finding out lists the
+            // runs, which mustn't hold up everyone else connecting.
+            Ok(Some((stream, gate))) if permits(&gate, hub, Act::Report) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
                 if let Ok((STATE, data)) = read_frame(&mut &stream) {
                     lock(hub).hook_report(&data);
                 }
             }
-            Ok(None) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
         let mut h = lock(hub);
@@ -1178,16 +1180,14 @@ fn serve(
     hub: &Arc<Mutex<Hub>>,
     master: &Arc<File>,
     pid: u32,
-    hooks: &mpsc::Sender<Option<UnixStream>>,
+    hooks: &mpsc::Sender<Option<(UnixStream, Gate)>>,
 ) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     // Who connected, read first: it may be gone by the time its frames are read.
     let gate = Gate::new(&stream);
     let watching = match leading(&stream) {
         Lead::State => {
-            if permits(&gate, hub, Act::Report) {
-                let _ = hooks.send(Some(stream));
-            }
+            let _ = hooks.send(Some((stream, gate)));
             return;
         }
         Lead::Snapshot => {

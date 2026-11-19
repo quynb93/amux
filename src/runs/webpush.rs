@@ -507,12 +507,14 @@ pub fn deliver(
 ) -> Result<()> {
     // Devices saved before amux knew the push services (or added to the file by hand)
     // get nothing unless they use one. A plain-HTTP local one could only have been
-    // subscribed with the tests' AMUX_WEBPUSH_LOCAL_HTTP, so it's kept.
+    // subscribed with the tests' AMUX_WEBPUSH_LOCAL_HTTP, so it's kept. An HTTPS one to
+    // this machine could have been subscribed by anyone before, so it isn't.
     let allowed = allowed_hosts();
     let subs: Vec<Sub> = load_at(&subs_file())?
         .into_iter()
         .filter(|s| {
-            url::Url::parse(&s.endpoint).is_ok_and(|u| endpoint_allowed(&u, true, &allowed))
+            url::Url::parse(&s.endpoint)
+                .is_ok_and(|u| endpoint_allowed(&u, u.scheme() == "http", &allowed))
         })
         .collect();
     if subs.is_empty() {

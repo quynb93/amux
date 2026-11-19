@@ -150,12 +150,17 @@ fn copy_private(from: &Path, to: &Path, wt: &Path) -> bool {
     let Some(dir) = to.parent() else {
         return false;
     };
-    let _ = std::fs::create_dir_all(dir);
-    let inside = match (dir.canonicalize(), wt.canonicalize()) {
-        (Ok(d), Ok(w)) => d.starts_with(w),
-        _ => false,
+    let Ok(w) = wt.canonicalize() else {
+        return false;
     };
-    if !inside {
+    // The nearest folder that exists, resolved, must be inside `wt` before any folder is
+    // made (a link in the way would make them elsewhere), and `dir` after.
+    let inside = |d: &Path| d.canonicalize().is_ok_and(|d| d.starts_with(&w));
+    if !dir.ancestors().find(|a| a.exists()).is_some_and(inside) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(dir);
+    if !inside(dir) {
         return false;
     }
     let Ok(mut src) = std::fs::OpenOptions::new()
