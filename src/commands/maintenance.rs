@@ -162,6 +162,15 @@ pub fn doctor_cmd() -> Result<i32> {
             ),
         );
     }
+    #[cfg(unix)]
+    for (ok, line) in super::state_hooks::status_lines() {
+        let hint = if ok {
+            ""
+        } else {
+            "; `amux state-hooks install` adds them"
+        };
+        println!("note state hooks, {line}{hint}");
+    }
     let mut home_envs: Vec<&str> = providers.iter().map(|p| p.home_env.as_str()).collect();
     home_envs.sort_unstable();
     home_envs.dedup();

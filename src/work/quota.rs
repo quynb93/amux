@@ -673,6 +673,7 @@ mod tests {
             kind: None,
             message: None,
             since: 0,
+            via: None,
         };
         let now = 100_000;
         // Reported state decides when the CLI reports it.

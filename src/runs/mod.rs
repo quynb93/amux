@@ -16,6 +16,7 @@ pub mod push;
 pub mod sandbox;
 pub mod screen;
 pub mod state;
+pub mod state_hooks;
 
 use crate::store::{read_json, write_json};
 use crate::{fsx, paths, time};
@@ -113,6 +114,9 @@ pub struct ProgramStatus {
     pub message: Option<String>,
     /// When it entered this state.
     pub since: i64,
+    /// "hook" when a state hook reported it (`amux state-hooks`); absent for OSC 7501.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -121,7 +125,7 @@ pub struct Waiting {
     /// The prompt text or notification message that showed it.
     pub reason: String,
     pub since: i64,
-    /// What showed it: report (OSC 7501), pattern, bell or notification. Absent from
+    /// What showed it: report (OSC 7501), hook, pattern, bell or notification. Absent from
     /// runs started by amux 0.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -321,6 +325,9 @@ pub const RESIZE: u8 = 1;
 /// Payload `[1]`: this client only watches (a preview), so the host still notifies you.
 /// `[0]`: a person is attached again. Hosts before 0.5 ignore it.
 pub const WATCH: u8 = 2;
+/// A state hook's report (`amux __hook`): JSON `{"state", "kind", "message"}`, the same
+/// states as OSC 7501. Sent as the only frame of its connection. Older hosts ignore it.
+pub const STATE: u8 = 3;
 const MAX_FRAME: usize = 1 << 20;
 
 pub fn write_frame(w: &mut impl Write, kind: u8, data: &[u8]) -> io::Result<()> {

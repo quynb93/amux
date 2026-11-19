@@ -110,12 +110,75 @@ pub fn parse(osc: &[u8]) -> Option<Osc> {
     };
     Some(Osc::Report(Report {
         state: state.to_string(),
-        kind: kind
-            .filter(|_| state == "blocked")
-            .filter(|k| matches!(*k, "permission" | "question" | "auth"))
-            .map(str::to_string),
+        kind: blocked_kind(state, kind),
         message,
     }))
+}
+
+/// The kind of a block: one of the known kinds, and only with `blocked`.
+fn blocked_kind(state: &str, kind: Option<&str>) -> Option<String> {
+    kind.filter(|_| state == "blocked")
+        .filter(|k| matches!(*k, "permission" | "question" | "auth"))
+        .map(str::to_string)
+}
+
+/// A state a state hook reported, with what the host needs to weigh it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookReport {
+    pub report: Report,
+    /// The tool call the event is about (its name and a hash of its input), for events
+    /// about one: a block on one tool call isn't ended by another one finishing.
+    pub tool: Option<String>,
+    /// This block repeats one an earlier hook already reported (Claude Code's permission
+    /// notification follows its PermissionRequest hook): if that block has just been
+    /// answered, it is old news.
+    pub echo: bool,
+}
+
+/// A state reported by a state hook (`amux __hook`, see state_hooks.rs) in a `STATE` frame:
+/// `{"state": "blocked", "kind": "permission", "message": "approve Bash: cargo test"}`,
+/// optionally with `"tool"` and `"echo"` (see `HookReport`).
+/// The same states and kinds as OSC 7501; `clear` isn't one. The message loses control
+/// characters and is cut at 2 KB, as OSC 7501's must be.
+pub fn from_hook(payload: &[u8]) -> Option<HookReport> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let state = v.get("state")?.as_str()?;
+    if state == "clear" || !STATES.contains(&state) {
+        return None;
+    }
+    let kind = blocked_kind(state, v.get("kind").and_then(|k| k.as_str()));
+    let message = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map(|m| {
+            let mut s: String = m
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            if s.len() > MAX_MSG {
+                let mut end = MAX_MSG;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+            s.trim().to_string()
+        })
+        .filter(|m| !m.is_empty());
+    let tool = v
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty() && t.len() <= 256)
+        .map(str::to_string);
+    Some(HookReport {
+        report: Report {
+            state: state.to_string(),
+            kind,
+            message,
+        },
+        tool,
+        echo: v.get("echo").and_then(|e| e.as_bool()) == Some(true),
+    })
 }
 
 /// Base64 to UTF-8 text without control characters, as the spec requires of `msg`.
@@ -216,6 +279,36 @@ mod tests {
         // Other OSCs aren't ours.
         assert_eq!(parse(b"0;title"), None);
         assert_eq!(parse(b"9;hello"), None);
+    }
+
+    #[test]
+    fn reads_hook_reports() {
+        let h = from_hook(
+            br#"{"state":"blocked","kind":"permission","message":" approve\nBash ","tool":"Bash:1f","echo":true}"#,
+        )
+        .unwrap();
+        assert_eq!((h.tool.as_deref(), h.echo), (Some("Bash:1f"), true));
+        let r = h.report;
+        assert_eq!(r.state, "blocked");
+        assert_eq!(r.kind.as_deref(), Some("permission"));
+        assert_eq!(r.message.as_deref(), Some("approve Bash"));
+        // kind only counts with blocked; an empty message is none.
+        let h = from_hook(br#"{"state":"idle","kind":"permission","message":""}"#).unwrap();
+        assert_eq!((h.tool, h.echo), (None, false));
+        assert_eq!((h.report.kind, h.report.message), (None, None));
+        assert!(from_hook(br#"{"state":"clear"}"#).is_none());
+        assert!(from_hook(br#"{"state":"sleeping"}"#).is_none());
+        assert!(from_hook(b"not json").is_none());
+        let long = format!(r#"{{"state":"blocked","message":"{}"}}"#, "é".repeat(2000));
+        assert!(
+            from_hook(long.as_bytes())
+                .unwrap()
+                .report
+                .message
+                .unwrap()
+                .len()
+                <= MAX_MSG
+        );
     }
 
     #[test]

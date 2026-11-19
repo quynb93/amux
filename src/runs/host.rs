@@ -3,12 +3,13 @@
 //! clients, and passes client keystrokes and window sizes back to the CLI. It exits when
 //! the CLI does, after recording the exit code.
 
-use super::detect::{Change, Detector};
+use super::detect::{Change, Detector, Keys, Source};
 use super::notify::Notifier;
 use super::program::{Report, PROBE_REPLY};
 use super::screen;
 use super::{
-    load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, WATCH,
+    load, parse_size, read_frame, run_dir, save, ProgramStatus, Run, Waiting, INPUT, RESIZE, STATE,
+    WATCH,
 };
 use crate::work::{approve, slots};
 use crate::{fsx, time};
@@ -22,9 +23,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const LOG_ROTATE: u64 = 4 * 1024 * 1024;
+/// How long a hook-reported permission block is held back for auto-approve to answer it
+/// (see `Hub::apply`).
+const GRACE: Duration = Duration::from_millis(1500);
 
 pub fn main(args: &[String]) -> i32 {
     let Some(id) = args.first() else {
@@ -126,6 +130,12 @@ struct Hub {
     /// started once at a time. Cleared when that failover fails, so a later limit can
     /// still move the run.
     moving: Arc<AtomicBool>,
+    /// That prompt is on screen and auto-approve didn't answer it: it waits for you.
+    held: bool,
+    /// When auto-approve last answered a prompt.
+    auto_answered: Option<Instant>,
+    /// A hook-reported block not announced yet, and since when (see `apply`).
+    pending: Option<(String, Instant)>,
 }
 
 /// Starts `amux failover <run> [extra…]` in its own session: failover stops this run,
@@ -175,6 +185,9 @@ impl Default for Hub {
             rules_at: 0,
             judged: None,
             moving: Arc::new(AtomicBool::new(false)),
+            held: false,
+            auto_answered: None,
+            pending: None,
         }
     }
 }
@@ -193,6 +206,7 @@ impl Hub {
             return;
         };
         let now = time::now_ms();
+        let via = self.detector.hooks_only().then(|| "hook".to_string());
         let old = self.run.status.take();
         self.run.status = record.map(|r| ProgramStatus {
             since: match &old {
@@ -202,8 +216,20 @@ impl Hub {
             state: r.state,
             kind: r.kind,
             message: r.message,
+            via,
         });
         let _ = save(&self.run);
+    }
+
+    /// Records a state a state hook reported (`amux __hook`). OSC 7501 reports win.
+    fn hook_report(&mut self, payload: &[u8]) {
+        let Some(r) = super::program::from_hook(payload) else {
+            return;
+        };
+        let change = self.detector.hook(r);
+        let record = self.detector.take_record();
+        self.set_status(record);
+        self.apply(change);
     }
 
     /// The account hit its usage limit: the run waits (with the CLI's message), the
@@ -230,9 +256,8 @@ impl Hub {
         }
     }
 
-    /// Answers a permission prompt on the screen when the rules allow what it asks, and
-    /// logs each prompt it judged. True when it answered.
-    fn auto_approve(&mut self, mut master: &File) -> bool {
+    /// Whether auto-approve may answer prompts in this run.
+    fn auto_approving(&mut self) -> bool {
         if self.run.auto_approve == Some(false) {
             return false;
         }
@@ -241,11 +266,19 @@ impl Hub {
             self.rules = approve::load();
             self.rules_at = now;
         }
-        if self.rules.allow.is_empty() {
+        !self.rules.allow.is_empty()
+    }
+
+    /// Answers a permission prompt on the screen when the rules allow what it asks, and
+    /// logs each prompt it judged. True when it answered.
+    fn auto_approve(&mut self, mut master: &File) -> bool {
+        if !self.auto_approving() {
             return false;
         }
+        let now = time::now_ms();
         let Some(ask) = approve::read_prompt(&screen::text(&self.screen)) else {
             self.judged = None;
+            self.held = false;
             return false;
         };
         let label = ask.label();
@@ -259,6 +292,10 @@ impl Hub {
             approve::Verdict::Ask(why) => ("asked", why),
         };
         let approved = action == "approved" && master.write_all(ask.yes.as_bytes()).is_ok();
+        self.held = !approved;
+        if approved {
+            self.auto_answered = Some(Instant::now());
+        }
         let line = serde_json::json!({
             "at": now, "kind": ask.kind, "subject": ask.subject,
             "action": if action == "approved" && !approved { "failed" } else { action },
@@ -280,24 +317,72 @@ impl Hub {
 
     /// Records a change in whether the CLI is waiting for you, and notifies you when it
     /// starts waiting and no terminal is attached to see it.
+    ///
+    /// Claude Code runs its PermissionRequest hook before the prompt shows, so a permission
+    /// block a hook reports may be one auto-approve is about to answer. While auto-approve
+    /// is on, such a block is held back (`pending`) until the prompt shows and auto-approve
+    /// doesn't answer it, or GRACE passes; answered meanwhile, it is never announced.
     fn apply(&mut self, change: Option<Change>) {
         match change {
             None => return,
             Some(Change::Waiting(reason)) => {
-                crate::plugins::hook("waiting", &self.run.id, &reason);
-                if !self.attached() {
-                    let msg = format!("Waiting for you: {reason}");
-                    self.notifier
-                        .send(&self.run.id, "waiting", &self.title(), &msg);
+                if self.detector.source() == Source::Hook
+                    && self.detector.blocked_kind() == Some("permission")
+                    && !self.held
+                    && self.auto_approving()
+                {
+                    self.pending = Some((reason, Instant::now()));
+                    return;
                 }
-                self.run.waiting = Some(Waiting {
-                    reason,
-                    since: time::now_ms(),
-                    source: Some(self.detector.source().as_str().into()),
-                });
+                self.announce(reason);
             }
-            Some(Change::Cleared) => self.run.waiting = None,
+            Some(Change::Cleared) => {
+                self.pending = None;
+                self.run.waiting = None;
+            }
         }
+        let _ = save(&self.run);
+    }
+
+    fn announce(&mut self, reason: String) {
+        crate::plugins::hook("waiting", &self.run.id, &reason);
+        if !self.attached() {
+            let msg = format!("Waiting for you: {reason}");
+            self.notifier
+                .send(&self.run.id, "waiting", &self.title(), &msg);
+        }
+        self.run.waiting = Some(Waiting {
+            reason,
+            since: time::now_ms(),
+            source: Some(self.detector.source().as_str().into()),
+        });
+    }
+
+    /// Announces a held-back block once auto-approve has passed on its prompt, or GRACE
+    /// has passed. A block that came in just after auto-approve answered, with no prompt
+    /// on screen by now, was about that prompt: it is dropped as answered.
+    fn settle(&mut self, now: Instant) {
+        let Some((_, at)) = &self.pending else {
+            return;
+        };
+        let at = *at;
+        if !self.held && now.saturating_duration_since(at) < GRACE {
+            return;
+        }
+        let Some((reason, _)) = self.pending.take() else {
+            return;
+        };
+        let late = self
+            .auto_answered
+            .is_some_and(|t| at.saturating_duration_since(t) < GRACE);
+        if !self.held && late && approve::read_prompt(&screen::text(&self.screen)).is_none() {
+            let change = self.detector.answered();
+            let record = self.detector.take_record();
+            self.set_status(record);
+            self.apply(change);
+            return;
+        }
+        self.announce(reason);
         let _ = save(&self.run);
     }
 }
@@ -406,11 +491,18 @@ fn host(id: &str) -> Result<i32> {
             let _ = done_tx.send(());
         });
     }
+    // State hooks' connections, in the order they came, read off the accept thread so a
+    // slow one never holds up a client attaching. It also announces held-back blocks.
+    let (hooks_tx, hooks_rx) = mpsc::channel::<UnixStream>();
+    {
+        let hub = hub.clone();
+        std::thread::spawn(move || hook_reader(&hooks_rx, &hub));
+    }
     {
         let (master, hub) = (master.clone(), hub.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                serve(stream, &hub, &master, pid);
+                serve(stream, &hub, &master, pid, &hooks_tx);
             }
         });
     }
@@ -491,7 +583,13 @@ fn watchdog(
             if h.run.exit_code.is_some() {
                 return;
             }
-            let reported = h.run.status.as_ref().map(|s| s.state.as_str());
+            // A hook's "working" isn't ended by an interrupted turn, so output decides then.
+            let reported = h
+                .run
+                .status
+                .as_ref()
+                .filter(|s| s.via.is_none() || s.state != "working")
+                .map(|s| s.state.as_str());
             match reported {
                 Some("working") => true,
                 Some(_) => false,
@@ -705,12 +803,17 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         if h.auto_approve(master) {
             // Answered for you: not waiting after all, and no one needs to hear about it.
             let cleared = h.detector.answered();
+            // A hook-reported block goes back to working: record that too.
+            let record = h.detector.take_record();
+            h.set_status(record);
+            h.pending = None;
             if h.run.waiting.is_some() {
                 h.apply(cleared);
             }
         } else {
             h.apply(change);
         }
+        h.settle(Instant::now());
         if let Some(msg) = h.detector.take_limit() {
             h.limited(&msg);
         }
@@ -724,10 +827,42 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
     }
 }
 
+/// What a client's first frame says about it.
+enum Lead {
+    /// WATCH: a preview, or (false) a person.
+    Watch(bool),
+    /// A state hook's report: the client wants nothing else, not even the screen.
+    State,
+    Other,
+}
+
+/// Reads state hooks' reports, one connection at a time in the order they came, and
+/// announces held-back blocks when their time is up (see `Hub::settle`).
+fn hook_reader(rx: &mpsc::Receiver<UnixStream>, hub: &Mutex<Hub>) {
+    loop {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(stream) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                if let Ok((STATE, data)) = read_frame(&mut &stream) {
+                    lock(hub).hook_report(&data);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        let mut h = lock(hub);
+        if h.run.exit_code.is_some() {
+            return;
+        }
+        h.settle(Instant::now());
+    }
+}
+
 /// A client may send WATCH as its first frame. It is read before the replay, so a preview
-/// never counts as attached, not even while the replay is being sent. Clients that send
-/// something else first (`amux attach` sends RESIZE) are left alone.
-fn leading_watch(stream: &UnixStream) -> bool {
+/// never counts as attached, not even while the replay is being sent. A state hook sends
+/// one STATE frame and goes. Clients that send something else first (`amux attach` sends
+/// RESIZE) are left alone.
+fn leading(stream: &UnixStream) -> Lead {
     let mut head = [0u8; 6];
     let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
     let n = unsafe {
@@ -738,11 +873,21 @@ fn leading_watch(stream: &UnixStream) -> bool {
             libc::MSG_PEEK,
         )
     };
+    let head = &head[..n.max(0) as usize];
+    let lead = if head.len() >= 5 && head[0] == STATE {
+        // Its body is read off this thread (see `hook_reader`).
+        Lead::State
+    } else {
+        match watch_frame(head) {
+            Some(on) => {
+                let mut frame = [0u8; 6];
+                Lead::Watch((&*stream).read_exact(&mut frame).is_ok() && on)
+            }
+            None => Lead::Other,
+        }
+    };
     let _ = stream.set_read_timeout(None);
-    match watch_frame(&head[..n.max(0) as usize]) {
-        Some(on) => (&*stream).read_exact(&mut head).is_ok() && on,
-        None => false,
-    }
+    lead
 }
 
 /// The value of a complete WATCH frame.
@@ -757,12 +902,26 @@ fn lock(hub: &Mutex<Hub>) -> std::sync::MutexGuard<'_, Hub> {
     hub.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32) {
+fn serve(
+    stream: UnixStream,
+    hub: &Arc<Mutex<Hub>>,
+    master: &Arc<File>,
+    pid: u32,
+    hooks: &mpsc::Sender<UnixStream>,
+) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let watching = match leading(&stream) {
+        Lead::State => {
+            let _ = hooks.send(stream);
+            return;
+        }
+        Lead::Watch(on) => on,
+        Lead::Other => false,
+    };
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let watching = Arc::new(AtomicBool::new(leading_watch(&stream)));
+    let watching = Arc::new(AtomicBool::new(watching));
     {
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
         // The current screen first, then live output from the same point on. The emulator
@@ -781,14 +940,22 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
     let (master, hub) = (master.clone(), hub.clone());
     std::thread::spawn(move || {
         let mut stream = stream;
+        let mut keys = Keys::default();
         while let Ok((kind, data)) = read_frame(&mut stream) {
             match kind {
                 INPUT => {
                     if (&*master).write_all(&data).is_err() {
                         break;
                     }
+                    // Focus reports and moving through a menu don't answer anything.
+                    if !keys.answers(&data) {
+                        continue;
+                    }
                     let mut h = lock(&hub);
                     let change = h.detector.answered();
+                    // A hook-reported block goes back to working: record that too.
+                    let record = h.detector.take_record();
+                    h.set_status(record);
                     h.apply(change);
                 }
                 RESIZE => {
@@ -805,6 +972,12 @@ fn serve(stream: UnixStream, hub: &Arc<Mutex<Hub>>, master: &Arc<File>, pid: u32
                     }
                 }
                 WATCH => watching.store(data.first() == Some(&1), Ordering::Relaxed),
+                // A state hook whose frame came too late for `leading`: it isn't a
+                // person attached, so it mustn't hold back notifications.
+                STATE => {
+                    watching.store(true, Ordering::Relaxed);
+                    lock(&hub).hook_report(&data);
+                }
                 _ => {}
             }
         }

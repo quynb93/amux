@@ -39,6 +39,8 @@ mod commands {
     #[cfg(unix)]
     pub mod slot;
     #[cfg(unix)]
+    pub mod state_hooks;
+    #[cfg(unix)]
     pub mod team;
     #[cfg(unix)]
     pub mod theme;
@@ -203,6 +205,9 @@ Maintenance:
   amux phone ntfy|pushover|webhook|test|off   Notifications on your phone when a run needs you,
                                            stalls, hits a limit, ends, or its tests/CI finish
   amux skill [--install]                   The agent skill for running other agents with amux
+  amux state-hooks [status] | install | remove [claude|gemini]
+      Hooks in Claude Code's and Gemini CLI's settings that tell amux exactly when a run
+      works, waits for you (with the prompt's message) or is done. Only inside amux runs.
   amux plugin list | new <name> | run <name>   Plugins (`amux <name>`) and hooks (~/.amux/hooks)
   amux update [--check | --patterns]       Install the latest amux release (--check: only look;
                                            --patterns: fetch the latest prompt and limit text)
@@ -234,6 +239,12 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         // Internal: Claude Code's status line while `amux usage --track` is on.
         #[cfg(unix)]
         Some("__statusline") => return Ok(commands::usage::statusline_main()),
+        // Internal: a state hook in Claude Code's or Gemini CLI's settings
+        // (`amux state-hooks`). Runs for every session, so it does nothing else first.
+        #[cfg(unix)]
+        Some("__hook") => return Ok(runs::state_hooks::hook_main(rest)),
+        #[cfg(not(unix))]
+        Some("__hook") => return Ok(0),
         Some("--version" | "-v" | "version") => {
             println!("{}", update::version());
             return Ok(0);
@@ -297,6 +308,8 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "explain" => commands::explain::explain_cmd(rest),
         #[cfg(unix)]
         "slot" => commands::slot::slot_cmd(rest),
+        #[cfg(unix)]
+        "state-hooks" => commands::state_hooks::state_hooks_cmd(rest),
         #[cfg(unix)]
         "slots" => commands::slot::slots_cmd(rest),
         #[cfg(unix)]
@@ -368,7 +381,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "review" | "usage" | "failover" | "gc"
         | "try" | "compare" | "pick" | "open" | "note" | "notes" | "broadcast" | "revive"
-        | "phone" | "theme" | "themes" | "tracker" | "trackers" => {
+        | "phone" | "theme" | "themes" | "tracker" | "trackers" | "state-hooks" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {
