@@ -165,12 +165,7 @@ impl DropJob {
         };
         let fresh = crate::runs::load(&id).unwrap_or(self.run);
         let live = fresh.state() == crate::runs::State::Running;
-        let mut say = format!("Dropped {} from {id}", done.summary());
-        say.push_str(&match (&done.commit, &done.commit_error) {
-            (Some(c), _) => format!(", committed as {c}."),
-            (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
-            (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
-        });
+        let say = dropped_say(&id, &done.summary(), &done.commit, &done.commit_error);
         DropDone {
             id,
             ok: true,
@@ -207,15 +202,8 @@ impl DropJob {
                 }
             }
         };
-        let mut say = format!(
-            "Dropped {} from {id}",
-            hunks::counted(done.hunks, done.files)
-        );
-        say.push_str(&match (&done.commit, &done.commit_error) {
-            (Some(c), _) => format!(", committed as {c}."),
-            (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
-            (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
-        });
+        let summary = hunks::counted(done.hunks, done.files);
+        let mut say = dropped_say(&id, &summary, &done.commit, &done.commit_error);
         if done.told {
             say.push_str(" Told the agent.");
         }
@@ -235,6 +223,21 @@ impl DropJob {
             view,
         }
     }
+}
+
+/// "Dropped 2 hunks in 1 file from w, committed as abc123."
+fn dropped_say(
+    id: &str,
+    summary: &str,
+    commit: &Option<String>,
+    commit_error: &Option<String>,
+) -> String {
+    let how = match (commit, commit_error) {
+        (Some(c), _) => format!(", committed as {c}."),
+        (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
+        (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
+    };
+    format!("Dropped {summary} from {id}{how}")
 }
 
 /// One screen row: a diff line, or a comment shown under it.
@@ -613,7 +616,6 @@ impl ReviewView {
         if mine.is_empty() {
             return Outcome::Say("No unsent comment on this line.".into(), true);
         }
-        let n = mine.len();
         let done = match &self.remote {
             None => {
                 let mut i = 0;
@@ -622,20 +624,32 @@ impl ReviewView {
                     i += 1;
                     keep
                 });
-                review::save(&self.id, &self.comments)
+                review::save(&self.id, &self.comments).map(|()| mine.len())
             }
-            // `amux comments --rm` there, last first so the numbers stay right.
+            // `amux comments --rm` there, numbered as the comments are there now (one
+            // added, removed or sent since they were read here would shift or change
+            // them), last first so the numbers stay right.
             Some(r) => {
-                let done = mine.iter().rev().try_for_each(|i| {
-                    r.output(&["comments", &r.run, "--rm", &(i + 1).to_string()])
-                        .map(|_| ())
+                let gone: Vec<Comment> = mine.iter().map(|i| self.comments[*i].clone()).collect();
+                let done = r.comments().and_then(|now| {
+                    let at: Vec<usize> = now
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| gone.contains(c))
+                        .map(|(i, _)| i)
+                        .collect();
+                    at.iter().rev().try_for_each(|i| {
+                        r.output(&["comments", &r.run, "--rm", &(i + 1).to_string()])
+                            .map(|_| ())
+                    })?;
+                    Ok(at.len())
                 });
                 self.comments = self.load_comments();
                 done
             }
         };
         match done {
-            Ok(()) => Outcome::Say(
+            Ok(n) => Outcome::Say(
                 format!("Deleted {n} comment{}.", if n == 1 { "" } else { "s" }),
                 false,
             ),
@@ -664,11 +678,13 @@ impl ReviewView {
         }
         if self.confirm {
             let (h, f) = self.marked_counts();
-            let tell = if self.run.state() == crate::runs::State::Running {
-                " and tell its agent"
-            } else {
-                ""
+            // A remote run's pids are on its machine, so `state()` can't be asked here:
+            // it is live there unless it was listed as ended.
+            let live = match self.remote {
+                None => self.run.state() == crate::runs::State::Running,
+                Some(_) => self.run.exit_code.is_none() && self.run.error.is_none(),
             };
+            let tell = if live { " and tell its agent" } else { "" };
             let mut v = vec![span(
                 format!(
                     " Drop {} from {}'s worktree{tell}? ",

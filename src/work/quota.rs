@@ -327,17 +327,14 @@ fn held_sessions(pid: u32, home: &Path) -> Vec<(PathBuf, CodexMeta)> {
     if !crate::runs::alive(pid) {
         return vec![];
     }
-    let mut held: Vec<(PathBuf, CodexMeta)> =
-        crate::runs::procs::held_under(pid, &home.join("sessions"))
-            .into_iter()
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
-            })
-            .filter_map(|p| codex_meta(&p).map(|m| (p, m)))
-            .filter(|(_, m)| !m.child)
-            .collect();
+    let mut held = crate::runs::procs::held_under(pid, &home.join("sessions"), |p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+            .then(|| codex_meta(p))
+            .flatten()
+            .filter(|m| !m.child)
+    });
     // The session it started with before one it started later (`/new`).
     held.sort_by_key(|(_, m)| m.at);
     held
@@ -360,17 +357,20 @@ fn held_sessions(pid: u32, home: &Path) -> Vec<(PathBuf, CodexMeta)> {
 pub fn codex_rollout_of(run: &Run, home: &Path, claimed: &[String]) -> Option<(PathBuf, String)> {
     use crate::sessions::{mtime_ms, walk};
     let since = run.started_at - 60_000;
-    let mut files = Vec::new();
-    walk(
-        &home.join("sessions"),
-        &|n| n.ends_with(".jsonl"),
-        3,
-        &mut files,
-    );
-    let recent = files.into_iter().filter(|p| mtime_ms(p) >= since);
+    // Listed only when needed: a CLI that holds its rollout open doesn't need it.
+    let recent = || {
+        let mut files = Vec::new();
+        walk(
+            &home.join("sessions"),
+            &|n| n.ends_with(".jsonl"),
+            3,
+            &mut files,
+        );
+        files.into_iter().filter(move |p| mtime_ms(p) >= since)
+    };
     if let Some(id) = &run.session {
         // Its file name ends with the thread id (or `<id>_<rollout id>` after a revert).
-        return recent
+        return recent()
             .filter(|p| p.to_string_lossy().contains(id.as_str()))
             .find(|p| codex_meta(p).is_some_and(|m| &m.id == id))
             .map(|p| (p, id.clone()));
@@ -383,7 +383,7 @@ pub fn codex_rollout_of(run: &Run, home: &Path, claimed: &[String]) -> Option<(P
     }
     // The slack covers a run record written just after its CLI started.
     let start = run.started_at - 2_000;
-    recent
+    recent()
         .filter_map(|p| codex_meta(&p).map(|m| (m, p)))
         .filter(|(m, _)| m.cwd == run.cwd && !m.child && m.at >= start)
         .filter(|(m, _)| !claimed.contains(&m.id))
