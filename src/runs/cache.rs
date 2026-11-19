@@ -72,18 +72,23 @@ impl RunFiles {
         let Ok(rd) = std::fs::read_dir(crate::paths::runs_dir()) else {
             return vec![];
         };
+        let mut dirs = std::collections::HashSet::new();
         let mut out: Vec<Run> = rd
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let id = e.file_name().to_string_lossy().into_owned();
-                let path = e.path().join("run.json");
-                self.runs.get(path, || super::load(&id).ok())
+                let dir = e.path();
+                let run = self
+                    .runs
+                    .get(dir.join("run.json"), || super::load(&id).ok());
+                dirs.insert(dir);
+                run
             })
             .collect();
         out.sort_by_key(|r| (r.started_at, r.id.clone()));
-        // Forget runs that are gone.
-        let ids: std::collections::HashSet<PathBuf> = out.iter().map(|r| run_dir(&r.id)).collect();
-        let keep = |p: &Path| p.parent().is_some_and(|d| ids.contains(d));
+        // Forget runs that are gone. A folder whose run.json can't be read stays, so it
+        // isn't parsed again until it changes.
+        let keep = |p: &Path| p.parent().is_some_and(|d| dirs.contains(d));
         self.runs.retain(keep);
         self.verify.retain(keep);
         self.pr.retain(keep);

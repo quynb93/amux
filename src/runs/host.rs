@@ -449,14 +449,16 @@ impl Hub {
     }
 
     /// New output came: whether auto-approve should read the screen now. Otherwise the
-    /// hook reader reads it once the output goes quiet.
-    fn approve_for(&mut self, chunk: &[u8]) -> bool {
+    /// hook reader reads it once the output goes quiet. `prompt`: the detector has just
+    /// seen a prompt, which must not be announced before auto-approve has had its look.
+    fn approve_for(&mut self, chunk: &[u8], prompt: bool) -> bool {
         if !self.auto_approving() {
             return false;
         }
-        let likely = [&b"Do you want"[..], b"1. Yes"]
-            .iter()
-            .any(|w| memchr::memmem::find(chunk, w).is_some());
+        let likely = prompt
+            || [&b"Do you want"[..], b"1. Yes"]
+                .iter()
+                .any(|w| memchr::memmem::find(chunk, w).is_some());
         if likely || self.approve_at.is_none_or(|t| t.elapsed() >= APPROVE_EVERY) {
             return true;
         }
@@ -1031,7 +1033,8 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         let record = h.detector.take_record();
         h.set_status(record);
         // Answered for you: not waiting after all (see `approve_now`).
-        if !(h.approve_for(chunk) && h.approve_now(master)) {
+        let prompt = matches!(change, Some(Change::Waiting(_)));
+        if !(h.approve_for(chunk, prompt) && h.approve_now(master)) {
             h.apply(change);
         }
         h.settle(Instant::now());
@@ -1264,6 +1267,10 @@ fn serve(
                 _ => {}
             }
         }
+        // Gone (or done sending): no one is at this terminal any more. Its output is only
+        // queued now, so a failed write no longer drops it before the next prompt is
+        // announced; without this it would hold back that prompt's notification.
+        watching.store(true, Ordering::Relaxed);
     });
 }
 
