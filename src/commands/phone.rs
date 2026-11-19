@@ -6,7 +6,7 @@ use crate::{paths, util};
 use anyhow::{bail, Result};
 
 const USAGE: &str = "amux phone [webpush | ntfy [<topic>|<url>] [--token <t>] | pushover <user-key> [--token <app-token>] | webhook <url>
-            | open <url>|off | events <event,...>|all | brief on|off | test | off]";
+            | open <url>|off | events <event,...>|all | brief on|off | test | devices [rm <n>|all] | off]";
 
 pub fn phone_cmd(argv: &[String]) -> Result<i32> {
     let sub = argv.first().map(String::as_str);
@@ -177,6 +177,7 @@ pub fn phone_cmd(argv: &[String]) -> Result<i32> {
             println!("Sent. If nothing arrived, check the app's subscription or settings.");
             Ok(0)
         }
+        Some("devices") => devices(&positional),
         Some("off") => {
             match std::fs::remove_file(push::file()) {
                 Ok(()) => println!("Phone notifications are off."),
@@ -185,6 +186,67 @@ pub fn phone_cmd(argv: &[String]) -> Result<i32> {
             Ok(0)
         }
         Some(_) => bail!("Usage: {USAGE}"),
+    }
+}
+
+/// `amux phone devices [rm <n>|all]`: the browsers that turned on Web Push, or forget one
+/// (it can turn notifications on again in the app) or all of them.
+fn devices(positional: &[&String]) -> Result<i32> {
+    let subs = webpush::load_subs();
+    match positional.first().map(|s| s.as_str()) {
+        None => {
+            if subs.is_empty() {
+                println!("No device has turned notifications on.");
+            }
+            let now = crate::time::now_ms();
+            for (i, s) in subs.iter().enumerate() {
+                let host = url::Url::parse(&s.endpoint)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .unwrap_or_default();
+                let name = if s.device.is_empty() {
+                    "browser"
+                } else {
+                    &s.device
+                };
+                let added = if s.added > 0 {
+                    format!(", added {}", crate::util::ago(s.added, now))
+                } else {
+                    String::new()
+                };
+                println!(
+                    "{:>2}. {}  ({}{added})",
+                    i + 1,
+                    crate::util::clean(name, false),
+                    crate::util::clean(&host, false)
+                );
+            }
+            Ok(0)
+        }
+        Some("rm") => match positional.get(1).map(|s| s.as_str()) {
+            Some("all") => {
+                let n = webpush::remove_all()?;
+                println!("Forgot {n} device{}.", if n == 1 { "" } else { "s" });
+                Ok(0)
+            }
+            Some(n) => {
+                let i: usize = n
+                    .parse()
+                    .ok()
+                    .filter(|i| *i >= 1 && *i <= subs.len())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No device {n}: `amux phone devices` lists them (1 to {}).",
+                            subs.len()
+                        )
+                    })?;
+                webpush::remove(&subs[i - 1].endpoint)?;
+                println!("Forgot device {i}. It can turn notifications on again in the app.");
+                Ok(0)
+            }
+            None => bail!("Usage: amux phone devices rm <n>|all"),
+        },
+        Some(_) => bail!("Usage: amux phone devices [rm <n>|all]"),
     }
 }
 

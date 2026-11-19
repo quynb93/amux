@@ -952,6 +952,17 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
         bail!("--tailscale brings its own HTTPS: leave out --tls, --cert and --key.");
     }
     let token = token(renew)?;
+    if renew {
+        // A device subscribed with the old link would go on getting notifications (and
+        // with them the runs' names and questions): it subscribes again with the new one.
+        let n = crate::runs::webpush::remove_all().unwrap_or(0);
+        if n > 0 {
+            say!(
+                "New token. Forgot the {n} device{} that had turned on notifications: turn them on again in the app.",
+                if n == 1 { "" } else { "s" }
+            );
+        }
+    }
     let listener =
         TcpListener::bind(&listen).with_context(|| format!("could not listen on {listen}"))?;
     let addr = listener.local_addr()?;
