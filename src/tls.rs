@@ -199,6 +199,77 @@ fn der_is_leaf(der: &[u8]) -> bool {
     len == 0 || !(der.get(i + 2) == Some(&0x01) && der.get(i + 4).is_some_and(|v| *v != 0))
 }
 
+/// The DNS names in a PEM certificate's subjectAltName, lowercase: the names
+/// `amux serve` answers to with your own certificate.
+pub fn dns_names(cert: &Path) -> Vec<String> {
+    CertificateDer::pem_file_iter(cert)
+        .ok()
+        .and_then(|mut it| it.next())
+        .and_then(Result::ok)
+        .map(|d| der_dns_names(d.as_ref()))
+        .unwrap_or_default()
+}
+
+/// A DER length at `der[i]`: (length, bytes the length took).
+fn der_len(der: &[u8], i: usize) -> Option<(usize, usize)> {
+    let b = *der.get(i)?;
+    if b < 0x80 {
+        return Some((b as usize, 1));
+    }
+    let n = (b & 0x7f) as usize;
+    if n == 0 || n > 4 {
+        return None;
+    }
+    let mut len = 0usize;
+    for k in 0..n {
+        len = (len << 8) | *der.get(i + 1 + k)? as usize;
+    }
+    Some((len, 1 + n))
+}
+
+/// In DER: the subjectAltName OID (2.5.29.17), an optional `critical` BOOLEAN, then an
+/// OCTET STRING holding `SEQUENCE OF GeneralName`, where a dNSName is `[2]` IA5String.
+fn der_dns_names(der: &[u8]) -> Vec<String> {
+    const OID: [u8; 5] = [0x06, 0x03, 0x55, 0x1d, 0x11];
+    let mut out = vec![];
+    let Some(at) = der.windows(OID.len()).position(|w| w == OID) else {
+        return out;
+    };
+    let mut i = at + OID.len();
+    if der.get(i) == Some(&0x01) {
+        i += 3;
+    }
+    let step = |i: usize, tag: u8| -> Option<(usize, usize)> {
+        (der.get(i) == Some(&tag)).then_some(())?;
+        let (len, n) = der_len(der, i + 1)?;
+        Some((i + 1 + n, len))
+    };
+    let Some((i, _)) = step(i, 0x04) else {
+        return out;
+    };
+    let Some((mut i, len)) = step(i, 0x30) else {
+        return out;
+    };
+    let end = (i + len).min(der.len());
+    while i < end {
+        let tag = der[i];
+        let Some((len, n)) = der_len(der, i + 1) else {
+            break;
+        };
+        let start = i + 1 + n;
+        let Some(v) = der.get(start..start + len) else {
+            break;
+        };
+        if tag == 0x82 {
+            if let Ok(name) = std::str::from_utf8(v) {
+                out.push(name.to_ascii_lowercase());
+            }
+        }
+        i = start + len;
+    }
+    out
+}
+
 /// The SHA-256 fingerprint of a PEM certificate's first certificate, as browsers show it.
 pub fn fingerprint(cert: &Path) -> Option<String> {
     use sha2::Digest;
@@ -307,6 +378,7 @@ mod tests {
         assert!(!text.contains("CA:TRUE"), "{text}");
         assert!(text.contains("TLS Web Server Authentication"), "{text}");
         assert!(text.contains("192.168.1.5"), "{text}");
+        assert_eq!(dns_names(&cert), ["localhost"]);
         // An old CA certificate under the same name is replaced on the next start.
         let ok = Command::new("openssl")
             .args(["req", "-x509", "-newkey", "ec", "-pkeyopt"])

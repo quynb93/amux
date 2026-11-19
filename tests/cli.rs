@@ -2074,6 +2074,112 @@ fn http(addr: &str, req: &str) -> String {
     out
 }
 
+/// Slow or too many connections, and requests for another host name.
+#[test]
+fn serve_refuses_slow_clients_other_host_names_and_too_many_connections() {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    let s = Sandbox::new("serve-dos");
+    write(
+        &s.amux_home.join("config.json"),
+        r#"{"serve": {"allowHosts": ["amux.example.net"]}}"#,
+    );
+    let (mut srv, out) = start_serve(&s, &["--listen", "127.0.0.1:0"], &[]);
+    let link = out.lines().find(|l| l.contains("?t=")).unwrap().trim();
+    let addr = link
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let get_host = |host: &str| {
+        http(
+            &addr,
+            &format!("GET /manifest.webmanifest HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+        )
+    };
+    for ok in [
+        "amux.localhost",
+        "127.0.0.1",
+        "localhost:1",
+        "[::1]:7878",
+        "amux.example.net",
+    ] {
+        assert!(get_host(ok).starts_with("HTTP/1.1 200"), "{ok}");
+    }
+    for bad in [
+        "evil.example.com",
+        "evil.example.com:80",
+        "127.0.0.1.nip.io",
+    ] {
+        let r = get_host(bad);
+        assert!(r.starts_with("HTTP/1.1 421"), "{bad}: {r}");
+    }
+    let no_host = http(&addr, "GET /manifest.webmanifest HTTP/1.0\r\n\r\n");
+    assert!(no_host.starts_with("HTTP/1.1 421"), "{no_host}");
+
+    // A request that trickles in a byte at a time is cut off 10 s after it connected.
+    let mut slow = std::net::TcpStream::connect(&addr).unwrap();
+    slow.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let started = Instant::now();
+    let mut buf = [0u8; 512];
+    let mut closed = false;
+    for b in
+        b"GET / HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .iter()
+    {
+        if slow.write_all(&[*b]).is_err() {
+            closed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        if started.elapsed() > Duration::from_secs(20) {
+            break;
+        }
+    }
+    if !closed {
+        // Whatever it answers (400), the connection ends.
+        let _ = slow.read(&mut buf);
+    }
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(16),
+        "a slow client held its connection for {took:?}"
+    );
+
+    // Past 64 open connections, new ones are closed at once; the server still answers
+    // once they go.
+    let held: Vec<_> = (0..64)
+        .map(|_| std::net::TcpStream::connect(&addr).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut extra = std::net::TcpStream::connect(&addr).unwrap();
+    extra
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let _ = extra.write_all(b"GET /manifest.webmanifest HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let mut got = vec![];
+    let _ = extra.read_to_end(&mut got);
+    assert!(
+        !String::from_utf8_lossy(&got).contains("200 OK"),
+        "{}",
+        String::from_utf8_lossy(&got)
+    );
+    drop(held);
+    let mut ok = false;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(100));
+        if get_host("localhost").starts_with("HTTP/1.1 200") {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "the server answers again once the connections close");
+    let _ = srv.kill();
+    let _ = srv.wait();
+}
+
 #[test]
 fn serves_a_phone_app_behind_a_token() {
     use std::io::{BufRead, BufReader};
@@ -2105,11 +2211,14 @@ fn serves_a_phone_app_behind_a_token() {
     let (addr, query) = url.split_once('/').unwrap();
     let token = query.trim_start_matches("?t=");
     assert!(token.len() >= 32, "{url}");
+    // Its own name, so the cookie isn't shared with other servers on 127.0.0.1.
+    assert!(addr.starts_with("amux.localhost:"), "{url}");
+    let addr = &addr.replace("amux.localhost", "127.0.0.1");
 
     let get = |path: &str, cookie: &str| {
         http(
             addr,
-            &format!("GET {path} HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n"),
+            &format!("GET {path} HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\n\r\n"),
         )
     };
     assert!(get("/api/runs", "").starts_with("HTTP/1.1 401"));
@@ -2132,7 +2241,7 @@ fn serves_a_phone_app_behind_a_token() {
         http(
             addr,
             &format!(
-                "POST {path} HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+                "POST {path} HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
         )
@@ -2165,7 +2274,8 @@ fn serves_a_phone_app_behind_a_token() {
         use std::io::{Read, Write};
         let mut es = std::net::TcpStream::connect(addr).unwrap();
         es.write_all(
-            format!("GET /api/events HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n").as_bytes(),
+            format!("GET /api/events HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\n\r\n")
+                .as_bytes(),
         )
         .unwrap();
         es.set_read_timeout(Some(std::time::Duration::from_secs(10)))
@@ -3162,7 +3272,7 @@ fn web_push_reaches_the_phone_app_encrypted() {
     let get = |path: &str, cookie: &str| {
         http(
             &addr,
-            &format!("GET {path} HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n"),
+            &format!("GET {path} HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\n\r\n"),
         )
     };
     let cookie = format!("amux={token}");
@@ -3198,7 +3308,7 @@ fn web_push_reaches_the_phone_app_encrypted() {
         let r = http(
             &addr,
             &format!(
-                "POST /api/push HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST /api/push HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
         );
@@ -3255,7 +3365,11 @@ fn web_push_reaches_the_phone_app_encrypted() {
     let msg = webpush_decrypt(ua, &auth, &body);
     assert_eq!(msg["title"], "amux: test");
     assert_eq!(msg["body"], "Notifications from amux reach this phone.");
-    assert_eq!(msg["url"], format!("{base}/#run=test"));
+    // The link the server printed, with its own .localhost name.
+    assert_eq!(
+        msg["url"],
+        format!("{base}/#run=test").replace("127.0.0.1", "amux.localhost")
+    );
     let subs = fs::read_to_string(s.amux_home.join("webpush-subs.json")).unwrap();
     assert!(
         subs.contains("/push/phone") && !subs.contains("/gone/"),
@@ -3284,7 +3398,10 @@ fn web_push_reaches_the_phone_app_encrypted() {
             .contains("Waiting for you: approve THIS?"),
         "{msg}"
     );
-    assert_eq!(msg["url"], format!("{base}/#run=ask"));
+    assert_eq!(
+        msg["url"],
+        format!("{base}/#run=ask").replace("127.0.0.1", "amux.localhost")
+    );
     assert_eq!(msg["tag"], "ask");
 
     // Brief: only the run's name and event; an exit isn't urgent.
@@ -3306,7 +3423,7 @@ fn web_push_reaches_the_phone_app_encrypted() {
     let r = http(
         &addr,
         &format!(
-            "POST /api/push/remove HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /api/push/remove HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -3344,7 +3461,11 @@ fn start_serve(s: &Sandbox, args: &[&str], env: &[(&str, &str)]) -> (std::proces
         line.clear();
     }
     assert!(!link.is_empty(), "{all}");
-    (srv, all)
+    // Plain HTTP on this machine prints an amux.localhost link; connect by address.
+    (
+        srv,
+        all.replace("http://amux.localhost:", "http://127.0.0.1:"),
+    )
 }
 
 fn curl(args: &[&str]) -> String {
@@ -3435,7 +3556,7 @@ fn serves_the_phone_app_through_tailscale() {
         .unwrap();
     let login = http(
         &format!("127.0.0.1:{port}"),
-        &format!("GET /?t={token} HTTP/1.1\r\nHost: x\r\n\r\n"),
+        &format!("GET /?t={token} HTTP/1.1\r\nHost: amux.localhost\r\n\r\n"),
     );
     assert!(login.contains("; Secure"), "{login}");
     assert!(fs::read_to_string(s.amux_home.join("serve.json"))

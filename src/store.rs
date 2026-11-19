@@ -150,6 +150,18 @@ pub fn load_config() -> Result<Config> {
     read_json(&paths::config_file())
 }
 
+/// A list of strings at `section.key` in config.json (such as `serve.allowHosts`), or
+/// none when it's missing or isn't one.
+pub fn config_strings(section: &str, key: &str) -> Vec<String> {
+    load_config()
+        .ok()
+        .and_then(|c| c.extra.get(section)?.get(key)?.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
 pub fn save_config(cfg: &Config) -> Result<()> {
     write_json(&paths::config_file(), cfg)
 }
