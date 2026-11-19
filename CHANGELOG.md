@@ -13,6 +13,7 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 - A Linear issue and a Jira issue with the same key (ENG-1) no longer share the run name `eng-1`. The second gets `jira-eng-1` (or `linear-eng-1`) and its own branch, so `amux spawn --issue jira:ENG-1` no longer fails with "run already exists", and `amux intake` starts it instead of marking it as taken. Intake now tells an issue started by hand by its tracker and key (and repo), not by whether a run with its name exists.
 - A Jira issue's prompt now has its 50 newest comments (from Get comments, newest first, put back in order) instead of the first page of the issue's `comment` field. Linear's queries now say how they are ordered: an issue's 50 newest comments, and for `amux intake` the 100 oldest open issues (`last: 100, orderBy: createdAt`), so with more than 100 open issues, the ones that have waited longest are started first, as with Jira.
 - Dropping hunks in `amux ui`'s review no longer freezes the screen while `git apply` and `git commit` (with your pre-commit hooks) run: the drop runs in the background, the footer says it is dropping, and the review is read again when it is done.
+- The end-to-end tests no longer leave run hosts and fake CLIs running when a test fails or doesn't stop its runs: each test sandbox stops the hosts and CLI process groups recorded in its own `runs/*/run.json` when it is dropped, after checking with `ps` that each process still belongs to that sandbox.
 
 ## [0.11.12] - 2026-11-19
 
