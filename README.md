@@ -698,13 +698,16 @@ amux send gpu:claude-1 "use the bigger batch"
 amux serve --tailscale                        # https://<this-mac>.<tailnet>.ts.net/?t=<token>, a real certificate
 amux serve --listen 192.168.1.20:7878 --tls   # HTTPS on your network, with a self-signed certificate
 amux serve --listen 0.0.0.0:7878 --cert c.pem --key k.pem   # your own certificate
-amux serve                                    # plain http://127.0.0.1:7878, for an SSH tunnel
+amux serve                                    # plain http://amux.localhost:7878 (127.0.0.1), for an SSH tunnel
 ```
 
 - **`--tailscale` is the easy way.** Tailscale serves the app over HTTPS with a real certificate for the machine's `ts.net` name, to your own devices only, and passes requests to amux on 127.0.0.1. It needs HTTPS certificates turned on for the tailnet (admin console → DNS), and stops when amux does.
 - **`--tls`** makes a self-signed certificate (with `openssl`, kept in `~/.amux/tls/`) and prints its fingerprint. The browser warns once. Prefer `--tailscale` if you can: its certificate is real, so there's nothing to install. Otherwise you can open `/amux-cert.pem` on the phone and install it. It's a server certificate for this machine's addresses only (`CA:FALSE`, server authentication only), not a certificate authority, so trusting it can't let anyone vouch for other sites. Certificates made by amux before 0.11.15 were CA certificates; they're replaced on the next start, so remove the old one from the phone and install the new one.
 - The link holds a secret token. Opening it once stores the token in a cookie (HttpOnly, SameSite=Strict, and Secure over HTTPS) and takes it out of the address bar. `--new-token` replaces it.
 - It listens on this machine only unless you say otherwise. Without HTTPS, reach it only through something private: Tailscale, a VPN or an SSH tunnel.
+- **Plain HTTP on this machine** prints an `http://amux.localhost:<port>` link: browsers send `*.localhost` to 127.0.0.1, and the cookie then isn't shared with every other server on 127.0.0.1. `http://127.0.0.1:<port>` works too (it's printed as well).
+- **It answers only to its own names.** A request's `Host` must be an IP address, `localhost` or `*.localhost`, this machine's name (and `<name>.local`), the Tailscale name, or a name in your `--cert`; anything else gets `421`, so a web page can't reach the server through a name of its own pointed at your address (DNS rebinding). Add other names with `"serve": {"allowHosts": ["amux.example.net"]}` in `~/.amux/config.json`.
+- **Slow or many connections can't tie it up.** A request has 10 seconds from connecting to send its headers and body, and at most 64 connections are served at once; more are closed.
 - Every action runs the same command the CLI has (`ps --json`, `peek`, `send`, `spawn`, `verify`, `pr`, `comment`…), so runs on other machines work too, and the app can do nothing the CLI can't.
 - **From another laptop without Tailscale:** run `ssh -N -L 7878:127.0.0.1:7878 you@your-mac`, then open the link. Or skip the browser: `ssh you@your-mac` and run `amux ui`.
 

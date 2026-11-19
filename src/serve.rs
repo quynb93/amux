@@ -19,8 +19,9 @@ use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const HTML: &str = include_str!("assets/app.html");
 const JS: &str = include_str!("assets/app.js");
@@ -31,6 +32,11 @@ const MANIFEST: &str = r##"{"name":"amux","short_name":"amux","start_url":"/","d
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
+/// A request's headers and body must arrive within this time of the connection, however
+/// slowly they trickle in.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+/// Connections handled at once; more are closed at once.
+const MAX_CONNECTIONS: usize = 64;
 
 /// The token, kept in ~/.amux/serve-token (0600) so a saved home-screen app keeps working.
 fn token(renew: bool) -> Result<String> {
@@ -68,12 +74,13 @@ struct Request {
     query: String,
     cookie: Option<String>,
     bearer: Option<String>,
+    host: Option<String>,
     amux_header: bool,
     json: bool,
     body: Vec<u8>,
 }
 
-fn read_request(stream: &Conn) -> Result<Request> {
+fn read_request(stream: impl Read) -> Result<Request> {
     let mut r = BufReader::new(stream.take((MAX_HEAD + MAX_BODY) as u64));
     let mut line = String::new();
     r.read_line(&mut line)?;
@@ -90,6 +97,7 @@ fn read_request(stream: &Conn) -> Result<Request> {
         query,
         cookie: None,
         bearer: None,
+        host: None,
         amux_header: false,
         json: false,
         body: vec![],
@@ -122,6 +130,7 @@ fn read_request(stream: &Conn) -> Result<Request> {
                     .map(str::to_string)
                     .next()
             }
+            "host" => req.host = Some(v.to_string()),
             "authorization" => req.bearer = v.strip_prefix("Bearer ").map(str::to_string),
             "x-amux" => req.amux_header = v == "1",
             "content-type" => req.json = v.starts_with("application/json"),
@@ -193,11 +202,65 @@ struct Site {
     https: bool,
     /// The self-signed certificate, offered at /amux-cert.pem to install on the phone.
     cert_pem: Option<&'static [u8]>,
+    /// Host names a request may name in its `Host` header (lowercase, no port), besides
+    /// IP addresses, `localhost` and `*.localhost`. Any other name is refused, so a web
+    /// page can't reach this server by pointing its own name at your address (DNS
+    /// rebinding).
+    hosts: Vec<String>,
+}
+
+/// Whether a `Host` header names this server (see `Site::hosts`).
+fn host_allowed(host: Option<&str>, allowed: &[String]) -> bool {
+    let Some(h) = host.map(|h| h.trim().to_ascii_lowercase()) else {
+        return false;
+    };
+    // Without the port: `name:port`, `[v6]:port`, `[v6]`.
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((ip, tail)) if tail.is_empty() || tail.starts_with(':') => ip.to_string(),
+            _ => return false,
+        }
+    } else {
+        match h.rsplit_once(':') {
+            Some((n, port)) if port.bytes().all(|b| b.is_ascii_digit()) => n.to_string(),
+            Some(_) => return false,
+            None => h.clone(),
+        }
+    };
+    let name = name.trim_end_matches('.');
+    !name.is_empty()
+        && (name.parse::<std::net::IpAddr>().is_ok()
+            || name == "localhost"
+            || name.ends_with(".localhost")
+            || allowed.iter().any(|a| a == name))
+}
+
+/// Reads through a connection, giving up once `until` has passed: a client that sends a
+/// byte now and then can't hold its thread for long.
+struct Timed<'a> {
+    conn: &'a Conn,
+    tcp: TcpStream,
+    until: Instant,
+}
+
+impl Read for Timed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.tcp.set_read_timeout(Some(left))?;
+        let mut c = self.conn;
+        c.read(buf)
+    }
 }
 
 fn accept(tcp: TcpStream, site: &Site, tls: Option<&Arc<rustls::ServerConfig>>) {
-    let _ = tcp.set_read_timeout(Some(Duration::from_secs(15)));
+    let until = Instant::now() + REQUEST_DEADLINE;
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(30)));
+    let Ok(timer) = tcp.try_clone() else {
+        return;
+    };
     let conn = match tls {
         Some(cfg) => match Conn::tls(tcp, cfg) {
             Ok(c) => c,
@@ -205,15 +268,28 @@ fn accept(tcp: TcpStream, site: &Site, tls: Option<&Arc<rustls::ServerConfig>>) 
         },
         None => Conn::plain(tcp),
     };
-    handle(&conn, site);
+    // The TLS handshake happens on the first read, so it is inside the deadline too.
+    let req = read_request(Timed {
+        conn: &conn,
+        tcp: timer,
+        until,
+    });
+    handle(&conn, site, req);
 }
 
-fn handle(stream: &Conn, site: &Site) {
+fn handle(stream: &Conn, site: &Site, req: Result<Request>) {
     let token = site.token.as_str();
-    let Ok(req) = read_request(stream) else {
+    let Ok(req) = req else {
         return text(stream, "400 Bad Request", "bad request");
     };
     let s = stream;
+    if !host_allowed(req.host.as_deref(), &site.hosts) {
+        return text(
+            s,
+            "421 Misdirected Request",
+            "This address isn't one amux serve answers to. Use the link it printed, or add the name to \"serve\": {\"allowHosts\": [...]} in ~/.amux/config.json.",
+        );
+    }
     // Public: what a phone fetches to install the app, which carries no secrets.
     match req.path.as_str() {
         "/manifest.webmanifest" => {
@@ -753,6 +829,22 @@ fn start_tailscale(port: u16) -> Result<(String, std::process::Child)> {
     Ok((format!("https://{name}"), child))
 }
 
+/// This machine's name, for a request that uses it (`box` or `box.local`).
+fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    let r = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if r != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let h = std::str::from_utf8(&buf[..end])
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    let h = h.trim_end_matches(".local").to_string();
+    (!h.is_empty()).then_some(h)
+}
+
 /// Prints a line, ignoring a closed stdout: the server keeps serving when whoever started
 /// it stops reading (`amux serve | head`, a closed terminal).
 macro_rules! say {
@@ -795,9 +887,18 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
     }
 
     let mut self_signed = None;
+    // Names a request may use in its Host header (IP addresses and localhost always can).
+    let mut hosts: Vec<String> = crate::store::config_strings("serve", "allowHosts");
+    if let Some(h) = hostname() {
+        hosts.push(format!("{h}.local"));
+        hosts.push(h);
+    }
     let config = if tls {
         let (c, k) = match (cert, key) {
-            (Some(c), Some(k)) => (c, k),
+            (Some(c), Some(k)) => {
+                hosts.extend(crate::tls::dns_names(&c));
+                (c, k)
+            }
             _ => {
                 let names: Vec<String> = if ip.is_unspecified() || ip.is_loopback() {
                     vec![]
@@ -814,21 +915,35 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
         None
     };
     let mut proxy = None;
+    // Plain HTTP on this machine: a name of its own under .localhost (browsers send it to
+    // 127.0.0.1), so the login cookie isn't shared with every other server on 127.0.0.1.
+    let own_name = !tailscale && !tls && ip.is_loopback();
     let base = if tailscale {
         let (url, child) = start_tailscale(port)?;
         proxy = Some(child);
+        hosts.push(url.trim_start_matches("https://").to_ascii_lowercase());
         url
     } else {
         let scheme = if tls { "https" } else { "http" };
         if ip.is_unspecified() {
             format!("{scheme}://<this machine's address>:{port}")
+        } else if own_name {
+            format!("http://amux.localhost:{port}")
         } else {
             format!("{scheme}://{addr}")
         }
     };
+    let hosts: Vec<String> = hosts
+        .into_iter()
+        .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
 
     say!("amux serve: open this on your phone, then add it to the home screen:\n");
     say!("  {base}/?t={token}\n");
+    if own_name {
+        say!("  (or http://{addr}/?t={token} if your browser doesn't open .localhost names)\n");
+    }
     if tailscale {
         say!(
             "Served by Tailscale over HTTPS with a real certificate, to your tailnet's devices only.\n\
@@ -870,11 +985,35 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
         token,
         https: tls || tailscale,
         cert_pem,
+        hosts,
     }));
     let config: Option<&'static Arc<rustls::ServerConfig>> =
         config.map(|c| &*Box::leak(Box::new(c)));
+    static OPEN: AtomicUsize = AtomicUsize::new(0);
     for stream in listener.incoming().flatten() {
-        std::thread::spawn(move || accept(stream, site, config));
+        // Too many at once (someone opening connections and holding them): close the new
+        // ones rather than run out of threads.
+        if OPEN.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            OPEN.fetch_sub(1, Ordering::SeqCst);
+            drop(stream);
+            continue;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("amux-serve-conn".into())
+            .spawn(move || {
+                struct Done;
+                impl Drop for Done {
+                    fn drop(&mut self) {
+                        OPEN.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                let _done = Done;
+                accept(stream, site, config);
+            });
+        if spawned.is_err() {
+            // The stream went with the closure and is closed; it never started.
+            OPEN.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     drop(proxy);
     Ok(0)
@@ -890,5 +1029,38 @@ mod tests {
         assert_eq!(run_id("box%3Aw").as_deref(), Some("box:w"));
         assert_eq!(run_id("claude-1").as_deref(), Some("claude-1"));
         assert!(run_id("../x").is_none() && run_id("-rf").is_none() && run_id("a b").is_none());
+    }
+
+    #[test]
+    fn answers_only_to_its_own_host_names() {
+        let allowed = vec!["box.tail1.ts.net".to_string(), "mybox.local".to_string()];
+        let ok = |h: &str| host_allowed(Some(h), &allowed);
+        for h in [
+            "127.0.0.1:7878",
+            "localhost:7878",
+            "amux.localhost:7878",
+            "AMUX.LOCALHOST",
+            "[::1]:7878",
+            "[::1]",
+            "192.168.1.20:7878",
+            "box.tail1.ts.net",
+            "box.tail1.ts.net.",
+            "mybox.local:7878",
+        ] {
+            assert!(ok(h), "{h}");
+        }
+        for h in [
+            "evil.example.com",
+            "evil.example.com:7878",
+            "127.0.0.1.evil.com",
+            "localhost.evil.com",
+            "box.tail1.ts.net.evil.com",
+            "[::1]x",
+            "a:b",
+            "",
+        ] {
+            assert!(!ok(h), "{h}");
+        }
+        assert!(!host_allowed(None, &allowed));
     }
 }
