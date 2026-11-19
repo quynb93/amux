@@ -4,13 +4,19 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.11.13] - 2026-11-19
+
+Web push to the phone app, and fixes from the 0.11.12 reviews.
+
 ### Added
 
 - Web Push: `amux phone webpush` sends notifications straight to the phone app (`amux serve`), with no ntfy or Pushover app. In the app, Monitor → Notifications → Turn on subscribes the device; several devices can, and one whose push service answers 404 or 410 is forgotten. Messages are encrypted for the device (RFC 8291, `aes128gcm`) and signed with amux's own VAPID key (RFC 8292), made on first use and kept in `~/.amux/webpush-key.json` (0600); the devices are in `~/.amux/webpush-subs.json` (0600). Same events, priorities (`Urgency: high` for waiting, stalls, limits and failures), throttling, `brief` mode and links as the other channels. It needs HTTPS (`--tailscale`, or `--tls` with a trusted certificate), and on iPhone and iPad the home-screen app on iOS 16.4 or later; the app says so when push isn't available. The only new network requests go to the push service of each browser that subscribed.
+
 ### Fixed
 
 - Two Codex runs in the same folder under different accounts no longer record one account's usage for both. Each run is matched to the session its Codex started just after the run did (sub-agent sessions aside), a session another live run already reads is skipped, and the match is kept in `run.json` (`session`). A run that resumes a session (`amux failover`, `amux revive`) reads that session. `amux usage` only rereads runs whose session is known.
 - A Linear issue and a Jira issue with the same key (ENG-1) no longer share the run name `eng-1`. The second gets `jira-eng-1` (or `linear-eng-1`) and its own branch, so `amux spawn --issue jira:ENG-1` no longer fails with "run already exists", and `amux intake` starts it instead of marking it as taken. Intake now tells an issue started by hand by its tracker and key (and repo), not by whether a run with its name exists.
+- Linear and Jira intake read up to 500 open issues, so issues already started (still open until their PR merges) no longer hide newer ones.
 - A Jira issue's prompt now has its 50 newest comments (from Get comments, newest first, put back in order) instead of the first page of the issue's `comment` field. Linear's queries now say how they are ordered: an issue's 50 newest comments, and for `amux intake` the 100 oldest open issues (`last: 100, orderBy: createdAt`), so with more than 100 open issues, the ones that have waited longest are started first, as with Jira.
 - Dropping hunks in `amux ui`'s review no longer freezes the screen while `git apply` and `git commit` (with your pre-commit hooks) run: the drop runs in the background, the footer says it is dropping, and the review is read again when it is done.
 - The end-to-end tests no longer leave run hosts and fake CLIs running when a test fails or doesn't stop its runs: each test sandbox stops the hosts and CLI process groups recorded in its own `runs/*/run.json` when it is dropped, after checking with `ps` that each process still belongs to that sandbox.
