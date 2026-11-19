@@ -193,16 +193,24 @@ impl Config {
                 None | Some(Value::Null) => None,
                 Some(n) => Some(network_on(n.as_str().unwrap_or(&n.to_string()))?),
             },
-            mounts: m
-                .get("mounts")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            always: m.get("always").and_then(Value::as_bool).unwrap_or(false),
+            // Wrongly typed, these would quietly mount less or sandbox nothing: refuse them.
+            mounts: match m.get("mounts") {
+                None | Some(Value::Null) => vec![],
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .map(|x| {
+                        x.as_str().map(str::to_string).ok_or_else(|| {
+                            anyhow!("\"sandbox\".\"mounts\" in config.json is a list of strings.")
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+                Some(_) => bail!("\"sandbox\".\"mounts\" in config.json is a list of strings."),
+            },
+            always: match m.get("always") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => bail!("\"sandbox\".\"always\" in config.json is true or false."),
+            },
         })
     }
 
@@ -230,19 +238,14 @@ pub struct Request {
     pub network: Option<bool>,
 }
 
-/// Where `engine` is: a path that exists, or a name found on PATH.
+/// Where `engine` is: an executable at that path (`~` is your home), or one on PATH.
 pub fn find_engine(engine: &str) -> Option<PathBuf> {
+    use crate::commands::maintenance::which;
     if engine.contains('/') {
-        let p = expand_home(engine);
-        return p.is_file().then_some(p);
+        which(&expand_home(engine).to_string_lossy())
+    } else {
+        which(engine)
     }
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|d| d.join(engine))
-                .find(|p| p.is_file())
-        })
-        .unwrap_or(None)
 }
 
 /// Refuses an account whose login a container can't use: neither a stored token nor a
@@ -292,6 +295,19 @@ fn checkout_mounts(cwd: &Path) -> Vec<PathBuf> {
     };
     let top = PathBuf::from(top);
     let mut out = vec![top.clone()];
+    // git prints the top with symlinks resolved, but the container starts in `cwd` as
+    // spelled (`-w`): mount the checkout there too, or the CLI starts in an empty folder.
+    if !cwd.starts_with(&top) {
+        let logical = cwd.canonicalize().ok().and_then(|c| {
+            let depth = c.strip_prefix(&top).ok()?.components().count();
+            let mut l = cwd.to_path_buf();
+            for _ in 0..depth {
+                l.pop();
+            }
+            Some(l)
+        });
+        out.extend(logical);
+    }
     // --path-format needs git 2.31; older ones print it relative to `cwd`.
     let common = git(
         cwd,
@@ -375,9 +391,18 @@ pub fn plan(
         .args(["image", "inspect", &image])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if !inspect.is_ok_and(|s| s.success()) {
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Could not run {engine}: {e}"))?;
+    if !inspect.status.success() {
+        // A daemon that isn't running (or a socket you can't reach) also fails here: say
+        // that rather than suggest pulling an image that may well be there.
+        let err = String::from_utf8_lossy(&inspect.stderr);
+        let err = err.trim();
+        let lower = err.to_lowercase();
+        if !err.is_empty() && !lower.contains("no such") && !lower.contains("not known") {
+            bail!("{engine} couldn't check for the image {image}: {err}");
+        }
         bail!(
             "The image {image} isn't on this machine, and amux doesn't pull images by itself. \
              Build it (see docs/sandbox.md) or `{} pull {image}`, then spawn again.",
@@ -419,7 +444,10 @@ pub fn plan(
             vars.push(k.into());
         }
     }
-    vars.push(format!("HOME={CONTAINER_HOME}"));
+    // Unless the provider moves the CLI's home with HOME itself, which then must win.
+    if !vars.iter().any(|v| v == "HOME") {
+        vars.push(format!("HOME={CONTAINER_HOME}"));
+    }
     vars.extend(git_identity(cwd));
 
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -591,6 +619,10 @@ mod tests {
             checkout_mounts(&wt.join("sub")),
             [wt.clone(), repo.join(".git")]
         );
+        // Reached through a symlink: also at the path the run starts from.
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        assert_eq!(checkout_mounts(&link.join("sub")), [repo.clone(), link]);
         // A plain checkout: its top only, from any subdirectory.
         assert_eq!(checkout_mounts(&repo.join("sub")), [repo]);
         // Not a repository: the folder itself.
