@@ -663,7 +663,7 @@ amux send gpu:claude-1 "use the bigger batch"
   - **Changes:** its diff. Tap a line to comment, then send the comments to the agent as one message.
   - **Ship:** run the tests (in a test slot) or push for CI, open a PR (or a draft), see the CI checks, send test or CI failures to the agent, stop or remove the run.
 - **New:** start a run with an account, a machine, a folder (recent ones are suggested), its own worktree and branch, a name and a prompt.
-- **Monitor:** the machine's load and free memory, every slot with who holds it and who waits, and each machine's runs.
+- **Monitor:** notifications for this device ([Web Push](#notifications-on-your-phone)), the machine's load and free memory, every slot with who holds it and who waits, and each machine's runs.
 
 ```sh
 amux serve --tailscale                        # https://<this-mac>.<tailnet>.ts.net/?t=<token>, a real certificate
@@ -681,15 +681,18 @@ amux serve                                    # plain http://127.0.0.1:7878, for
 
 #### Notifications on your phone
 
-The app only buzzes while it's open. To hear from amux with the phone in your pocket, send its notifications to a push service:
+The app only buzzes while it's open. To hear from amux with the phone in your pocket, have it send notifications to the app itself, or to a push service:
 
 ```sh
+amux phone webpush              # straight to the phone app, nothing to install (needs HTTPS)
 amux phone ntfy                 # free, no account: install the ntfy app and subscribe to the topic it prints
 amux phone pushover <user-key>  # or Pushover (asks for your app token)
 amux phone webhook <url>        # or any webhook: Slack and Discord ones work as is
 amux phone test                 # check that it arrives
 ```
 
+- **Web Push** comes to the phone app as an ordinary notification, with no other app. Serve the app over HTTPS (`--tailscale`, or `--tls` with a certificate the phone trusts), open it on the phone, and tap Monitor → Notifications → Turn on. On iPhone and iPad it works in the home-screen app only, from iOS 16.4: Add to Home Screen first, then open it from there. The app says what's missing when push isn't available. Turn it on in each browser you want to hear from: amux keeps every device that subscribed, and forgets one when its push service says it's gone. Turning it on in the app also sets up `amux phone webpush` if no phone was set up yet.
+- **How Web Push works:** amux makes its own key pair (VAPID, kept in `~/.amux/webpush-key.json`) on first use, encrypts each message for the device (RFC 8291) and hands it to that browser's push service (Apple, Google or Mozilla), which sees when a message goes but not what it says.
 - **What you're told:** a run is waiting for you, stalled, hit a usage limit or ended, and a run's tests or CI checks passed or failed. Waiting, stalls, limits and failures come at high priority. `amux phone events waiting,checks` picks only some.
 - **A tap opens the run** in the phone app. The link is the address `amux serve` last listened on, or set it with `amux phone open http://100.101.102.103:7878`. The link never holds the token.
 - **Privacy:** with ntfy.sh, anyone who knows the topic can read it, so amux makes one nobody will guess. Use `amux phone ntfy https://ntfy.example.com/<topic> --token <t>` for your own server, or `amux phone brief on` to send only run names and events, never what the agents said.
@@ -877,7 +880,7 @@ amux update --patterns     # fetch patterns.json from the repo's main branch now
 | `amux report <text…>` | From inside a run: what it did, for its lead. |
 | `amux theme [<name>] [--json]` | List the themes with swatches, or choose one for `amux ui` and the phone app. |
 | `amux serve [--listen <host:port>] [--tls \| --cert <pem> --key <pem> \| --tailscale] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. Over HTTPS with `--tls`, your certificate, or Tailscale. |
-| `amux phone ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. |
+| `amux phone webpush\|ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. `webpush` sends to the phone app itself (`amux serve` over HTTPS). |
 | `amux providers` | List providers, shared homes and private entries. |
 | `amux env <cli>@<name>` | Print `export` lines for the account. |
 | `amux sync [<cli>@<name>] [--adopt]` | Refresh overlay links. `--adopt` moves stray files into the shared home. |
@@ -900,6 +903,8 @@ amux update --patterns     # fetch patterns.json from the repo's main branch now
   update-check.json    cached result of the update check
   patterns.json        prompt and limit text for the built-in CLIs (`amux update --patterns`)
   phone.json           where phone notifications go (`amux phone`, mode 0600)
+  webpush-key.json     the key amux signs Web Push requests with (`amux phone webpush`, mode 0600)
+  webpush-subs.json    the devices that turned on notifications in the phone app (mode 0600)
   tls/                 the self-signed certificate made by `amux serve --tls`
   approve.json         rules for answering permission prompts (`amux allow`)
   schedules.json       schedules (`amux schedule`); schedules/<name>.log is what each printed
@@ -923,7 +928,7 @@ amux update --patterns     # fetch patterns.json from the repo's main branch now
 | `LINEAR_API_KEY` | A Linear API key, used instead of the stored one. |
 | `JIRA_API_TOKEN`, `JIRA_URL`, `JIRA_EMAIL` | A Jira API token, site and email, used instead of the stored ones. |
 
-amux makes no network requests of its own, except the daily update check (the latest release from `api.github.com`, and `patterns.json` from `raw.githubusercontent.com`, both turned off by `AMUX_NO_UPDATE_CHECK=1`), `amux update`, notifications to the service you chose once you set them up with `amux phone`, and, when you use Linear or Jira issues, requests to `api.linear.app` or your Jira site with the key you gave it (reading issues, and the comment with the PR's link).
+amux makes no network requests of its own, except the daily update check (the latest release from `api.github.com`, and `patterns.json` from `raw.githubusercontent.com`, both turned off by `AMUX_NO_UPDATE_CHECK=1`), `amux update`, notifications to the service you chose once you set them up with `amux phone` (with `webpush`, to the push service of each browser that subscribed: Apple's, Google's or Mozilla's), and, when you use Linear or Jira issues, requests to `api.linear.app` or your Jira site with the key you gave it (reading issues, and the comment with the PR's link).
 
 ## Moving from separate config dirs
 
@@ -959,12 +964,11 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub, Linear and Jira issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub, Linear and Jira issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, Web Push from the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
 
-1. **Web push from the phone app**, now that it can be served over HTTPS.
-2. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.
-3. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
-4. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
+1. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.
+2. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
+3. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
 
 Ideas and feedback are welcome in [issues](https://github.com/quynb93/amux/issues).
 

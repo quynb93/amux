@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- Web Push: `amux phone webpush` sends notifications straight to the phone app (`amux serve`), with no ntfy or Pushover app. In the app, Monitor → Notifications → Turn on subscribes the device; several devices can, and one whose push service answers 404 or 410 is forgotten. Messages are encrypted for the device (RFC 8291, `aes128gcm`) and signed with amux's own VAPID key (RFC 8292), made on first use and kept in `~/.amux/webpush-key.json` (0600); the devices are in `~/.amux/webpush-subs.json` (0600). Same events, priorities (`Urgency: high` for waiting, stalls, limits and failures), throttling, `brief` mode and links as the other channels. It needs HTTPS (`--tailscale`, or `--tls` with a trusted certificate), and on iPhone and iPad the home-screen app on iOS 16.4 or later; the app says so when push isn't available. The only new network requests go to the push service of each browser that subscribed.
+
 ## [0.11.12] - 2026-11-19
 
 Accounts that switch before the limit, state hooks, sandboxed runs, Linear and Jira issues, and hunk-level review.

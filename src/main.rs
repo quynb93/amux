@@ -202,8 +202,9 @@ Maintenance:
   amux serve [--listen <host:port>] [--tls | --tailscale]
                                            amux on your phone: runs, screens, replies (web app);
                                            --tailscale serves it over HTTPS on your tailnet
-  amux phone ntfy|pushover|webhook|test|off   Notifications on your phone when a run needs you,
-                                           stalls, hits a limit, ends, or its tests/CI finish
+  amux phone webpush|ntfy|pushover|webhook|test|off   Notifications on your phone when a run
+                                           needs you, stalls, hits a limit, ends, or its tests/CI
+                                           finish (webpush: straight to the `amux serve` app)
   amux skill [--install]                   The agent skill for running other agents with amux
   amux state-hooks [status] | install | remove [claude|gemini]
       Hooks in Claude Code's and Gemini CLI's settings that tell amux exactly when a run

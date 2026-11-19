@@ -1,10 +1,11 @@
 //! `amux phone`: where notifications go when you're away from the computer.
 
 use crate::runs::push::{self, Phone, EVENTS};
+use crate::runs::webpush;
 use crate::{paths, util};
 use anyhow::{bail, Result};
 
-const USAGE: &str = "amux phone [ntfy [<topic>|<url>] [--token <t>] | pushover <user-key> [--token <app-token>] | webhook <url>
+const USAGE: &str = "amux phone [webpush | ntfy [<topic>|<url>] [--token <t>] | pushover <user-key> [--token <app-token>] | webhook <url>
             | open <url>|off | events <event,...>|all | brief on|off | test | off]";
 
 pub fn phone_cmd(argv: &[String]) -> Result<i32> {
@@ -63,6 +64,27 @@ pub fn phone_cmd(argv: &[String]) -> Result<i32> {
             println!("  3. Run `amux phone test`.");
             println!("Anyone who knows the topic can read it: keep it private, or self-host ntfy.");
             println!("`amux phone brief on` leaves out what the agents say.");
+            Ok(0)
+        }
+        Some("webpush") => {
+            webpush::public_key()?;
+            push::save(&keep(Phone {
+                service: "webpush".into(),
+                ..Default::default()
+            }))?;
+            println!("Notifications go straight to the phone app (Web Push), with no other app.");
+            println!("  1. Serve the app over HTTPS: `amux serve --tailscale`, or `--tls` with a");
+            println!("     certificate the phone trusts. Push needs HTTPS.");
+            println!(
+                "  2. Open it on the phone. iPhone and iPad: Share → Add to Home Screen first"
+            );
+            println!("     (iOS 16.4 or later), then open amux from the home screen.");
+            println!("  3. Monitor → Notifications → Turn on, then run `amux phone test`.");
+            println!("{}", devices_line());
+            println!(
+                "Messages are encrypted for the phone: its push service (Apple, Google or Mozilla)"
+            );
+            println!("sees when one is sent, not what it says.");
             Ok(0)
         }
         Some("pushover") => {
@@ -168,8 +190,26 @@ pub fn phone_cmd(argv: &[String]) -> Result<i32> {
 
 fn need(p: Option<Phone>) -> Result<Phone> {
     p.ok_or_else(|| {
-        anyhow::anyhow!("Set up a phone first: `amux phone ntfy` (or pushover, webhook).")
+        anyhow::anyhow!("Set up a phone first: `amux phone webpush` (or ntfy, pushover, webhook).")
     })
+}
+
+fn devices_line() -> String {
+    let subs = webpush::load_subs();
+    if subs.is_empty() {
+        return "No device has turned notifications on yet.".into();
+    }
+    let names: Vec<&str> = subs
+        .iter()
+        .map(|s| {
+            if s.device.is_empty() {
+                "browser"
+            } else {
+                s.device.as_str()
+            }
+        })
+        .collect();
+    format!("Devices: {} ({})", subs.len(), names.join(", "))
 }
 
 fn or_none(s: &str) -> &str {
@@ -182,12 +222,16 @@ fn or_none(s: &str) -> &str {
 
 fn status(p: Option<&Phone>) -> Result<i32> {
     let Some(p) = p else {
-        println!("No phone set up. `amux phone ntfy` is the quickest (free, no account).");
+        println!(
+            "No phone set up. `amux phone webpush` sends to the phone app itself (it needs HTTPS);"
+        );
+        println!("`amux phone ntfy` works anywhere (free, no account).");
         println!("Usage: {USAGE}");
         return Ok(0);
     };
     let to = match p.service.as_str() {
         "pushover" => "Pushover".to_string(),
+        "webpush" => format!("the phone app (Web Push). {}", devices_line()),
         _ => format!("{} {}", p.service, p.url),
     };
     println!("Sending to: {to}");

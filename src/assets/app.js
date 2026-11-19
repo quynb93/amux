@@ -36,7 +36,7 @@ function showTab(t) {
   $("#run").hidden = true; $("#top").hidden = false;
   if (t === "runs") renderList();
   if (t === "new") loadNew();
-  if (t === "monitor") loadMonitor();
+  if (t === "monitor") { loadPush(); loadMonitor(); }
 }
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.tab);
 function seg(sel, onPick) {
@@ -109,7 +109,7 @@ function notifyNewWaiting() {
   const fresh = [...now].filter((id) => !lastWaiting.has(id));
   if (fresh.length && lastWaiting.size + fresh.length > 0) {
     if (navigator.vibrate) navigator.vibrate(150);
-    if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+    if (!pushActive && "Notification" in window && Notification.permission === "granted" && document.hidden) {
       for (const id of fresh) {
         const r = runs.find((x) => x.id === id);
         new Notification(`${id} needs you`, { body: r?.waiting || "" });
@@ -444,6 +444,75 @@ function paintChrome() {
 }
 $("#theme-css").onload = paintChrome;
 paintChrome();
+
+// ---- push notifications --------------------------------------------------------------
+// Web Push (`amux phone webpush`): notifications with the app closed, straight from amux.
+// It needs HTTPS and a service worker; on iPhone and iPad, also the home-screen app.
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+let pushActive = false, swReady = null;
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  swReady = navigator.serviceWorker.register("/sw.js");
+  swReady.then((r) => r.pushManager && r.pushManager.getSubscription()).then((s) => { pushActive = !!s; }, () => {});
+  // A tapped notification, with the app already open: go to its run.
+  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data && e.data.open) location.href = e.data.open; });
+}
+function pushUnavailable() {
+  if (!window.isSecureContext) {
+    return "Notifications need HTTPS. Start the app with `amux serve --tailscale`, or `--tls` with a certificate this phone trusts, and open it at its https:// address. Or use `amux phone ntfy`.";
+  }
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    if (isIOS && !standalone) return "On iPhone and iPad, notifications work in the home-screen app only (iOS 16.4 or later): tap Share → Add to Home Screen, then open amux from the home screen.";
+    if (isIOS) return "Notifications need iOS 16.4 or later.";
+    return "This browser can't receive push notifications. `amux phone ntfy` works with any phone.";
+  }
+  if (Notification.permission === "denied") return "Notifications are blocked for this app. Allow them in the browser's site settings (iPhone: Settings → Notifications → amux), then come back.";
+  return null;
+}
+const deviceName = () => (navigator.userAgent.match(/iPhone|iPad|Android|Macintosh|Windows|Linux/) || ["browser"])[0].replace("Macintosh", "Mac");
+function b64u(s) {
+  const raw = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - s.length % 4) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+async function pushOn(reg, key) {
+  // Asked first, straight from the tap: iOS only asks from a user's gesture.
+  if (await Notification.requestPermission() !== "granted") throw new Error("Notifications weren't allowed. " + (pushUnavailable() || ""));
+  const old = await reg.pushManager.getSubscription();
+  if (old) await old.unsubscribe();
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(key) });
+  return api("/api/push", { ...sub.toJSON(), device: deviceName() });
+}
+async function pushOff(sub) {
+  const endpoint = sub.endpoint;
+  await sub.unsubscribe();
+  return api("/api/push/remove", { endpoint });
+}
+async function loadPush(msg) {
+  const box = $("#push");
+  box.replaceChildren(el("h2", null, "Notifications"));
+  const note = el("p", "note");
+  const why = pushUnavailable();
+  if (why) { note.textContent = why; box.append(note); return; }
+  let reg, sub, info;
+  try {
+    reg = await swReady;
+    sub = await reg.pushManager.getSubscription();
+    info = await api("/api/push");
+  } catch (e) {
+    note.textContent = `Notifications can't start here: ${e.message}. With --tls, the phone has to trust the certificate (install /amux-cert.pem).`;
+    box.append(note);
+    return;
+  }
+  pushActive = !!sub;
+  const btn = el("button", sub ? "" : "primary", sub ? "Turn off on this device" : "Turn on for this device");
+  const other = info.service && info.service !== "webpush" ? ` amux sends to ${info.service} now: \`amux phone webpush\` on the computer sends here instead.` : "";
+  note.textContent = msg || (sub ? "This device gets amux's notifications, even with the app closed." : "Get a notification when a run needs you, even with the app closed.") + other;
+  btn.onclick = () => {
+    btn.disabled = true;
+    (sub ? pushOff(sub) : pushOn(reg, info.publicKey)).then((m) => loadPush(m), (e) => loadPush(e.message));
+  };
+  box.append(btn, note);
+}
 
 // ---- live updates --------------------------------------------------------------------
 // Changes on this computer arrive at once over Server-Sent Events; everything (including

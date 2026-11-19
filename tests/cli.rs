@@ -2671,6 +2671,275 @@ fn notifies_the_phone_when_a_run_needs_you() {
     assert!(!s.amux_home.join("phone.json").exists());
 }
 
+/// A stand-in push service: answers 410 (gone) for paths starting /gone, 201 otherwise,
+/// and keeps each request's head and raw body.
+fn push_service() -> (String, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("http://{}", l.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut head = String::new();
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            let status = if head.starts_with("POST /gone") {
+                "410 Gone"
+            } else {
+                "201 Created"
+            };
+            let _ = (&s).write_all(
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            );
+            let _ = tx.send((head, body));
+        }
+    });
+    (addr, rx)
+}
+
+/// What a browser does with a push message: RFC 8291 decryption with the subscription's
+/// private key and auth secret.
+fn webpush_decrypt(
+    ua: ring::agreement::EphemeralPrivateKey,
+    auth: &[u8],
+    body: &[u8],
+) -> serde_json::Value {
+    use ring::{aead, agreement, hkdf};
+    struct Len(usize);
+    impl hkdf::KeyType for Len {
+        fn len(&self) -> usize {
+            self.0
+        }
+    }
+    let expand = |prk: &hkdf::Prk, info: &[u8], n: usize| {
+        let mut out = vec![0u8; n];
+        prk.expand(&[info], Len(n)).unwrap().fill(&mut out).unwrap();
+        out
+    };
+    let ua_public = ua.compute_public_key().unwrap().as_ref().to_vec();
+    let (salt, rs, idlen) = (&body[..16], &body[16..20], body[20] as usize);
+    assert_eq!(rs, &4096u32.to_be_bytes());
+    let as_public = &body[21..21 + idlen];
+    let peer = agreement::UnparsedPublicKey::new(&agreement::ECDH_P256, as_public);
+    let secret = agreement::agree_ephemeral(ua, &peer, |s| s.to_vec()).unwrap();
+    let prk_key = hkdf::Salt::new(hkdf::HKDF_SHA256, auth).extract(&secret);
+    let mut info = b"WebPush: info\0".to_vec();
+    info.extend_from_slice(&ua_public);
+    info.extend_from_slice(as_public);
+    let ikm = expand(&prk_key, &info, 32);
+    let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, salt).extract(&ikm);
+    let cek = expand(&prk, b"Content-Encoding: aes128gcm\0", 16);
+    let nonce = expand(&prk, b"Content-Encoding: nonce\0", 12);
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &cek).unwrap());
+    let mut rec = body[21 + idlen..].to_vec();
+    let plain = key
+        .open_in_place(
+            aead::Nonce::try_assume_unique_for_key(&nonce).unwrap(),
+            aead::Aad::empty(),
+            &mut rec,
+        )
+        .unwrap();
+    assert_eq!(plain.last(), Some(&2), "the last record ends with 0x02");
+    serde_json::from_slice(&plain[..plain.len() - 1]).unwrap()
+}
+
+#[test]
+fn web_push_reaches_the_phone_app_encrypted() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::Engine;
+    use ring::rand::SecureRandom;
+    let s = Sandbox::new("webpush");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let (push_addr, rx) = push_service();
+    let wait = || rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+    let out = s.amux(&["phone", "webpush"]);
+    assert_eq!(out.code, 0, "{}", out.err);
+    assert!(out.out.contains("Add to Home Screen"), "{}", out.out);
+    let mode = fs::metadata(s.amux_home.join("webpush-key.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "the VAPID key is private");
+    let out = s.amux(&["phone", "test"]);
+    assert_ne!(out.code, 0);
+    assert!(out.err.contains("no device"), "{}", out.err);
+
+    // The app: its service worker is public, the key and subscriptions need the token.
+    let (mut srv, printed) = start_serve(&s, &["--listen", "127.0.0.1:0"], &[]);
+    let link = printed.lines().find(|l| l.contains("?t=")).unwrap().trim();
+    let (base, token) = link.split_once("/?t=").unwrap();
+    let addr = base.trim_start_matches("http://").to_string();
+    let get = |path: &str, cookie: &str| {
+        http(
+            &addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n"),
+        )
+    };
+    let cookie = format!("amux={token}");
+    let sw = get("/sw.js", "");
+    assert!(
+        sw.starts_with("HTTP/1.1 200") && sw.contains("showNotification"),
+        "{sw}"
+    );
+    assert!(get("/api/push", "").starts_with("HTTP/1.1 401"));
+    let info = get("/api/push", &cookie);
+    let info: serde_json::Value =
+        serde_json::from_str(info.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let server_key = info["publicKey"].as_str().unwrap().to_string();
+    assert_eq!(B64.decode(&server_key).unwrap().len(), 65);
+    assert_eq!(info["service"], "webpush");
+
+    let rng = ring::rand::SystemRandom::new();
+    // A browser subscribing: a fresh P-256 key and auth secret, POSTed to amux serve.
+    let subscribe = |path: &str, device: &str| {
+        let ua = ring::agreement::EphemeralPrivateKey::generate(&ring::agreement::ECDH_P256, &rng)
+            .unwrap();
+        let mut auth = [0u8; 16];
+        rng.fill(&mut auth).unwrap();
+        let body = serde_json::json!({
+            "endpoint": format!("{push_addr}{path}"),
+            "keys": {
+                "p256dh": B64.encode(ua.compute_public_key().unwrap().as_ref()),
+                "auth": B64.encode(auth),
+            },
+            "device": device,
+        })
+        .to_string();
+        let r = http(
+            &addr,
+            &format!(
+                "POST /api/push HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        (ua, auth)
+    };
+    let (ua, auth) = subscribe("/push/phone", "iPhone");
+    subscribe("/gone/old-laptop", "Mac");
+    let subs = fs::read_to_string(s.amux_home.join("webpush-subs.json")).unwrap();
+    assert!(subs.contains("/push/phone") && subs.contains("/gone/old-laptop"));
+    let mode = fs::metadata(s.amux_home.join("webpush-subs.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "subscriptions are private");
+    assert!(s.amux(&["phone"]).out.contains("Devices: 2 (iPhone, Mac)"));
+
+    // `amux phone test`: one encrypted message to each device; the gone one is removed.
+    let out = s.amux(&["phone", "test"]);
+    assert_eq!(out.code, 0, "{}", out.err);
+    let (mut a, b) = (wait(), wait());
+    if !a.0.starts_with("POST /push/phone") {
+        a = b;
+    }
+    let (head, body) = a;
+    let lower = head.to_ascii_lowercase();
+    for h in [
+        "ttl: 43200",
+        "urgency: high",
+        "content-encoding: aes128gcm",
+        "content-type: application/octet-stream",
+    ] {
+        assert!(lower.contains(h), "{h} in {head}");
+    }
+    let vapid = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Authorization: vapid t="))
+        .unwrap_or_else(|| panic!("{head}"));
+    let (jwt, k) = vapid.trim().split_once(", k=").unwrap();
+    assert_eq!(k, server_key);
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let claims: serde_json::Value = serde_json::from_slice(&B64.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(claims["aud"], push_addr.as_str());
+    assert_eq!(claims["sub"], "https://github.com/quynb93/amux");
+    ring::signature::UnparsedPublicKey::new(
+        &ring::signature::ECDSA_P256_SHA256_FIXED,
+        B64.decode(k).unwrap(),
+    )
+    .verify(
+        format!("{}.{}", parts[0], parts[1]).as_bytes(),
+        &B64.decode(parts[2]).unwrap(),
+    )
+    .unwrap();
+    let msg = webpush_decrypt(ua, &auth, &body);
+    assert_eq!(msg["title"], "amux: test");
+    assert_eq!(msg["body"], "Notifications from amux reach this phone.");
+    assert_eq!(msg["url"], format!("{base}/#run=test"));
+    let subs = fs::read_to_string(s.amux_home.join("webpush-subs.json")).unwrap();
+    assert!(
+        subs.contains("/push/phone") && !subs.contains("/gone/"),
+        "{subs}"
+    );
+
+    // A run that starts waiting while nobody watches it.
+    let (ua, auth) = subscribe("/push/phone", "iPhone");
+    let env = [("FAKE_CHAT", "1"), ("FAKE_ASK", "1")];
+    assert_eq!(
+        s.amux_with(&["spawn", "--name", "ask", "fake"], &env, None)
+            .code,
+        0
+    );
+    wait_ps(&s, "ask", "waiting");
+    let (head, body) = wait();
+    assert!(
+        head.to_ascii_lowercase().contains("urgency: high"),
+        "{head}"
+    );
+    let msg = webpush_decrypt(ua, &auth, &body);
+    assert!(
+        msg["body"]
+            .as_str()
+            .unwrap()
+            .contains("Waiting for you: approve THIS?"),
+        "{msg}"
+    );
+    assert_eq!(msg["url"], format!("{base}/#run=ask"));
+    assert_eq!(msg["tag"], "ask");
+
+    // Brief: only the run's name and event; an exit isn't urgent.
+    let (ua, auth) = subscribe("/push/phone", "iPhone");
+    assert_eq!(s.amux(&["phone", "brief", "on"]).code, 0);
+    assert_eq!(s.amux(&["phone", "events", "exited"]).code, 0);
+    s.amux(&["send", "ask", "quit"]);
+    wait_ps(&s, "ask", "exited 7");
+    let (head, body) = wait();
+    assert!(
+        head.to_ascii_lowercase().contains("urgency: normal"),
+        "{head}"
+    );
+    let msg = webpush_decrypt(ua, &auth, &body);
+    assert_eq!(msg["body"], "ask: exited", "{msg}");
+
+    // Turning it off on the phone removes the device.
+    let body = serde_json::json!({ "endpoint": format!("{push_addr}/push/phone") }).to_string();
+    let r = http(
+        &addr,
+        &format!(
+            "POST /api/push/remove HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+    assert!(s.amux(&["phone"]).out.contains("No device"));
+    let _ = srv.kill();
+    let _ = srv.wait();
+}
+
 /// Starts `amux serve` with `args` and returns it and the link it printed.
 fn start_serve(s: &Sandbox, args: &[&str], env: &[(&str, &str)]) -> (std::process::Child, String) {
     use std::io::{BufRead, BufReader};

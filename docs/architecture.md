@@ -24,7 +24,8 @@ work/            what runs do to code and to the machine:
                    Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
-                   screen, attach, notify (desktop), push (phone: ntfy, Pushover, webhook)
+                   screen, attach, notify (desktop), push (phone: ntfy, Pushover, webhook,
+                   Web Push), webpush (RFC 8291 encryption and VAPID, with `ring`)
 git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   foundations
 ```
 
@@ -112,6 +113,8 @@ The host (`runs/host.rs`) is a small terminal multiplexer, in the spirit of dtac
 
 The pump also feeds each chunk to a detector (`runs/detect.rs`). It strips escape sequences as they arrive, even when one is split across chunks, and keeps the last 4 KB of text. It reports "waiting" when the text contains one of the provider's `waitingPatterns`, or when the CLI rings the bell or sends a notification OSC (9, 777 or 99). It reports "cleared" when a client sends input, or after 4 KB more output with no new signal. The host records the reason, the time and what showed it (`source`: report, pattern, bell or notification) in `run.json`. `amux explain` reads these to say why a run shows its state. When no client is attached, it sends a notification through `runs/notify.rs`: to the desktop, and to the phone through `runs/push.rs` once `amux phone` is set up. The CLI's own bell already reaches an attached terminal.
 
+With `amux phone webpush`, `runs/webpush.rs` sends to the phone app itself. The app's service worker (`assets/sw.js`, served at `/sw.js`) subscribes with the server's VAPID public key and POSTs the subscription to `/api/push`. Each message is the JSON `{title, body, url, tag}`, encrypted for each device (`aes128gcm`: an ephemeral P-256 key, ECDH with the device's key, HKDF with its auth secret, AES-128-GCM, one record) and POSTed to its endpoint with `TTL`, `Urgency` and `Authorization: vapid t=<ES256 JWT for the endpoint's origin>, k=<public key>`. The crypto is `ring`, already there for rustls. The unit tests check the encryption against RFC 8291's example byte for byte; `tests/cli.rs` decrypts what a stand-in push service receives.
+
 A CLI can also report its own state with OSC 7501, the Program Status Protocol (`runs/program.rs`): `ESC ] 7501 ; state=blocked:kind=permission:msg=<base64> ST`. Codex sends it on any terminal. Claude Code (2.1.295 and later) sends it once the terminal answers the probe `ESC ] 7501 ; ? ST`, so the pump answers that probe by writing the reply to the CLI's input. It only answers live output, never a replay, so each probe gets one answer.
 
 From the first report on, the reports decide instead of the text, bell and OSC 9 signals:
@@ -156,6 +159,7 @@ The same background process fetches `patterns.json` from the repo's main branch 
 | `tls/self-<id>.pem`, `.key` | `amux serve --tls` | Self-signed certificates, one per set of addresses (key mode 0600) |
 | `serve.json` | `amux serve` | The address it last listened on, for links in phone notifications |
 | `phone.json`, `phone-sent.json`, `phone.log` | `amux phone`, `amux __push` | Where phone notifications go (mode 0600), when each run and event was last sent, and failed sends |
+| `webpush-key.json`, `webpush-subs.json` | `amux phone webpush`, `amux serve`, `amux __push` | The VAPID key pair (PKCS#8, made on first use) and the devices subscribed from the phone app (endpoint, p256dh, auth), both mode 0600. A device is dropped when its push service answers 404 or 410. |
 | `schedules.json`, `schedules.lock`, `schedules/<name>.log` | `amux schedule`, `amux __scheduler` | Schedules and how each last went (edited under the lock), and each one's output |
 | `scheduler.lock`, `scheduler.log` | `amux __scheduler` | Held with `flock(2)` by the one scheduler while it runs; when it started and stopped |
 | `approve.json` | `amux allow` | Auto-approve rules: allow and deny lists, read by each run host every few seconds |

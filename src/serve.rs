@@ -25,6 +25,7 @@ use std::time::Duration;
 const HTML: &str = include_str!("assets/app.html");
 const JS: &str = include_str!("assets/app.js");
 const CSS: &str = include_str!("assets/app.css");
+const SW: &str = include_str!("assets/sw.js");
 const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#16161e"/><text x="32" y="42" font-size="28" text-anchor="middle" fill="#7aa2f7" font-family="monospace">ax</text></svg>"##;
 const MANIFEST: &str = r##"{"name":"amux","short_name":"amux","start_url":"/","display":"standalone","background_color":"#16161e","theme_color":"#16161e","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"}]}"##;
 
@@ -225,6 +226,8 @@ fn handle(stream: &Conn, site: &Site) {
             )
         }
         "/icon.svg" => return respond(s, "200 OK", "image/svg+xml", &[], ICON.as_bytes()),
+        // The service worker that shows push notifications (`amux phone webpush`).
+        "/sw.js" => return respond(s, "200 OK", "text/javascript", &[], SW.as_bytes()),
         // The chosen theme's colors (`amux theme`); empty keeps the app's light/dark.
         "/theme.css" => {
             let css = crate::ui::theme::configured()
@@ -303,6 +306,25 @@ fn handle(stream: &Conn, site: &Site) {
         }
         ("GET", "/api/dirs") => json_ok(s, &serde_json::Value::from(known_dirs())),
         ("GET", "/api/events") => events(stream),
+        ("GET", "/api/push") => match crate::runs::webpush::public_key() {
+            Ok(key) => json_ok(
+                s,
+                &serde_json::json!({
+                    "publicKey": key,
+                    "service": crate::runs::push::load().map(|p| p.service),
+                    "devices": crate::runs::webpush::load_subs().len(),
+                }),
+            ),
+            Err(e) => text(s, "500 Internal Server Error", &format!("{e:#}")),
+        },
+        ("POST", "/api/push") => push_subscribe(s, &body),
+        ("POST", "/api/push/remove") => match body["endpoint"].as_str() {
+            Some(e) => match crate::runs::webpush::remove(e) {
+                Ok(_) => text(s, "200 OK", "This device no longer gets notifications."),
+                Err(e) => text(s, "500 Internal Server Error", &format!("{e:#}")),
+            },
+            None => text(s, "400 Bad Request", "endpoint is missing"),
+        },
         ("POST", "/api/spawn") => match spawn_args(&body) {
             Ok(args) => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -322,6 +344,45 @@ fn handle(stream: &Conn, site: &Site) {
         }
         _ => text(s, "404 Not Found", "not found"),
     }
+}
+
+/// `POST /api/push`: a device's push subscription, as the browser gives it
+/// (`{endpoint, keys: {p256dh, auth}}`). With no phone set up yet, this sets up Web Push.
+fn push_subscribe(s: &Conn, body: &serde_json::Value) {
+    use crate::runs::{push, webpush};
+    let get = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let sub = webpush::validate(
+        &get(&body["endpoint"]),
+        &get(&body["keys"]["p256dh"]),
+        &get(&body["keys"]["auth"]),
+        &get(&body["device"]),
+    );
+    let sub = match sub {
+        Ok(sub) => sub,
+        Err(e) => return text(s, "400 Bad Request", &format!("{e:#}")),
+    };
+    if let Err(e) = webpush::add(sub) {
+        return text(s, "500 Internal Server Error", &format!("{e:#}"));
+    }
+    let on = "Notifications from amux come to this device.";
+    let msg = match push::load() {
+        Some(p) if p.service == "webpush" => on.to_string(),
+        Some(p) => format!(
+            "Saved, but amux sends notifications to {} now. Run `amux phone webpush` on the computer to send them here.",
+            p.service
+        ),
+        None => {
+            let p = push::Phone {
+                service: "webpush".into(),
+                ..Default::default()
+            };
+            if let Err(e) = push::save(&p) {
+                return text(s, "500 Internal Server Error", &format!("{e:#}"));
+            }
+            on.to_string()
+        }
+    };
+    text(s, "200 OK", &msg)
 }
 
 fn json_ok(s: &Conn, v: &serde_json::Value) {
