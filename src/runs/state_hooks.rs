@@ -432,10 +432,15 @@ pub fn read_settings(path: &Path) -> Result<Value> {
 /// Writes the settings back atomically, through a symlink to where it points (a dotfiles
 /// repo, say), keeping the file's mode.
 pub fn write_settings(path: &Path, settings: &Value) -> Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mode = std::fs::metadata(&target).ok().map(|m| m.permissions());
     let mut text = serde_json::to_string_pretty(settings)?;
     text.push('\n');
+    write_config_text(path, &text)
+}
+
+/// Writes a config file atomically, through a symlink to its target, keeping its mode.
+pub fn write_config_text(path: &Path, text: &str) -> Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mode = std::fs::metadata(&target).ok().map(|m| m.permissions());
     fsx::write_atomic(&target, text.as_bytes())
         .with_context(|| format!("writing {}", target.display()))?;
     if let Some(mode) = mode {

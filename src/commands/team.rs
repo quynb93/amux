@@ -504,8 +504,9 @@ pub fn wait_team(
 }
 
 /// For the MCP `wait` tool on runs that aren't a team's workers: blocks until every one
-/// of `ids` has finished its turn, needs an answer or has ended, then writes what each
-/// has to say. 124 when `timeout` seconds pass first.
+/// of `ids` has finished its turn or has ended, or until one needs an answer (so it isn't
+/// left blocked behind the others), then writes what each settled run has to say. 124
+/// when `timeout` seconds pass first.
 pub fn wait_runs(
     ids: &[String],
     timeout: u64,
@@ -520,16 +521,29 @@ pub fn wait_runs(
     let deadline = time::now_ms() + timeout as i64 * 1000;
     loop {
         let now = time::now_ms();
-        let all: Vec<Run> = ids.iter().map(|i| runs::load(i)).collect::<Result<_>>()?;
+        let all: Vec<(Run, Option<Kind>)> = ids
+            .iter()
+            .map(|i| {
+                runs::load(i).map(|r| {
+                    let k = settled(&r, now);
+                    (r, k)
+                })
+            })
+            .collect::<Result<_>>()?;
         let busy: Vec<&str> = all
             .iter()
-            .filter(|r| settled(r, now).is_none())
-            .map(|r| r.id.as_str())
+            .filter(|(_, k)| k.is_none())
+            .map(|(r, _)| r.id.as_str())
             .collect();
-        if busy.is_empty() {
-            for r in &all {
-                let k = settled(r, now).unwrap_or(Kind::Idle);
-                tell(out, r, k);
+        let asking = all.iter().any(|(_, k)| matches!(k, Some(Kind::Attention)));
+        if busy.is_empty() || asking {
+            for (r, k) in &all {
+                if let Some(k) = k {
+                    tell(out, r, *k);
+                }
+            }
+            if !busy.is_empty() {
+                let _ = writeln!(out, "Still working: {}", busy.join(", "));
             }
             return Ok(0);
         }

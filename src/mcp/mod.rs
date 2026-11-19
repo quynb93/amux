@@ -4,8 +4,8 @@
 //!
 //! - Framing: one JSON-RPC 2.0 message per line on stdin and stdout. Nothing else ever
 //!   goes to stdout: at start the server keeps private copies of stdin and stdout, points
-//!   fd 0 at /dev/null and fd 1 at stderr, and each tool that runs a CLI command's code
-//!   has its output (and its children's) captured from fds 1 and 2 into a temp file.
+//!   fd 0 at /dev/null and fd 1 at stderr, and each tool that runs a CLI command runs it
+//!   as its own `amux` process, whose output becomes the tool's text.
 //! - Versions: dual-era. A client that opens with `initialize` gets the newest legacy
 //!   revision it asks for (2025-11-25 and earlier). A request carrying
 //!   `_meta["io.modelcontextprotocol/protocolVersion"]` is served statelessly as
@@ -22,9 +22,9 @@ use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::FromRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The stateless revision, served to requests that carry their version in `_meta`.
@@ -330,8 +330,17 @@ fn serve() -> Result<i32> {
     // Set when stdin closes: waits give up, so the server can exit soon.
     let closing = Arc::new(AtomicBool::new(false));
     let mut calls = vec![];
-    for line in BufReader::new(input).lines() {
-        let Ok(line) = line else { break };
+    let mut input = BufReader::new(input);
+    let mut buf = vec![];
+    loop {
+        buf.clear();
+        match input.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        // A line that isn't UTF-8 is a parse error for the client, not the end of the
+        // server.
+        let line = String::from_utf8_lossy(&buf);
         if line.trim().is_empty() {
             continue;
         }
@@ -356,8 +365,18 @@ fn serve() -> Result<i32> {
                 calls.push(std::thread::spawn(move || {
                     let cancelled = || flag.load(Ordering::SeqCst);
                     let stop = || cancelled() || closing.load(Ordering::SeqCst);
-                    let result = tools::call(&name, &args, &stop);
-                    inflight.lock().unwrap().remove(&key);
+                    // A panic in a tool that runs in this process (wait, list,
+                    // report) still answers, so the client isn't left waiting.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tools::call(&name, &args, &stop)
+                    }))
+                    .unwrap_or_else(|_| {
+                        json!({
+                            "content": [{ "type": "text", "text": "amux hit a bug running this tool." }],
+                            "isError": true,
+                        })
+                    });
+                    inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
                     // A cancelled request gets no answer.
                     if !cancelled() {
                         let result = if modern {
@@ -381,83 +400,60 @@ fn serve() -> Result<i32> {
     Ok(0)
 }
 
-/// One CLI command at a time has fds 1 and 2.
-static CAPTURE: Mutex<()> = Mutex::new(());
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Puts fds 1 and 2 back when dropped, even if the command panicked.
-struct Restore(i32, i32);
-
-impl Drop for Restore {
-    fn drop(&mut self) {
-        let _ = std::io::stdout().flush();
-        unsafe {
-            libc::dup2(self.0, 1);
-            libc::dup2(self.1, 2);
-            libc::close(self.0);
-            libc::close(self.1);
-        }
-    }
-}
-
-/// Runs `f` (a CLI command's function) with everything it and its children write to
-/// stdout or stderr going to a temp file, and returns its result and that output.
-pub fn captured(f: impl FnOnce() -> Result<i32>) -> (Result<i32>, String) {
-    let _one = CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
-    let path = std::env::temp_dir().join(format!(
-        "amux-mcp-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                return (
-                    Err(anyhow::anyhow!("can't capture output: {e}")),
-                    String::new(),
-                )
-            }
+/// Runs `amux <args…>` as its own process and returns its exit code and everything it
+/// printed (stdout and stderr together, in order). Each tool call gets its own process,
+/// so calls run side by side and one call's output never lands in another's result. The
+/// child inherits this server's environment, so `AMUX_RUN` makes its spawns workers.
+pub fn run_amux(args: &[String]) -> (Result<i32>, String) {
+    use std::process::{Command, Stdio};
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                Err(anyhow::anyhow!("can't find amux itself: {e}")),
+                String::new(),
+            )
         }
     };
-    let _ = std::fs::remove_file(&path);
-    let _ = std::io::stdout().flush();
-    let result = unsafe {
-        let saved = (
-            libc::fcntl(1, libc::F_DUPFD_CLOEXEC, 3),
-            libc::fcntl(2, libc::F_DUPFD_CLOEXEC, 3),
-        );
-        if saved.0 < 0 || saved.1 < 0 {
-            return (Err(anyhow::anyhow!("can't capture output")), String::new());
+    let (mut reader, writer) = match std::io::pipe() {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                Err(anyhow::anyhow!("can't capture output: {e}")),
+                String::new(),
+            )
         }
-        let restore = Restore(saved.0, saved.1);
-        libc::dup2(file.as_raw_fd(), 1);
-        libc::dup2(file.as_raw_fd(), 2);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        drop(restore);
-        r
     };
-    let mut text = String::new();
+    let writer2 = match writer.try_clone() {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                Err(anyhow::anyhow!("can't capture output: {e}")),
+                String::new(),
+            )
+        }
+    };
+    let child = Command::new(exe)
+        .args(args)
+        .env("AMUX_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::null())
+        .stdout(writer)
+        .stderr(writer2)
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (Err(anyhow::anyhow!("can't run amux: {e}")), String::new()),
+    };
+    // The child's copies of the pipe's write end are the only ones left now that the
+    // Command (which held ours) is gone, so reading ends when the child and anything it
+    // left running in the foreground close them.
     let mut bytes = vec![];
-    if file.rewind().is_ok() && file.read_to_end(&mut bytes).is_ok() {
-        text = String::from_utf8_lossy(&bytes).into_owned();
+    let _ = reader.read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    match child.wait() {
+        Ok(st) => (Ok(st.code().unwrap_or(1)), text),
+        Err(e) => (Err(anyhow::anyhow!("amux didn't finish: {e}")), text),
     }
-    let result = result.unwrap_or_else(|p| {
-        let msg = p
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        Err(anyhow::anyhow!("amux hit a bug: {msg}"))
-    });
-    (result, text)
 }
 
 #[cfg(test)]
@@ -601,23 +597,9 @@ mod tests {
     }
 
     #[test]
-    fn captures_what_a_command_prints() {
-        // Through the fds, as outside tests: libtest captures println! itself.
-        let (r, out) = captured(|| {
-            writeln!(std::io::stdout(), "to stdout")?;
-            writeln!(std::io::stderr(), "to stderr")?;
-            let _ = std::process::Command::new("sh")
-                .args(["-c", "echo from a child"])
-                .status();
-            Ok(3)
-        });
-        assert_eq!(r.unwrap(), 3);
-        assert!(
-            out.contains("to stdout") && out.contains("to stderr"),
-            "{out}"
-        );
-        assert!(out.contains("from a child"), "{out}");
-        let (r, _) = captured(|| panic!("boom"));
-        assert!(format!("{:#}", r.unwrap_err()).contains("boom"));
+    fn runs_amux_and_returns_what_it_printed() {
+        // current_exe() here is the test binary: --help prints and exits 0.
+        let (r, out) = run_amux(&["--help".to_string()]);
+        assert!(r.is_ok(), "{out}");
     }
 }

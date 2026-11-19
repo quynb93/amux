@@ -15,7 +15,7 @@
 
 use crate::paths::tildify;
 use crate::providers::ProviderSpec;
-use crate::runs::state_hooks::{read_settings, write_settings};
+use crate::runs::state_hooks::{read_settings, write_config_text, write_settings};
 use crate::store::{load_accounts, load_providers, overlay_home};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -144,7 +144,9 @@ fn is_amux_table(line: &str) -> bool {
 /// Where amux's block is in a config.toml: the lines from the begin marker through the
 /// end marker, or, if something dropped the end marker, up to the next table.
 fn codex_block_range(lines: &[&str]) -> Option<(usize, usize)> {
-    let start = lines.iter().position(|l| l.trim() == BEGIN)?;
+    // The last begin marker: an orphan one an edit left behind must not stretch the
+    // block back over whatever came after it.
+    let start = lines.iter().rposition(|l| l.trim() == BEGIN)?;
     let end = match lines[start..].iter().position(|l| l.trim() == END) {
         Some(i) => start + i,
         None => {
@@ -317,18 +319,6 @@ fn state_of(t: &Target) -> Result<State> {
     Ok(json_state(&read_settings(&t.path)?))
 }
 
-/// Writes text atomically, through a symlink to its target, keeping the file's mode.
-fn write_text(path: &Path, text: &str) -> Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mode = std::fs::metadata(&target).ok().map(|m| m.permissions());
-    crate::fsx::write_atomic(&target, text.as_bytes())
-        .with_context(|| format!("writing {}", target.display()))?;
-    if let Some(mode) = mode {
-        let _ = std::fs::set_permissions(&target, mode);
-    }
-    Ok(())
-}
-
 fn add(t: &Target, program: &str) -> Result<()> {
     if t.cli == "codex" {
         let text = match std::fs::read_to_string(&t.path) {
@@ -338,7 +328,7 @@ fn add(t: &Target, program: &str) -> Result<()> {
         };
         let new = toml_add(&text, program)?;
         if new != text {
-            write_text(&t.path, &new)?;
+            write_config_text(&t.path, &new)?;
         }
         return Ok(());
     }
@@ -358,7 +348,7 @@ fn remove(t: &Target) -> Result<bool> {
         };
         return match toml_remove(&text) {
             Some(new) => {
-                write_text(&t.path, &new)?;
+                write_config_text(&t.path, &new)?;
                 Ok(true)
             }
             None => Ok(false),

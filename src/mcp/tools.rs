@@ -1,6 +1,6 @@
 //! The MCP server's tools. Each is a thin wrapper over the CLI command of the same job:
-//! it builds that command's arguments and runs its function with the output captured
-//! (`super::captured`), so the rules and limits are the CLI's own (a lead's worker cap,
+//! it builds that command's arguments and runs it as its own `amux` process
+//! (`super::run_amux`), so the rules and limits are the CLI's own (a lead's worker cap,
 //! no workers of workers, slots, guards). `wait`, `list` and `report` return their text
 //! directly and run alongside the others, so a long wait never holds up a peek.
 
@@ -64,7 +64,7 @@ fn defs() -> Vec<(&'static str, &'static str, &'static str, Value, bool)> {
         (
             "wait",
             "Wait for workers",
-            "Block until a worker finishes its turn, needs an answer or ends, and return its report (or its question and the end of its screen). Use instead of polling. Without runs: this run's team (or the only team). With runs: until all of them stop.",
+            "Block until a worker finishes its turn, needs an answer or ends, and return its report (or its question and the end of its screen). Use instead of polling. Without runs: this run's team (or the only team). With runs: until all of them stop, or one needs an answer.",
             schema(
                 json!({
                     "lead": { "type": "string", "description": "The team's lead (default: this run, or the only team)" },
@@ -355,17 +355,12 @@ fn text_result(text: &str, is_error: bool, structured: Option<Value>) -> Value {
     r
 }
 
-/// A CLI command with output captured. On another machine (`gpu:run`) the run's command
-/// goes there over SSH, as `amux <cmd> gpu:run` would.
-fn cli(
-    cmd: &str,
-    argv: Vec<String>,
-    f: fn(&[String]) -> anyhow::Result<i32>,
-) -> (anyhow::Result<i32>, String) {
-    super::captured(|| match crate::remote::forward(cmd, &argv) {
-        Some(r) => r,
-        None => f(&argv),
-    })
+/// A CLI command, run as its own `amux` process. On another machine (`gpu:run`) it goes
+/// there over SSH, as `amux <cmd> gpu:run` does.
+fn cli(cmd: &str, argv: Vec<String>) -> (anyhow::Result<i32>, String) {
+    let mut all = vec![cmd.to_string()];
+    all.extend(argv);
+    super::run_amux(&all)
 }
 
 /// A command's outcome as a tool result: its output, and isError when it failed or
@@ -411,7 +406,7 @@ pub fn call(name: &str, args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> V
             if b(args, "stat") == Some(true) {
                 argv.push("--stat".into());
             }
-            let (r, out) = cli("diff", argv, commands::control::diff_cmd);
+            let (r, out) = cli("diff", argv);
             let out = if r.as_ref().is_ok_and(|c| *c == 0) && out.trim().is_empty() {
                 "No changes.".to_string()
             } else {
@@ -430,7 +425,7 @@ pub fn call(name: &str, args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> V
             if let Some(c) = s(args, "command") {
                 argv.extend(["--command".into(), c.into()]);
             }
-            let (r, out) = cli("verify", argv, commands::verify::verify_cmd);
+            let (r, out) = cli("verify", argv);
             let r = match r {
                 Ok(crate::work::slots::EX_TEMPFAIL) => {
                     return text_result(
@@ -448,7 +443,7 @@ pub fn call(name: &str, args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> V
             if let Some(i) = s(args, "into") {
                 argv.extend(["--into".into(), i.into()]);
             }
-            let (r, out) = cli("overlap", argv, commands::overlap::overlap_cmd);
+            let (r, out) = cli("overlap", argv);
             outcome(r, out, None)
         }
         "land" => {
@@ -468,7 +463,7 @@ pub fn call(name: &str, args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> V
             if b(args, "dryRun") == Some(true) {
                 argv.push("--dry-run".into());
             }
-            let (r, out) = cli("land", argv, commands::overlap::land_cmd);
+            let (r, out) = cli("land", argv);
             outcome(r, out, None)
         }
         "stop" => {
@@ -476,7 +471,7 @@ pub fn call(name: &str, args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> V
             if b(args, "force") == Some(true) {
                 argv.push("--force".into());
             }
-            let (r, out) = cli("stop", argv, commands::runs::stop_cmd);
+            let (r, out) = cli("stop", argv);
             outcome(r, out, None)
         }
         _ => text_result(&format!("Unknown tool {name}."), true, None),
@@ -519,16 +514,12 @@ pub fn spawn_argv(args: &Map<String, Value>) -> Vec<String> {
 }
 
 fn spawn(args: &Map<String, Value>) -> Value {
-    let before: Vec<String> = runs::list().into_iter().map(|r| r.id).collect();
-    let (r, out) = super::captured(|| commands::runs::spawn_cmd(&spawn_argv(args)));
-    // The new run: the one named, else the one that wasn't there before.
-    let started = match s(args, "name") {
-        Some(n) => runs::load(n).ok(),
-        None => runs::list()
-            .into_iter()
-            .filter(|r| !before.contains(&r.id))
-            .max_by_key(|r| r.started_at),
-    };
+    // The new run: amux says "started <run> as <account>" on success.
+    let (r, out) = cli("spawn", spawn_argv(args));
+    let started = out
+        .lines()
+        .find_map(|l| l.split_once("started ")?.1.split_once(" as ").map(|x| x.0))
+        .and_then(|id| runs::load(id).ok());
     let structured = match (&r, &started) {
         (Ok(0), Some(run)) => {
             let mut v = commands::runs::ps_values(std::slice::from_ref(run))
@@ -620,7 +611,7 @@ fn wait(args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> Value {
 
 fn peek(args: &Map<String, Value>) -> Value {
     let run = s(args, "run").unwrap_or_default().to_string();
-    let (r, out) = cli("peek", vec![run], commands::runs::peek_cmd);
+    let (r, out) = cli("peek", vec![run]);
     let lines: Vec<&str> = out.lines().map(str::trim_end).collect();
     let text = match args.get("lines").and_then(Value::as_u64) {
         Some(n) => {
@@ -658,7 +649,7 @@ fn send(args: &Map<String, Value>) -> Value {
         }
         // After `--`, text that starts with - is still text.
         argv.extend(["--".into(), t.into()]);
-        let (r, o) = cli("send", argv, commands::control::send_cmd);
+        let (r, o) = cli("send", argv);
         out.push_str(&o);
         if !matches!(r, Ok(0)) {
             return outcome(r, out, None);
@@ -669,7 +660,7 @@ fn send(args: &Map<String, Value>) -> Value {
         for k in keys {
             argv.extend(["--key".into(), k]);
         }
-        let (r, o) = cli("send", argv, commands::control::send_cmd);
+        let (r, o) = cli("send", argv);
         out.push_str(&o);
         return outcome(r, out, None);
     }
