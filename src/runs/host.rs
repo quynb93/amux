@@ -659,10 +659,20 @@ fn quota_watch(hub: &Mutex<Hub>) {
         .unwrap_or(20_000u64);
     let account = lock(hub).run.account.clone();
     let provider = account.split('@').next().unwrap_or_default().to_string();
-    let codex_home = crate::store::get_provider(&provider)
+    let codex = crate::store::get_provider(&provider)
         .ok()
-        .filter(|s| s.sessions.as_deref() == Some("codex"))
-        .map(|s| s.shared_home);
+        .filter(|s| s.sessions.as_deref() == Some("codex"));
+    let codex_home = codex.as_ref().map(|s| s.shared_home.clone());
+    // A run that resumes a session (`amux failover`, `amux revive`) knows it from the start.
+    if let Some(t) = codex.as_ref().and_then(|s| s.resume_args.as_deref()) {
+        let mut h = lock(hub);
+        if h.run.session.is_none() {
+            if let Some(id) = quota::resumed_session(&h.run.args, t) {
+                h.run.session = Some(id);
+                let _ = save(&h.run);
+            }
+        }
+    }
     let mut seen = None;
     // Whether you were told the account is past switchAt, since it last was under it.
     let mut told = false;
@@ -682,7 +692,12 @@ fn quota_watch(hub: &Mutex<Hub>) {
             h.run.clone()
         };
         if let Some(home) = &codex_home {
-            quota::refresh_codex(&run, home, &mut seen);
+            if let Some(id) = quota::refresh_codex(&run, home, &mut seen) {
+                // Kept so other runs in the folder don't take it, and `amux usage` reads it.
+                let mut h = lock(hub);
+                h.run.session = Some(id);
+                let _ = save(&h.run);
+            }
         }
         let Some(at) = quota::switch_at() else {
             continue;

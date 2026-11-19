@@ -256,12 +256,75 @@ pub fn read_codex_rollout(f: &Path) -> Option<Quota> {
     None
 }
 
-/// The rollout file of a Codex run: the newest one under `<home>/sessions` written since
-/// the run started, whose session started in the run's folder (as `amux failover` picks a
-/// session). Only files changed since then are opened. Every folder is listed: a
+/// What a rollout's `session_meta` line says: Codex writes it first when it creates a new
+/// session's file (`rollout-<local time>-<thread id>.jsonl`); a resumed session appends to
+/// its old file without a new one.
+#[derive(Debug, PartialEq)]
+struct CodexMeta {
+    id: String,
+    cwd: String,
+    /// When the session started (`timestamp`, UTC with milliseconds), ms since the epoch.
+    at: i64,
+    /// A sub-agent's or Codex's own internal session (`source` is an object, or it has a
+    /// `parent_thread_id`), not the one the run's CLI is having.
+    child: bool,
+}
+
+/// The `session_meta` of a rollout file (it carries the base instructions, so it can run
+/// long: read as much as sessions.rs does).
+fn codex_meta(f: &Path) -> Option<CodexMeta> {
+    let mut head = String::new();
+    std::fs::File::open(f)
+        .ok()?
+        .take(256 * 1024)
+        .read_to_string(&mut head)
+        .ok();
+    let v = head
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "session_meta")?;
+    let p = &v["payload"];
+    Some(CodexMeta {
+        id: p["id"].as_str()?.to_string(),
+        cwd: p["cwd"].as_str()?.to_string(),
+        at: p["timestamp"]
+            .as_str()
+            .or_else(|| v["timestamp"].as_str())
+            .and_then(time::parse_iso)?,
+        child: p["source"].is_object() || !p["parent_thread_id"].is_null(),
+    })
+}
+
+/// The session a run's arguments resume, from the provider's `resumeArgs` template
+/// (`["resume", "{id}"]`): `amux failover` and `amux revive` start runs that way.
+pub fn resumed_session(args: &[String], template: &[String]) -> Option<String> {
+    let at = template.iter().position(|t| t == "{id}")?;
+    if args.len() < template.len() {
+        return None;
+    }
+    (0..=args.len() - template.len()).find_map(|start| {
+        let window = &args[start..start + template.len()];
+        let fits = window
+            .iter()
+            .zip(template)
+            .all(|(a, t)| t == "{id}" || a == t);
+        fits.then(|| window[at].clone())
+    })
+}
+
+/// The rollout file of a Codex run, and its session id. Every account's Codex sessions are
+/// in the same `<home>/sessions`, so the folder alone doesn't tell runs apart:
+///
+/// - a run that knows its session (`run.session`: found earlier, or the one its arguments
+///   resume) reads the file of that session;
+/// - otherwise it is the session started in the run's folder soonest after the run itself
+///   started that no other live run has claimed (`claimed`). Codex starts its session as
+///   it starts up, after the run, so two runs in one folder each get their own.
+///
+/// Only files changed since the run started are opened. Every folder is listed: a
 /// folder's own mtime doesn't change when a file in it is written to (a resumed session
 /// appends to a file in an older day folder).
-pub fn codex_rollout_of(run: &Run, home: &Path) -> Option<PathBuf> {
+pub fn codex_rollout_of(run: &Run, home: &Path, claimed: &[String]) -> Option<(PathBuf, String)> {
     use crate::sessions::{mtime_ms, walk};
     let since = run.started_at - 60_000;
     let mut files = Vec::new();
@@ -271,42 +334,48 @@ pub fn codex_rollout_of(run: &Run, home: &Path) -> Option<PathBuf> {
         3,
         &mut files,
     );
-    let mut found: Vec<(i64, PathBuf)> = files
-        .into_iter()
-        .map(|p| (mtime_ms(&p), p))
-        .filter(|(t, _)| *t >= since)
-        .collect();
-    found.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-    found
-        .into_iter()
-        .map(|(_, p)| p)
-        .find(|p| codex_cwd(p).as_deref() == Some(run.cwd.as_str()))
+    let recent = files.into_iter().filter(|p| mtime_ms(p) >= since);
+    if let Some(id) = &run.session {
+        // Its file name ends with the thread id (or `<id>_<rollout id>` after a revert).
+        return recent
+            .filter(|p| p.to_string_lossy().contains(id.as_str()))
+            .find(|p| codex_meta(p).is_some_and(|m| &m.id == id))
+            .map(|p| (p, id.clone()));
+    }
+    // The slack covers a run record written just after its CLI started.
+    let start = run.started_at - 2_000;
+    recent
+        .filter_map(|p| codex_meta(&p).map(|m| (m, p)))
+        .filter(|(m, _)| m.cwd == run.cwd && !m.child && m.at >= start)
+        .filter(|(m, _)| !claimed.contains(&m.id))
+        .min_by_key(|(m, _)| m.at)
+        .map(|(m, p)| (p, m.id))
 }
 
-/// The folder a Codex session started in, from its `session_meta` line (which carries
-/// the base instructions, so it can run long: read as much as sessions.rs does).
-fn codex_cwd(f: &Path) -> Option<String> {
-    let mut head = String::new();
-    std::fs::File::open(f)
-        .ok()?
-        .take(256 * 1024)
-        .read_to_string(&mut head)
-        .ok();
-    head.lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(|v| v["type"] == "session_meta")
-        .and_then(|v| v["payload"]["cwd"].as_str().map(str::to_string))
+/// The Codex sessions that other live runs in the run's folder already read.
+fn claimed_sessions(run: &Run) -> Vec<String> {
+    crate::runs::list()
+        .into_iter()
+        .filter(|r| r.id != run.id && r.cwd == run.cwd && r.state().is_live())
+        .filter_map(|r| r.session)
+        .collect()
 }
 
 /// Keeps a Codex run's numbers current: finds its rollout once, and rereads it when it
-/// has changed. `seen` carries the file and its last change between calls.
-pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) {
+/// has changed. `seen` carries the file and its last change between calls. Returns the
+/// session id when it was just found and the run didn't know it yet, for the caller to
+/// keep in `run.session` (so other runs in the folder don't claim it).
+pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) -> Option<String> {
+    let mut found = None;
     let path = match seen {
         Some((p, _)) if p.exists() => p.clone(),
-        _ => match codex_rollout_of(run, home) {
-            Some(p) => p,
-            None => return,
-        },
+        _ => {
+            let (p, id) = codex_rollout_of(run, home, &claimed_sessions(run))?;
+            if run.session.is_none() {
+                found = Some(id);
+            }
+            p
+        }
     };
     let modified = std::fs::metadata(&path)
         .and_then(|m| m.modified())
@@ -316,7 +385,7 @@ pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) 
         .as_ref()
         .is_some_and(|(p, t)| *p == path && *t == modified)
     {
-        return;
+        return found;
     }
     // Numbers from before the run started belong to whichever account ran the session
     // then (a session resumed by `amux failover` appends to its old file).
@@ -324,6 +393,7 @@ pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) 
         record(&run.account, &q);
     }
     *seen = Some((path, modified));
+    found
 }
 
 /// Reads the numbers of every live Codex run now, for `amux usage`.
@@ -339,7 +409,19 @@ pub fn refresh_live_codex_runs() {
         let Some(spec) = specs.iter().find(|s| s.id == provider) else {
             continue;
         };
-        if spec.sessions.as_deref() == Some("codex") {
+        if spec.sessions.as_deref() != Some("codex") {
+            continue;
+        }
+        // Only runs whose session is known: matching a new one is left to the run's own
+        // host, which keeps what it finds in run.json for other runs to see.
+        let mut run = run;
+        if run.session.is_none() {
+            run.session = spec
+                .resume_args
+                .as_deref()
+                .and_then(|t| resumed_session(&run.args, t));
+        }
+        if run.session.is_some() {
             refresh_codex(&run, &spec.shared_home, &mut None);
         }
     }
@@ -589,41 +671,109 @@ mod tests {
         assert_eq!(q.seven_day.unwrap().resets_at, at + 86_400_000);
     }
 
+    /// A rollout as Codex writes it: `session_meta` first (its own timestamp is when the
+    /// session started), then a `token_count` event with the account's rate limits.
+    fn rollout(day: &Path, id: &str, cwd: &str, at: i64, used: f64) -> PathBuf {
+        let meta = json!({"timestamp": time::iso(at), "type": "session_meta",
+               "payload": {"id": id, "session_id": id, "timestamp": time::iso(at), "cwd": cwd,
+                           "originator": "codex_cli_rs", "cli_version": "0.80.0", "source": "cli"}})
+        .to_string();
+        let count = json!({"timestamp": time::iso(at + 1_000), "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": used, "window_minutes": 300, "resets_at": 4_000_000_000i64}}}})
+        .to_string();
+        let f = day.join(format!("rollout-2026-11-19T10-00-00-{id}.jsonl"));
+        crate::testutil::write(&f, &format!("{meta}\n{count}\n"));
+        f
+    }
+
     #[test]
     fn finds_a_codex_runs_rollout_by_its_folder() {
         let home = crate::testutil::TempDir::new();
         let day = home.path().join("sessions/2026/11/19");
-        let meta = |cwd: &str| {
-            json!({"timestamp": "2026-11-19T10:00:00.000Z", "type": "session_meta",
-                   "payload": {"id": "x", "cwd": cwd}})
-            .to_string()
-        };
-        let count = json!({"timestamp": "2026-11-19T10:01:00.000Z", "type": "event_msg",
-            "payload": {"type": "token_count", "rate_limits": {
-                "primary": {"used_percent": 61.0, "window_minutes": 300, "resets_at": 1_800_000_000}}}})
-        .to_string();
-        crate::testutil::write(
-            &day.join("rollout-a.jsonl"),
-            &format!("{}\n{count}\n", meta("/work/api")),
-        );
-        crate::testutil::write(
-            &day.join("rollout-b.jsonl"),
-            &format!("{}\n", meta("/work/other")),
-        );
+        let now = time::now_ms();
+        rollout(&day, "aaaa", "/work/api", now + 500, 61.0);
+        rollout(&day, "bbbb", "/work/other", now + 400, 5.0);
         let run = Run {
             cwd: "/work/api".into(),
-            started_at: time::now_ms(),
+            started_at: now,
             ..Default::default()
         };
-        let f = codex_rollout_of(&run, home.path()).unwrap();
-        assert!(f.ends_with("rollout-a.jsonl"));
+        let (f, id) = codex_rollout_of(&run, home.path(), &[]).unwrap();
+        assert_eq!(id, "aaaa");
         assert_eq!(read_codex_rollout(&f).unwrap().used(), Some(61.0));
-        // Files from before the run started aren't its own.
-        let old = Run {
-            started_at: time::now_ms() + 3_600_000,
+        // Sessions from before the run started aren't its own.
+        let later = Run {
+            started_at: now + 3_600_000,
             ..run
         };
-        assert!(codex_rollout_of(&old, home.path()).is_none());
+        assert!(codex_rollout_of(&later, home.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn two_codex_runs_in_one_folder_each_read_their_own_rollout() {
+        let home = crate::testutil::TempDir::new();
+        let day = home.path().join("sessions/2026/11/19");
+        let now = time::now_ms();
+        // Run a (work@a) started first; run b (work@b) ten seconds later, same folder.
+        // b's session is written to last, so it is also the newest file.
+        rollout(&day, "sess-a", "/work/api", now - 9_000, 20.0);
+        rollout(&day, "sess-b", "/work/api", now + 1_000, 80.0);
+        // A sub-agent of b's session, started later still, is nobody's run.
+        let sub = day.join("rollout-2026-11-19T10-00-01-sub.jsonl");
+        crate::testutil::write(
+            &sub,
+            &format!(
+                "{}\n",
+                json!({"type": "session_meta", "payload": {"id": "sub", "timestamp": time::iso(now + 2_000),
+                    "cwd": "/work/api", "source": {"subagent": "review"}}})
+            ),
+        );
+        let a = Run {
+            id: "a".into(),
+            account: "codex@a".into(),
+            cwd: "/work/api".into(),
+            started_at: now - 10_000,
+            ..Default::default()
+        };
+        let b = Run {
+            id: "b".into(),
+            account: "codex@b".into(),
+            started_at: now,
+            ..a.clone()
+        };
+        let (fa, ida) = codex_rollout_of(&a, home.path(), &[]).unwrap();
+        let (fb, idb) = codex_rollout_of(&b, home.path(), &[]).unwrap();
+        assert_eq!((ida.as_str(), idb.as_str()), ("sess-a", "sess-b"));
+        assert_eq!(read_codex_rollout(&fa).unwrap().used(), Some(20.0));
+        assert_eq!(read_codex_rollout(&fb).unwrap().used(), Some(80.0));
+        // Once a has claimed its session, a run started at the same time as a takes the
+        // next one rather than a's.
+        let twin = Run {
+            id: "twin".into(),
+            ..a.clone()
+        };
+        let (_, id) = codex_rollout_of(&twin, home.path(), &["sess-a".into()]).unwrap();
+        assert_eq!(id, "sess-b");
+        // A run that knows its session reads that one, whenever it started.
+        let known = Run {
+            session: Some("sess-a".into()),
+            ..b.clone()
+        };
+        let (f, _) = codex_rollout_of(&known, home.path(), &[]).unwrap();
+        assert_eq!(f, fa);
+    }
+
+    #[test]
+    fn a_resumed_runs_session_comes_from_its_arguments() {
+        let t: Vec<String> = vec!["resume".into(), "{id}".into()];
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resumed_session(&args(&["--yolo", "resume", "abc-123"]), &t).as_deref(),
+            Some("abc-123")
+        );
+        assert_eq!(resumed_session(&args(&["exec", "fix it"]), &t), None);
+        assert_eq!(resumed_session(&args(&["resume"]), &t), None);
     }
 
     fn cand(id: &str, used: Option<f64>, limited: bool, busy: usize, default: bool) -> Candidate {
