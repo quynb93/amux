@@ -2779,7 +2779,11 @@ fn web_push_reaches_the_phone_app_encrypted() {
     assert!(out.err.contains("no device"), "{}", out.err);
 
     // The app: its service worker is public, the key and subscriptions need the token.
-    let (mut srv, printed) = start_serve(&s, &["--listen", "127.0.0.1:0"], &[]);
+    let (mut srv, printed) = start_serve(
+        &s,
+        &["--listen", "127.0.0.1:0"],
+        &[("AMUX_WEBPUSH_LOCAL_HTTP", "1")],
+    );
     let link = printed.lines().find(|l| l.contains("?t=")).unwrap().trim();
     let (base, token) = link.split_once("/?t=").unwrap();
     let addr = base.trim_start_matches("http://").to_string();

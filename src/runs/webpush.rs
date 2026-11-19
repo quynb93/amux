@@ -27,6 +27,9 @@ const TTL_SECS: u64 = 12 * 3600;
 const RECORD_SIZE: u32 = 4096;
 /// Push services take at least 4096 bytes of body; keep well under it.
 const MAX_BODY_CHARS: usize = 1000;
+/// The JSON the phone gets, in bytes: 4096 less the 86-byte header, the delimiter and the
+/// 16-byte tag is 3993, so non-ASCII text (up to 4 bytes a character) still fits.
+const MAX_PAYLOAD_BYTES: usize = 3500;
 const MAX_DEVICES: usize = 20;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -115,13 +118,17 @@ fn key_at(file: &Path) -> Result<EcdsaKeyPair> {
     let tmp = file.with_extension(format!("{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     crate::fsx::write_atomic(&tmp, text.as_bytes())?;
-    let linked = std::fs::hard_link(&tmp, file);
+    let placed = match std::fs::hard_link(&tmp, file) {
+        Ok(()) => Ok(()),
+        // Another process's key, or a file with no key in it (which this one replaces).
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match load(file)? {
+            Some(_) => Ok(()),
+            None => std::fs::rename(&tmp, file),
+        },
+        Err(e) => Err(e),
+    };
     let _ = std::fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e).with_context(|| format!("could not write {}", file.display())),
-    }
+    placed.with_context(|| format!("could not write {}", file.display()))?;
     load(file)?.context("the key file is empty")
 }
 
@@ -134,12 +141,36 @@ pub fn public_key() -> Result<String> {
     Ok(B64.encode(key()?.public_key().as_ref()))
 }
 
-fn load_at(file: &Path) -> Vec<Sub> {
-    read_json::<Subs>(file).unwrap_or_default().subscriptions
+fn load_at(file: &Path) -> Result<Vec<Sub>> {
+    Ok(read_json::<Subs>(file)?.subscriptions)
 }
 
+/// The subscribed devices, for showing; none if the file can't be read.
 pub fn load_subs() -> Vec<Sub> {
-    load_at(&subs_file())
+    load_at(&subs_file()).unwrap_or_default()
+}
+
+/// Is this endpoint one of the subscribed devices?
+pub fn subscribed(endpoint: &str) -> bool {
+    load_subs().iter().any(|s| s.endpoint == endpoint)
+}
+
+/// Reads, changes and writes the devices, one writer at a time: the app's server threads
+/// and `amux __push` processes (which drop gone devices) all write the file.
+fn edit_at<T>(file: &Path, f: impl FnOnce(&mut Vec<Sub>) -> T) -> Result<T> {
+    use std::os::fd::AsRawFd;
+    if let Some(dir) = file.parent() {
+        crate::fsx::mkdir_private(dir)?;
+    }
+    let lock = crate::fsx::open_append(&file.with_extension("lock"))?;
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    let mut subs = load_at(file)?;
+    let before = subs.clone();
+    let out = f(&mut subs);
+    if subs != before {
+        save_at(file, subs)?;
+    }
+    Ok(out)
 }
 
 fn save_at(file: &Path, subs: Vec<Sub>) -> Result<()> {
@@ -151,9 +182,22 @@ fn save_at(file: &Path, subs: Vec<Sub>) -> Result<()> {
     )
 }
 
-/// Checks a subscription from the app: a push service's URL (HTTPS; plain HTTP only on
-/// this machine, for tests), a P-256 point and a 16-byte secret.
+/// Checks a subscription from the app: a push service's URL (HTTPS), a P-256 point and a
+/// 16-byte secret. Plain HTTP to this machine is accepted only when
+/// `AMUX_WEBPUSH_LOCAL_HTTP=1` is set (the tests' stand-in push service), so a client of
+/// `amux serve` can't make amux send requests to local ports.
 pub fn validate(endpoint: &str, p256dh: &str, auth: &str, device: &str) -> Result<Sub> {
+    let local_http = std::env::var("AMUX_WEBPUSH_LOCAL_HTTP").is_ok_and(|v| v == "1");
+    validate_with(endpoint, p256dh, auth, device, local_http)
+}
+
+fn validate_with(
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+    device: &str,
+    local_http: bool,
+) -> Result<Sub> {
     if endpoint.len() > 2048 {
         bail!("the endpoint is too long");
     }
@@ -162,14 +206,17 @@ pub fn validate(endpoint: &str, p256dh: &str, auth: &str, device: &str) -> Resul
         u.host_str(),
         Some("127.0.0.1") | Some("localhost") | Some("[::1]")
     );
-    if !(u.scheme() == "https" || (u.scheme() == "http" && local)) || u.host_str().is_none() {
+    if !(u.scheme() == "https" || (u.scheme() == "http" && local && local_http))
+        || u.host_str().is_none()
+    {
         bail!("the endpoint should be an https URL");
     }
     let key = unb64(p256dh).context("p256dh")?;
     if key.len() != 65 || key[0] != 4 {
         bail!("p256dh should be an uncompressed P-256 point");
     }
-    if unb64(auth).context("auth")?.len() != 16 {
+    let auth = unb64(auth).context("auth")?;
+    if auth.len() != 16 {
         bail!("auth should be 16 bytes");
     }
     let device: String = device
@@ -180,7 +227,7 @@ pub fn validate(endpoint: &str, p256dh: &str, auth: &str, device: &str) -> Resul
     Ok(Sub {
         endpoint: endpoint.to_string(),
         p256dh: B64.encode(&key),
-        auth: B64.encode(unb64(auth)?),
+        auth: B64.encode(&auth),
         device,
         added: time::now_ms(),
     })
@@ -188,16 +235,15 @@ pub fn validate(endpoint: &str, p256dh: &str, auth: &str, device: &str) -> Resul
 
 /// Adds (or refreshes) a device; returns how many there are. The oldest go past 20.
 fn add_at(file: &Path, sub: Sub) -> Result<usize> {
-    let mut subs = load_at(file);
-    subs.retain(|s| s.endpoint != sub.endpoint);
-    subs.push(sub);
-    if subs.len() > MAX_DEVICES {
-        let extra = subs.len() - MAX_DEVICES;
-        subs.drain(..extra);
-    }
-    let n = subs.len();
-    save_at(file, subs)?;
-    Ok(n)
+    edit_at(file, |subs| {
+        subs.retain(|s| s.endpoint != sub.endpoint);
+        subs.push(sub);
+        if subs.len() > MAX_DEVICES {
+            let extra = subs.len() - MAX_DEVICES;
+            subs.drain(..extra);
+        }
+        subs.len()
+    })
 }
 
 pub fn add(sub: Sub) -> Result<usize> {
@@ -206,14 +252,11 @@ pub fn add(sub: Sub) -> Result<usize> {
 
 /// Removes the devices with these endpoints; returns how many went.
 fn remove_at(file: &Path, endpoints: &[&str]) -> Result<usize> {
-    let mut subs = load_at(file);
-    let before = subs.len();
-    subs.retain(|s| !endpoints.contains(&s.endpoint.as_str()));
-    let gone = before - subs.len();
-    if gone > 0 {
-        save_at(file, subs)?;
-    }
-    Ok(gone)
+    edit_at(file, |subs| {
+        let before = subs.len();
+        subs.retain(|s| !endpoints.contains(&s.endpoint.as_str()));
+        before - subs.len()
+    })
 }
 
 pub fn remove(endpoint: &str) -> Result<usize> {
@@ -335,13 +378,25 @@ fn vapid_header(key: &EcdsaKeyPair, endpoint: &str) -> Result<String> {
 }
 
 /// What the service worker gets: the title, the text and the link a tap opens.
+/// The text is cut to 1000 characters, and further if its bytes wouldn't fit one record.
 pub fn payload(run: &str, title: &str, body: &str, url: Option<&str>) -> String {
-    let body: String = if body.chars().count() > MAX_BODY_CHARS {
-        body.chars().take(MAX_BODY_CHARS - 1).collect::<String>() + "…"
-    } else {
-        body.to_string()
-    };
-    serde_json::json!({ "title": title, "body": body, "url": url, "tag": run }).to_string()
+    let mut chars: Vec<char> = body.chars().collect();
+    let mut cut = chars.len() > MAX_BODY_CHARS;
+    if cut {
+        chars.truncate(MAX_BODY_CHARS - 1);
+    }
+    loop {
+        let body: String = chars.iter().collect::<String>() + if cut { "…" } else { "" };
+        let p =
+            serde_json::json!({ "title": title, "body": body, "url": url, "tag": run }).to_string();
+        if p.len() <= MAX_PAYLOAD_BYTES || chars.is_empty() {
+            return p;
+        }
+        // Every character is at least one byte of JSON, so this drops at least the excess.
+        let excess = p.len() - MAX_PAYLOAD_BYTES;
+        chars.truncate(chars.len().saturating_sub(excess));
+        cut = true;
+    }
 }
 
 enum Sent {
@@ -389,7 +444,7 @@ pub fn deliver(
     link: Option<&str>,
     urgent: bool,
 ) -> Result<()> {
-    let subs = load_subs();
+    let subs = load_at(&subs_file())?;
     if subs.is_empty() {
         bail!(
             "no device has turned on notifications yet: open the phone app (amux serve, over HTTPS), Monitor → Notifications"
@@ -397,9 +452,20 @@ pub fn deliver(
     }
     let key = key()?;
     let body = payload(run, title, message, link);
+    // All devices at once, so one slow or unreachable push service doesn't hold up the rest.
+    let results: Vec<Result<Sent>> = std::thread::scope(|sc| {
+        let posts: Vec<_> = subs
+            .iter()
+            .map(|s| sc.spawn(|| post(agent, &key, s, body.as_bytes(), urgent)))
+            .collect();
+        posts
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err(anyhow!("the send failed"))))
+            .collect()
+    });
     let (mut sent, mut gone, mut errors) = (0, vec![], vec![]);
-    for s in &subs {
-        match post(agent, &key, s, body.as_bytes(), urgent) {
+    for (s, res) in subs.iter().zip(results) {
+        match res {
             Ok(Sent::Ok) => sent += 1,
             Ok(Sent::Gone) => gone.push(s.endpoint.as_str()),
             Err(e) => {
@@ -532,6 +598,14 @@ mod tests {
             key.public_key().as_ref()
         );
         assert_eq!(key.public_key().as_ref().len(), 65);
+        // A key file with no key in it gets one.
+        let empty = dir.path().join("empty-key.json");
+        std::fs::write(&empty, "{}\n").unwrap();
+        let made = key_at(&empty).unwrap();
+        assert_eq!(
+            key_at(&empty).unwrap().public_key().as_ref(),
+            made.public_key().as_ref()
+        );
 
         let h = vapid_header(&key, "https://push.example.net:8443/push/abc?x=1").unwrap();
         let (t, k) = h
@@ -603,26 +677,32 @@ mod tests {
             std::fs::metadata(&file).unwrap().permissions().mode()
         };
         assert_eq!(mode & 0o077, 0, "subscriptions are private");
-        let subs = load_at(&file);
+        let subs = load_at(&file).unwrap();
         assert_eq!(subs[0].endpoint, bb.endpoint);
         assert_eq!(subs[1].endpoint, a.endpoint);
         assert_eq!(remove_at(&file, &[a.endpoint.as_str()]).unwrap(), 1);
         assert_eq!(remove_at(&file, &["https://nope"]).unwrap(), 0);
-        assert_eq!(load_at(&file), vec![bb]);
+        assert_eq!(load_at(&file).unwrap(), vec![bb]);
         for i in 0..25 {
             let s = validate(&format!("https://push.example/{i}"), p256dh, auth, "").unwrap();
             add_at(&file, s).unwrap();
         }
-        let subs = load_at(&file);
+        let subs = load_at(&file).unwrap();
         assert_eq!(subs.len(), MAX_DEVICES);
         assert_eq!(subs.last().unwrap().endpoint, "https://push.example/24");
 
         // What a subscription has to look like.
         assert!(validate("http://push.example/x", p256dh, auth, "").is_err());
-        assert!(validate("http://127.0.0.1:9/x", p256dh, auth, "").is_ok());
+        assert!(validate_with("http://127.0.0.1:9/x", p256dh, auth, "", false).is_err());
+        assert!(validate_with("http://127.0.0.1:9/x", p256dh, auth, "", true).is_ok());
         assert!(validate("file:///etc/passwd", p256dh, auth, "").is_err());
         assert!(validate("https://p/x", "BCVx", auth, "").is_err());
         assert!(validate("https://p/x", p256dh, "AAAA", "").is_err());
+
+        // A file it can't read is left alone, not replaced by one device.
+        std::fs::write(&file, "not json").unwrap();
+        assert!(add_at(&file, a).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not json");
     }
 
     #[test]
@@ -638,5 +718,18 @@ mod tests {
         assert_eq!(p["url"], "https://h/#run=box%3Aw");
         assert_eq!(p["tag"], "box:w");
         assert_eq!(p["body"].as_str().unwrap().chars().count(), MAX_BODY_CHARS);
+
+        // 1000 four-byte characters (or escapes) wouldn't fit in one 4096-byte record.
+        for text in ["🚀".repeat(1000), "\u{1}".repeat(1000)] {
+            let raw = payload("box:w", "amux: w", &text, Some("https://h/#run=box%3Aw"));
+            assert!(raw.len() <= MAX_PAYLOAD_BYTES, "{}", raw.len());
+            let p: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert!(p["body"].as_str().unwrap().ends_with('…'));
+        }
+        let short = payload("r", "t", "héllo", None);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&short).unwrap()["body"],
+            "héllo"
+        );
     }
 }

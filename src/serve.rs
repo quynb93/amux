@@ -307,14 +307,31 @@ fn handle(stream: &Conn, site: &Site) {
         ("GET", "/api/dirs") => json_ok(s, &serde_json::Value::from(known_dirs())),
         ("GET", "/api/events") => events(stream),
         ("GET", "/api/push") => match crate::runs::webpush::public_key() {
-            Ok(key) => json_ok(
-                s,
-                &serde_json::json!({
-                    "publicKey": key,
-                    "service": crate::runs::push::load().map(|p| p.service),
-                    "devices": crate::runs::webpush::load_subs().len(),
-                }),
-            ),
+            Ok(key) => {
+                // `?endpoint=`: whether amux still has this browser's subscription, and so
+                // whether waiting runs reach it by Web Push (the app then doesn't notify too).
+                let endpoint = url::form_urlencoded::parse(req.query.as_bytes())
+                    .find(|(k, _)| k == "endpoint")
+                    .map(|(_, v)| v.into_owned());
+                let subscribed = endpoint
+                    .as_deref()
+                    .is_some_and(crate::runs::webpush::subscribed);
+                let phone = crate::runs::push::load();
+                let active = subscribed
+                    && phone
+                        .as_ref()
+                        .is_some_and(|p| p.service == "webpush" && p.wants("waiting"));
+                json_ok(
+                    s,
+                    &serde_json::json!({
+                        "publicKey": key,
+                        "service": phone.map(|p| p.service),
+                        "devices": crate::runs::webpush::load_subs().len(),
+                        "subscribed": subscribed,
+                        "active": active,
+                    }),
+                )
+            }
             Err(e) => text(s, "500 Internal Server Error", &format!("{e:#}")),
         },
         ("POST", "/api/push") => push_subscribe(s, &body),
@@ -370,6 +387,11 @@ fn push_subscribe(s: &Conn, body: &serde_json::Value) {
         Some(p) => format!(
             "Saved, but amux sends notifications to {} now. Run `amux phone webpush` on the computer to send them here.",
             p.service
+        ),
+        // phone.json is there but can't be read: say so rather than replace it.
+        None if push::file().exists() => format!(
+            "Saved, but {} can't be read, so amux doesn't know where it sends notifications. Run `amux phone webpush` on the computer to send them here.",
+            crate::paths::tildify(&push::file())
         ),
         None => {
             let p = push::Phone {
