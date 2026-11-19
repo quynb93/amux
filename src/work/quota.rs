@@ -314,11 +314,42 @@ pub fn resumed_session(args: &[String], template: &[String]) -> Option<String> {
     })
 }
 
+/// The sessions whose rollout files a live Codex CLI (`pid`) and the processes it started
+/// hold open, its own (nearest) first; sub-agent sessions left out.
+///
+/// Codex keeps a session's rollout open for appending as long as the session lives: its
+/// recorder opens the file once and hands the handle to the task that writes every line
+/// (`rollout_writer` in codex-rs/core/src/rollout.rs, then core/src/rollout/recorder.rs,
+/// now rollout/src/recorder.rs; a new session's file is opened once it has something to
+/// keep, a resumed one's at once). So the file a run's CLI holds is that run's session,
+/// whatever else started in the same folder at the same time.
+fn held_sessions(pid: u32, home: &Path) -> Vec<(PathBuf, CodexMeta)> {
+    if !crate::runs::alive(pid) {
+        return vec![];
+    }
+    let mut held: Vec<(PathBuf, CodexMeta)> =
+        crate::runs::procs::held_under(pid, &home.join("sessions"))
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+            })
+            .filter_map(|p| codex_meta(&p).map(|m| (p, m)))
+            .filter(|(_, m)| !m.child)
+            .collect();
+    // The session it started with before one it started later (`/new`).
+    held.sort_by_key(|(_, m)| m.at);
+    held
+}
+
 /// The rollout file of a Codex run, and its session id. Every account's Codex sessions are
 /// in the same `<home>/sessions`, so the folder alone doesn't tell runs apart:
 ///
 /// - a run that knows its session (`run.session`: found earlier, or the one its arguments
 ///   resume) reads the file of that session;
+/// - otherwise, while its CLI lives, the session whose rollout the CLI holds open
+///   (`held_sessions`);
 /// - otherwise it is the session started in the run's folder soonest after the run itself
 ///   started that no other live run has claimed (`claimed`). Codex starts its session as
 ///   it starts up, after the run, so two runs in one folder each get their own.
@@ -344,6 +375,12 @@ pub fn codex_rollout_of(run: &Run, home: &Path, claimed: &[String]) -> Option<(P
             .find(|p| codex_meta(p).is_some_and(|m| &m.id == id))
             .map(|p| (p, id.clone()));
     }
+    if let Some((p, m)) = run
+        .pid
+        .and_then(|pid| held_sessions(pid, home).into_iter().next())
+    {
+        return Some((p, m.id));
+    }
     // The slack covers a run record written just after its CLI started.
     let start = run.started_at - 2_000;
     recent
@@ -354,13 +391,23 @@ pub fn codex_rollout_of(run: &Run, home: &Path, claimed: &[String]) -> Option<(P
         .map(|(m, p)| (p, m.id))
 }
 
-/// The Codex sessions that other live runs in the run's folder already read.
-fn claimed_sessions(run: &Run) -> Vec<String> {
-    crate::runs::list()
+/// The Codex sessions that other live runs in the run's folder already read, or whose
+/// rollouts their CLIs hold open.
+fn claimed_sessions(run: &Run, home: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in crate::runs::list()
         .into_iter()
         .filter(|r| r.id != run.id && r.cwd == run.cwd && r.state().is_live())
-        .filter_map(|r| r.session)
-        .collect()
+    {
+        match (r.session, r.pid) {
+            (Some(s), _) => out.push(s),
+            (None, Some(pid)) => {
+                out.extend(held_sessions(pid, home).into_iter().map(|(_, m)| m.id))
+            }
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 /// Keeps a Codex run's numbers current: finds its rollout once, and rereads it when it
@@ -375,7 +422,7 @@ pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) 
             // Only a run still looking for its session needs the others' claims.
             let claimed = match run.session {
                 Some(_) => vec![],
-                None => claimed_sessions(run),
+                None => claimed_sessions(run, home),
             };
             let (p, id) = codex_rollout_of(run, home, &claimed)?;
             if run.session.is_none() {
@@ -769,6 +816,78 @@ mod tests {
         };
         let (f, _) = codex_rollout_of(&known, home.path(), &[]).unwrap();
         assert_eq!(f, fa);
+    }
+
+    #[test]
+    fn a_codex_run_reads_the_rollout_its_cli_holds_open() {
+        let home = crate::testutil::TempDir::new();
+        let day = home.path().join("sessions/2026/11/19");
+        let now = time::now_ms();
+        // Two runs started in one folder within a second: by start times alone, both
+        // would take the session that started first.
+        let first = rollout(&day, "sess-first", "/work/api", now + 100, 10.0);
+        let mine = rollout(&day, "sess-mine", "/work/api", now + 900, 70.0);
+        // A sub-agent's session the CLI also holds is nobody's run.
+        let sub = day.join("rollout-2026-11-19T10-00-01-sub.jsonl");
+        crate::testutil::write(
+            &sub,
+            &format!(
+                "{}\n",
+                json!({"type": "session_meta", "payload": {"id": "sub", "timestamp": time::iso(now),
+                    "cwd": "/work/api", "source": {"subagent": "review"}}})
+            ),
+        );
+        // This test process stands in for the run's Codex, holding its rollout open.
+        let _held = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&mine)
+            .unwrap();
+        let _sub = std::fs::File::open(&sub).unwrap();
+        let run = Run {
+            id: "b".into(),
+            cwd: "/work/api".into(),
+            started_at: now,
+            pid: Some(std::process::id()),
+            ..Default::default()
+        };
+        let (f, id) = codex_rollout_of(&run, home.path(), &[]).unwrap();
+        assert_eq!(id, "sess-mine");
+        assert_eq!(read_codex_rollout(&f).unwrap().used(), Some(70.0));
+        assert_eq!(
+            held_sessions(std::process::id(), home.path())
+                .into_iter()
+                .map(|(_, m)| m.id)
+                .collect::<Vec<_>>(),
+            vec!["sess-mine".to_string()]
+        );
+        // A run whose CLI holds nothing yet (its first turn hasn't started) falls back to
+        // start times, skipping the session another run's CLI holds.
+        let twin = Run {
+            id: "a".into(),
+            pid: None,
+            ..run.clone()
+        };
+        let (_, id) = codex_rollout_of(&twin, home.path(), &[]).unwrap();
+        assert_eq!(id, "sess-first");
+        let held: Vec<String> = held_sessions(std::process::id(), home.path())
+            .into_iter()
+            .map(|(_, m)| m.id)
+            .collect();
+        // Started after the first session: by start times it would take the held one.
+        let late = Run {
+            started_at: now + 2_500,
+            ..twin
+        };
+        let (_, id) = codex_rollout_of(&late, home.path(), &[]).unwrap();
+        assert_eq!(id, "sess-mine");
+        assert!(codex_rollout_of(&late, home.path(), &held).is_none());
+        // A CLI that has exited holds nothing: start times again.
+        let gone = Run {
+            pid: Some(u32::MAX),
+            ..run
+        };
+        let (f, _) = codex_rollout_of(&gone, home.path(), &[]).unwrap();
+        assert_eq!(f, first);
     }
 
     #[test]
