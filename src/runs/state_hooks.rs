@@ -111,49 +111,25 @@ fn from_the_run(run: &str) -> bool {
         if p == pid {
             return true;
         }
-        match parent_of(p) {
+        match super::peer::parent_of(p) {
             Some(pp) if pp > 1 => p = pp,
-            Some(_) => return false,
-            // Can't tell on this system: trust AMUX_RUN.
-            None => return true,
+            // Can't tell (or not on this system): the host would refuse it anyway.
+            _ => return false,
         }
     }
     false
 }
 
-#[cfg(target_os = "linux")]
-fn parent_of(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // "pid (comm) state ppid ...": comm may hold spaces and parentheses.
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(1)?.parse().ok()
-}
-
-#[cfg(target_os = "macos")]
-fn parent_of(pid: u32) -> Option<u32> {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let n = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&mut info as *mut libc::proc_bsdinfo).cast(),
-            size,
-        )
-    };
-    (n == size).then_some(info.pbi_ppid)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn parent_of(_pid: u32) -> Option<u32> {
-    None
-}
-
 fn send(run: &str, report: &Value) -> std::io::Result<()> {
     let mut s = client::connect(run)?;
     s.set_write_timeout(Some(Duration::from_millis(500)))?;
-    write_frame(&mut s, STATE, report.to_string().as_bytes())
+    write_frame(&mut s, STATE, report.to_string().as_bytes())?;
+    // Stay until the host has read it: it checks who sent it (runs/peer.rs), which it
+    // can't once this process is gone.
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    s.set_read_timeout(Some(Duration::from_millis(500)))?;
+    let _ = std::io::Read::read(&mut s, &mut [0u8; 1]);
+    Ok(())
 }
 
 /// The state a hook event means, as a `STATE` payload. None: the event says nothing

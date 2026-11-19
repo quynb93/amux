@@ -555,9 +555,16 @@ pub fn ensure_running() -> bool {
         .stdout(Stdio::null())
         .stderr(log);
     unsafe {
+        // Its own session, and a grandchild rather than a child: started by a command an
+        // agent ran, it must not count as that agent's process (runs/peer.rs), or the
+        // autopilot couldn't type into runs.
         c.pre_exec(|| {
             libc::setsid();
-            Ok(())
+            match libc::fork() {
+                -1 => Err(std::io::Error::last_os_error()),
+                0 => Ok(()),
+                _ => libc::_exit(0),
+            }
         });
     }
     match c.spawn() {

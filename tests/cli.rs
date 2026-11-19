@@ -129,6 +129,7 @@ impl Sandbox {
              [ -n \"$FAKE_PERM\" ] && stty -icanon -echo && for c in 'cargo test --all' 'git push origin main'; do \
                printf '%s\\n' '────────────────' ' Bash command' ' approve this?' '╌╌╌╌╌╌╌╌╌╌' \" $c\" '╌╌╌╌╌╌╌╌╌╌' ' Do you want to proceed?' ' ❯ 1. Yes' '   2. No'; \
                a=$(dd bs=1 count=1 2>/dev/null); echo \"answer $a to $c\"; done\n\
+             [ -n \"$FAKE_SH\" ] && [ \"$AMUX_RUN\" = \"$FAKE_SH_IN\" ] && sh \"$FAKE_SH\"\n\
              [ -n \"$FAKE_CHAT\" ] && while read l; do echo \"got $l\"; [ \"$l\" = ask ] && echo \"Approve this? [y/n]\"; [ \"$l\" = quit ] && exit 7; done\n\
              exit 0\n",
         );
@@ -3340,7 +3341,10 @@ fn serves_the_phone_app_over_https() {
         .trim()
         .to_string();
     assert!(link.starts_with("https://127.0.0.1:"), "{out}");
-    assert!(out.contains("fingerprint") && out.contains("--tailscale"), "{out}");
+    assert!(
+        out.contains("fingerprint") && out.contains("--tailscale"),
+        "{out}"
+    );
     assert!(out.contains("not a CA"), "{out}");
     let (base, token) = link.split_once("/?t=").unwrap();
 
@@ -5390,6 +5394,82 @@ fn auto_approved_prompts_a_hook_reported_never_notify() {
     wait_ps(&s, "hp", "exited 5");
 }
 
+/// What an agent runs is a descendant of its run's CLI: the run hosts check the process at
+/// the other end of their socket, so an agent types only into its own workers.
+#[test]
+fn an_agent_types_only_into_its_own_workers() {
+    let s = Sandbox::new("peer");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    write(&repo.join("a.txt"), "x\n");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &["commit", "-qm", "init"],
+    ] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    let chat = ("FAKE_CHAT", "1");
+    let r = s.amux_with(&["spawn", "--name", "victim", "fake"], &[chat], Some(&repo));
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "victim", "running");
+    // What the lead's agent does in its shell: amux send, and raw frames on the socket.
+    let raw = r#"import os, socket, sys, time
+os.chdir(sys.argv[1])
+s = socket.socket(socket.AF_UNIX)
+s.connect("sock")
+d = sys.argv[3].encode()
+s.sendall(bytes([int(sys.argv[2])]) + len(d).to_bytes(4, "big") + d)
+time.sleep(0.5)
+"#;
+    write(&s.home.join("raw.py"), raw);
+    let script = format!(
+        "A={amux}\n\
+         $A send victim from-lead; echo \"send-victim=$?\"\n\
+         $A spawn --name w fake; echo \"spawn-w=$?\"\n\
+         $A send w from-lead; echo \"send-w=$?\"\n\
+         $A send lead self; echo \"send-self=$?\"\n\
+         V=\"$AMUX_HOME/runs/victim\"\n\
+         python3 {raw} \"$V\" 0 \"$(printf 'raw-input\\r')\"\n\
+         python3 {raw} \"$V\" 3 '{{\"state\":\"blocked\",\"kind\":\"permission\",\"message\":\"forged\"}}'\n\
+         echo sh-done\n",
+        amux = env!("CARGO_BIN_EXE_amux"),
+        raw = s.home.join("raw.py").display(),
+    );
+    write(&s.home.join("lead.sh"), &script);
+    let sh = s.home.join("lead.sh").display().to_string();
+    let r = s.amux_with(
+        &["spawn", "--name", "lead", "--workers", "1", "fake"],
+        &[chat, ("FAKE_SH", &sh), ("FAKE_SH_IN", "lead")],
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let screen = wait_peek(&s, "lead", "sh-done");
+    assert!(screen.contains("send-victim=1"), "{screen}");
+    assert!(screen.contains("spawn-w=0"), "{screen}");
+    assert!(screen.contains("send-w=0"), "{screen}");
+    assert!(screen.contains("send-self=1"), "{screen}");
+    wait_peek(&s, "w", "got from-lead");
+    // You can still type into the victim; nothing from the lead got there.
+    assert_eq!(s.amux(&["send", "victim", "from-you"]).code, 0);
+    let v = wait_peek(&s, "victim", "got from-you");
+    assert!(!v.contains("from-lead") && !v.contains("raw-input"), "{v}");
+    let ps = s.amux(&["ps"]).out;
+    let line = ps.lines().find(|l| l.starts_with("victim")).unwrap();
+    assert!(
+        !line.contains("forged") && !line.contains("waiting"),
+        "{ps}"
+    );
+}
+
 /// `amux mcp` as an MCP client starts it: JSON-RPC over its stdin and stdout.
 struct Mcp {
     child: std::process::Child,
@@ -5620,10 +5700,17 @@ fn an_agent_runs_a_team_through_the_mcp_server() {
     let (text, err, _) = lead.call("diff", serde_json::json!({ "run": "t-a" }));
     assert!(!err && text.contains("No changes"), "{text}");
 
+    // Inside a run, send and stop work only on that run's own workers.
     let (text, err, _) = lead.call("stop", serde_json::json!({ "run": "t" }));
+    assert!(err && text.contains("own workers"), "{text}");
+    let (text, err, _) = lead.call("send", serde_json::json!({ "run": "t", "text": "x" }));
+    assert!(err && text.contains("own workers"), "{text}");
+    let mut you = Mcp::start(&s, &[], &repo);
+    let (text, err, _) = you.call("stop", serde_json::json!({ "run": "t" }));
     assert!(!err && text.contains("Stopped t"), "{text}");
-    let (text, err, _) = lead.call("stop", serde_json::json!({ "run": "t" }));
+    let (text, err, _) = you.call("stop", serde_json::json!({ "run": "t" }));
     assert!(err && text.contains("not running"), "{text}");
+    drop(you);
 
     // A 2026-07-28 client: no handshake, the version on every request.
     let meta = serde_json::json!({

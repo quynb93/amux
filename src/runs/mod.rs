@@ -12,6 +12,7 @@ pub mod client;
 pub mod detect;
 pub mod host;
 pub mod notify;
+pub mod peer;
 pub mod procs;
 pub mod program;
 pub mod push;

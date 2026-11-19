@@ -5,6 +5,7 @@
 
 use super::detect::{Change, Detector, Keys, Source};
 use super::notify::Notifier;
+use super::peer::{Act, Gate};
 use super::program::{Report, PROBE_REPLY};
 use super::screen;
 use super::{
@@ -1163,6 +1164,15 @@ fn lock(hub: &Mutex<Hub>) -> std::sync::MutexGuard<'_, Hub> {
     hub.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether this connection may do `act` on the run (see runs/peer.rs).
+fn permits(gate: &Gate, hub: &Mutex<Hub>, act: Act) -> bool {
+    let (id, lead) = {
+        let h = lock(hub);
+        (h.run.id.clone(), h.run.lead.clone())
+    };
+    gate.allows(act, &id, lead.as_deref())
+}
+
 fn serve(
     stream: UnixStream,
     hub: &Arc<Mutex<Hub>>,
@@ -1171,9 +1181,13 @@ fn serve(
     hooks: &mpsc::Sender<Option<UnixStream>>,
 ) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    // Who connected, read first: it may be gone by the time its frames are read.
+    let gate = Gate::new(&stream);
     let watching = match leading(&stream) {
         Lead::State => {
-            let _ = hooks.send(Some(stream));
+            if permits(&gate, hub, Act::Report) {
+                let _ = hooks.send(Some(stream));
+            }
             return;
         }
         Lead::Snapshot => {
@@ -1222,6 +1236,8 @@ fn serve(
         let mut keys = Keys::default();
         while let Ok((kind, data)) = read_frame(&mut stream) {
             match kind {
+                INPUT | RESIZE if !permits(&gate, &hub, Act::Type) => break,
+                STATE if !permits(&gate, &hub, Act::Report) => break,
                 INPUT => {
                     // Clear the wait before the CLI gets the answer: whatever it prints
                     // after that (maybe its next question) must not be cleared by it.
