@@ -14,13 +14,13 @@
 //!   fails is skipped, and its agent is told exactly what to fix.
 
 use super::verify::{self, Plan, TestOutcome};
-use crate::git::{git, git_raw};
+use crate::git::{run_git as git, run_git_raw as git_raw};
 use crate::runs::{self, Run};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// One run's changes, as of now.
 #[derive(Serialize, Clone, Debug)]
@@ -76,9 +76,7 @@ pub fn default_target(repo: &Path) -> Result<String> {
 
 /// The files `a` and `b` would conflict in if merged, worked out in memory.
 fn merge_conflicts(repo: &Path, a: &str, b: &str) -> Result<Vec<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = crate::git::run_git_cmd(repo)
         .args([
             "merge-tree",
             "--write-tree",
@@ -124,11 +122,20 @@ fn change_of(run: &Run, repo: &Path, target: &str) -> Result<Option<Change>> {
         s if s.is_empty() => git(&dir, &["rev-parse", "HEAD"])?,
         s => s,
     };
-    let mut files: Vec<String> =
-        git_raw(&dir, &["diff", "--name-only", "--no-renames", &base, &tip])?
-            .lines()
-            .map(str::to_string)
-            .collect();
+    let mut files: Vec<String> = git_raw(
+        &dir,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--name-only",
+            "--no-renames",
+            &base,
+            &tip,
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect();
     // New files not added to git yet are changes too, and collide with the same names.
     files.extend(
         git_raw(&dir, &["ls-files", "--others", "--exclude-standard"])?
@@ -246,6 +253,8 @@ pub struct LandOpts {
     /// Tell a live run's agent what to fix when its run can't land.
     pub tell: bool,
     pub dry_run: bool,
+    /// Run a sandboxed run's tests on this machine instead of in its image.
+    pub host_test: bool,
 }
 
 /// Lands runs into their target branch one at a time (see the module docs). Never
@@ -362,7 +371,7 @@ fn land_one(run: &Run, o: &LandOpts, progress: &mut impl FnMut(&str)) -> Result<
     if o.test {
         progress(&format!("{}: testing (waits for a test slot)…", run.id));
         let cmd = o.command.clone().or_else(|| Plan::for_run(run).test);
-        match verify::run_tests(run, cmd)? {
+        match verify::run_tests(run, cmd, o.host_test)? {
             TestOutcome::Passed { .. } => {}
             TestOutcome::NoSlot => {
                 return Ok(res("skipped", "no test slot came free".into(), false))
@@ -427,6 +436,7 @@ mod tests {
         }
     }
     use crate::testutil::{write, TempDir};
+    use std::process::Command;
 
     fn g(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

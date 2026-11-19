@@ -4,7 +4,7 @@
 //! Comments are kept in `runs/<id>/review.json` until they are sent, then marked sent, so
 //! a review can be written over time and from the CLI or `amux ui` alike.
 
-use crate::git::git_raw;
+use crate::git::run_git_raw as git_raw;
 use crate::runs::{self, Run};
 use crate::store::{read_json, write_json};
 use crate::time;

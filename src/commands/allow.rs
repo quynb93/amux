@@ -110,6 +110,7 @@ fn check(r: &Rules, rest: &[String]) -> Result<i32> {
         kind,
         subject,
         yes: "1",
+        doubt: None,
     };
     let cwd = std::env::current_dir()?;
     match approve::judge(r, &ask, &cwd) {

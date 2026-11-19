@@ -7,7 +7,7 @@
 //! output in `runs/<id>/verify.log`.
 
 use super::slots::{self, Holder, Limits, Pressure, Wait};
-use crate::git::git;
+use crate::git::run_git as git;
 use crate::paths::tildify;
 use crate::runs::{self, Run};
 use crate::store::{load_config, read_json, write_json};
@@ -324,11 +324,14 @@ pub fn push(run: &Run, plan: &Plan) -> Result<String> {
     );
     // Never forced: if the remote branch moved, the push fails and says so.
     let refspec = format!("HEAD:refs/heads/{branch}");
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&wt)
-        .args(["push", "--set-upstream", remote.as_str(), refspec.as_str()])
-        .stdin(Stdio::null())
+    let out = crate::git::run_git_cmd(&wt)
+        .args([
+            "push",
+            "--no-verify",
+            "--set-upstream",
+            remote.as_str(),
+            refspec.as_str(),
+        ])
         .output()
         .context("could not run git")?;
     let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -375,8 +378,10 @@ pub enum TestOutcome {
 }
 
 /// Runs the tests in the run's folder once a `test` slot is free, keeping verify.json
-/// current (queued, running, passed or failed) for `amux ui`.
-pub fn run_tests(run: &Run, cmd: Option<String>) -> Result<TestOutcome> {
+/// current (queued, running, passed or failed) for `amux ui`. A sandboxed run's tests are
+/// the agent's code, so they run in its image with its mounts, unless `host` says to run
+/// them on this machine (`--host-test`).
+pub fn run_tests(run: &Run, cmd: Option<String>, host: bool) -> Result<TestOutcome> {
     let Some(cmd) = cmd else {
         bail!(
             "No test command found for {}. Pass --command, or set \"verify\": {{ \"test\": \"<command>\" }} in ~/.amux/config.json.",
@@ -406,9 +411,20 @@ pub fn run_tests(run: &Run, cmd: Option<String>) -> Result<TestOutcome> {
         return Ok(TestOutcome::NoSlot);
     };
     record(&run.id, "test", "running", &cmd, true);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
+    let mut c = match run.sandbox.as_ref().filter(|_| !host) {
+        Some(sb) => {
+            let argv = sb.test_command(&run.id, &run.cwd, &cmd);
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
+        None => {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&cmd);
+            c
+        }
+    };
+    let status = c
         .current_dir(&dir)
         .env("AMUX_RUN", &run.id)
         .env("CI", "1")

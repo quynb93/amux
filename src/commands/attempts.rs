@@ -11,7 +11,7 @@
 //! passing first, then the smaller change (fewer files, fewer lines), since the smallest
 //! change that passes is usually the one to review and merge.
 
-use crate::git::{base_of, git};
+use crate::git::{base_of, run_git as git};
 use crate::runs::{self, Run};
 use crate::util::{need, table};
 use crate::work::overlap::{self, LandOpts};
@@ -148,7 +148,7 @@ pub fn measure(run: &Run, test: bool) -> Attempt {
     };
     let dir = Path::new(&wt.path);
     // Against where it started, uncommitted changes included, plus new files.
-    let tracked = git(dir, &["diff", "--name-only", &base]).unwrap_or_default();
+    let tracked = git(dir, &["diff", "--no-ext-diff", "--name-only", &base]).unwrap_or_default();
     let untracked = git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
     a.files = tracked
         .lines()
@@ -156,14 +156,14 @@ pub fn measure(run: &Run, test: bool) -> Attempt {
         .filter(|l| !l.is_empty())
         .count();
     (a.added, a.removed) =
-        shortstat(&git(dir, &["diff", "--shortstat", &base]).unwrap_or_default());
+        shortstat(&git(dir, &["diff", "--no-ext-diff", "--shortstat", &base]).unwrap_or_default());
     a.commits = git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])
         .ok()
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
     // A run still working could change under the tests; compare what's finished.
     if test && kind != crate::runs::state::Kind::Working {
-        a.tests = match verify::run_tests(run, Plan::for_run(run).test) {
+        a.tests = match verify::run_tests(run, Plan::for_run(run).test, false) {
             Ok(TestOutcome::Passed { .. }) => "passed".into(),
             Ok(TestOutcome::Failed { .. }) => "failed".into(),
             Ok(TestOutcome::NoSlot) => "skipped".into(),

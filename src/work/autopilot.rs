@@ -10,7 +10,7 @@
 //! going while any run is on autopilot.
 
 use super::github::{self, PullRequest};
-use crate::git::git;
+use crate::git::run_git as git;
 use crate::runs::state::{run_kind, Kind};
 use crate::runs::{self, Run};
 use crate::store::{read_json, write_json};
@@ -185,6 +185,12 @@ pub fn tick() -> bool {
     any
 }
 
+fn log(id: &str, line: &str) {
+    if let Ok(mut f) = fsx::open_append(&log_file(id)) {
+        let _ = writeln!(f, "{} {line}", time::iso(time::now_ms()));
+    }
+}
+
 fn set(id: &str, p: &mut Pilot, phase: &str, detail: &str) {
     if p.phase == phase && p.detail == detail {
         return;
@@ -278,7 +284,7 @@ fn step(run: &Run, p: &mut Pilot, now: i64) -> Result<()> {
             );
             Ok(())
         }
-        Some(_) => open(run, p, kind, now),
+        Some(pr) => open(run, p, kind, now, pr.number),
     }
 }
 
@@ -330,7 +336,7 @@ fn no_pr(run: &Run, p: &mut Pilot, kind: Kind) -> Result<()> {
 }
 
 /// An open PR: hand back what needs fixing, or say it's ready (or merge it).
-fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
+fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64, number: u64) -> Result<()> {
     let id = run.id.as_str();
     // The agent commits; amux pushes, once its turn is over (agents are often not allowed
     // to push, and a push mid-turn would start CI on half a fix).
@@ -343,8 +349,24 @@ fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
             return Ok(());
         }
     }
+    // The head first, then the checks: if a push lands in between, the checks seen are
+    // newer than the head the merge is pinned to, and GitHub refuses it.
+    let rv = github::review(run, number)?;
     let (pr, checks) = github::refresh_checks(run)?;
-    let rv = github::review(run, pr.number)?;
+    // Feedback from people with no say in the repository is logged, never acted on.
+    for f in &rv.ignored {
+        if p.seen.contains(&f.id) {
+            continue;
+        }
+        log(
+            id,
+            &format!(
+                "ignored a review comment from {}, who isn't trusted (\"trustReviewsFrom\")",
+                f.author
+            ),
+        );
+        p.seen.push(f.id.clone());
+    }
     if rv.head != p.head {
         p.head = rv.head.clone();
         p.head_at = now;
@@ -543,16 +565,62 @@ fn open(run: &Run, p: &mut Pilot, kind: Kind, now: i64) -> Result<()> {
                 );
                 return Ok(());
             }
-            ready(run, p, &pr, &rv.decision)?;
+            ready(run, p, &pr, &rv, state)?;
         }
     }
     Ok(())
 }
 
-fn ready(run: &Run, p: &mut Pilot, pr: &PullRequest, decision: &str) -> Result<()> {
+/// `"autopilot"` in config.json: what merge mode may do without.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MergePolicy {
+    /// Merge a PR that has no CI checks at all.
+    pub without_checks: bool,
+    /// Merge a PR nobody trusted approved, when the branch doesn't require reviews.
+    pub without_review: bool,
+}
+
+impl MergePolicy {
+    pub fn from_config() -> MergePolicy {
+        let cfg = crate::store::load_config().unwrap_or_default();
+        let a = cfg.extra.get("autopilot");
+        let on = |k: &str| {
+            a.and_then(|a| a.get(k))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        MergePolicy {
+            without_checks: on("mergeWithoutChecks"),
+            without_review: on("mergeWithoutReview"),
+        }
+    }
+
+    /// Why a PR whose checks are `checks` (passing or none) and that GitHub calls
+    /// `decision` (APPROVED, or empty when no review is required) isn't merged by itself.
+    pub fn blocks(&self, checks: &str, decision: &str, approved: bool) -> Option<&'static str> {
+        if checks != "passing" && !self.without_checks {
+            return Some(
+                "it has no CI checks, so it isn't merged without you (mergeWithoutChecks)",
+            );
+        }
+        if decision != "APPROVED" && !approved && !self.without_review {
+            return Some("waiting for an approving review before merging (mergeWithoutReview)");
+        }
+        None
+    }
+}
+
+fn ready(
+    run: &Run,
+    p: &mut Pilot,
+    pr: &PullRequest,
+    rv: &github::Review,
+    checks: &str,
+) -> Result<()> {
     let id = run.id.as_str();
     let head = p.head.clone();
-    match decision {
+    let blocked = MergePolicy::from_config().blocks(checks, &rv.decision, rv.approved);
+    match rv.decision.as_str() {
         "CHANGES_REQUESTED" => set(
             id,
             p,
@@ -568,8 +636,21 @@ fn ready(run: &Run, p: &mut Pilot, pr: &PullRequest, decision: &str) -> Result<(
                 &format!("PR #{} passes CI and needs a review: {}", pr.number, pr.url),
             );
         }
+        _ if p.merge && blocked.is_some() => {
+            let why = blocked.unwrap_or_default();
+            set(id, p, "ready", &format!("checks pass; {why}"));
+            tell(
+                id,
+                p,
+                &format!("ready:{head}"),
+                &format!(
+                    "PR #{} is ready but not merged: {why}: {}",
+                    pr.number, pr.url
+                ),
+            );
+        }
         _ if p.merge => {
-            github::merge(run, pr.number, &p.method)?;
+            github::merge(run, pr.number, &p.method, &rv.head)?;
             set(id, p, "merged", &format!("merged PR #{}", pr.number));
             tell(
                 id,
@@ -594,6 +675,22 @@ fn ready(run: &Run, p: &mut Pilot, pr: &PullRequest, decision: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_only_with_checks_and_a_trusted_approval_by_default() {
+        let safe = MergePolicy::default();
+        assert_eq!(safe.blocks("passing", "APPROVED", false), None);
+        assert_eq!(safe.blocks("passing", "", true), None);
+        // No review required, and nobody trusted approved.
+        assert!(safe.blocks("passing", "", false).is_some());
+        // No checks at all.
+        assert!(safe.blocks("none", "APPROVED", true).is_some());
+        let loose = MergePolicy {
+            without_checks: true,
+            without_review: true,
+        };
+        assert_eq!(loose.blocks("none", "", false), None);
+    }
 
     #[test]
     fn reads_old_or_partial_files() {

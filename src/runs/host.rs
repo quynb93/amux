@@ -33,6 +33,13 @@ const GRACE: Duration = Duration::from_millis(1500);
 /// How often, at most, auto-approve reads the screen while output streams, and how long
 /// the output must be quiet before it reads it once more (see `Hub::approve_due`).
 const APPROVE_EVERY: Duration = Duration::from_millis(100);
+/// How long auto-approve waits for the CLI's PermissionRequest hook to report a prompt it
+/// sees, when that hook is installed, before it judges the prompt without it.
+const HOOK_WAIT: Duration = Duration::from_millis(1500);
+/// How long a hook-reported request stays good for matching the prompt it is about. The
+/// prompt shows as the hook reports it: an old report is for a prompt long gone, and
+/// mustn't vouch for one the agent draws later.
+const HOOK_ASK_TTL: Duration = Duration::from_secs(30);
 
 pub fn main(args: &[String]) -> i32 {
     let Some(id) = args.first() else {
@@ -252,6 +259,21 @@ struct Hub {
     /// Wakes the hook reader (see `hook_reader`), which otherwise sleeps until a hook
     /// connects: for a held-back block, or output auto-approve hasn't read yet.
     wake: Option<mpsc::Sender<Option<(UnixStream, Gate)>>>,
+    /// The CLI's terminal, for answering a prompt when a hook's report comes in.
+    pty: Option<Arc<File>>,
+    /// The provider's `autoApprove`: the prompt layout auto-approve may read.
+    prompt_format: Option<String>,
+    /// Requests the CLI's PermissionRequest hook reported (kind, exact command or file,
+    /// when), not yet matched to a prompt on screen. Each one is used up by the prompt it
+    /// matches, whatever that prompt's verdict, and expires after `HOOK_ASK_TTL`.
+    hook_asks: Vec<(String, String, Instant)>,
+    /// That hook has reported a request in this run: from then on, every prompt must match
+    /// one it reported.
+    hooks_seen: bool,
+    /// The hook is installed for this CLI, so a report is expected for each prompt.
+    hooks_expected: bool,
+    /// The prompt on screen not judged yet, and since when: waiting for its hook report.
+    unjudged: Option<(String, Instant)>,
 }
 
 /// Starts `amux failover <run> [extra…]` in its own session: failover stops this run,
@@ -307,6 +329,12 @@ impl Default for Hub {
             approve_at: None,
             approve_due: false,
             wake: None,
+            pty: None,
+            prompt_format: None,
+            hook_asks: Vec::new(),
+            hooks_seen: false,
+            hooks_expected: false,
+            unjudged: None,
         }
     }
 }
@@ -345,10 +373,32 @@ impl Hub {
         let Some(r) = super::program::from_hook(payload) else {
             return;
         };
+        if let Some((kind, subject)) = super::program::ask_from_hook(payload) {
+            let now = Instant::now();
+            self.hook_asks
+                .retain(|(_, _, at)| now.saturating_duration_since(*at) < HOOK_ASK_TTL);
+            if self.hook_asks.len() >= 16 {
+                self.hook_asks.remove(0);
+            }
+            self.hook_asks.push((kind, subject, now));
+            self.hooks_seen = true;
+        }
         let change = self.detector.hook(r);
         let record = self.detector.take_record();
         self.set_status(record);
         self.apply(change);
+        // A prompt on screen may have been waiting for this report.
+        self.retry_approve();
+    }
+
+    /// Judges a prompt on screen that waits for its hook report (see `auto_approve`).
+    fn retry_approve(&mut self) {
+        if self.unjudged.is_none() {
+            return;
+        }
+        if let Some(pty) = self.pty.clone() {
+            self.approve_now(&pty);
+        }
     }
 
     /// The account hit its usage limit: the run waits (with the CLI's message), the
@@ -377,7 +427,10 @@ impl Hub {
 
     /// Whether auto-approve may answer prompts in this run.
     fn auto_approving(&mut self) -> bool {
-        if self.run.auto_approve == Some(false) {
+        // Only prompts whose layout is known are read: a provider says so (autoApprove).
+        if self.run.auto_approve == Some(false)
+            || self.prompt_format.as_deref() != Some("claude-code")
+        {
             return false;
         }
         let now = time::now_ms();
@@ -388,6 +441,18 @@ impl Hub {
         !self.rules.allow.is_empty()
     }
 
+    /// Uses up the hook-reported request that is the prompt on screen, if one reported in
+    /// the last `HOOK_ASK_TTL` is. Expired reports are dropped.
+    fn take_hook_ask(&mut self, ask: &approve::Ask, cwd: &Path, now: Instant) -> bool {
+        self.hook_asks
+            .retain(|(_, _, at)| now.saturating_duration_since(*at) < HOOK_ASK_TTL);
+        let hooked = self
+            .hook_asks
+            .iter()
+            .position(|(k, s, _)| same_request(k, s, ask, cwd));
+        hooked.map(|i| self.hook_asks.remove(i)).is_some()
+    }
+
     /// Answers a permission prompt on the screen when the rules allow what it asks, and
     /// logs each prompt it judged. True when it answered.
     fn auto_approve(&mut self, mut master: &File) -> bool {
@@ -395,15 +460,41 @@ impl Hub {
             return false;
         }
         let now = time::now_ms();
-        let Some(ask) = approve::read_prompt(&screen::text(&self.screen)) else {
+        let Some(mut ask) = approve::read_prompt(&screen::text(&self.screen)) else {
             self.judged = None;
             self.held = false;
+            self.unjudged = None;
             return false;
         };
         let label = ask.label();
         if self.judged.as_deref() == Some(label.as_str()) {
             return false;
         }
+        // The screen shows what the agent wrote, which can look like a prompt of its own.
+        // The CLI's PermissionRequest hook reports what it really asks: once it has
+        // reported in this run, a prompt is only answered if it matches a report.
+        let cwd = PathBuf::from(&self.run.cwd);
+        let hooked = self.take_hook_ask(&ask, &cwd, Instant::now());
+        if !hooked && (self.hooks_seen || self.hooks_expected) {
+            let since = match &self.unjudged {
+                Some((l, at)) if *l == label => *at,
+                _ => {
+                    self.unjudged = Some((label.clone(), Instant::now()));
+                    Instant::now()
+                }
+            };
+            if since.elapsed() < HOOK_WAIT {
+                // Its report may still be on its way: judge it when it comes.
+                return false;
+            }
+            if self.hooks_seen && ask.doubt.is_none() {
+                ask.doubt = Some(
+                    "the prompt on screen isn't what the CLI's PermissionRequest hook reported"
+                        .into(),
+                );
+            }
+        }
+        self.unjudged = None;
         self.judged = Some(label.clone());
         let (action, why) = match approve::judge(&self.rules, &ask, Path::new(&self.run.cwd)) {
             approve::Verdict::Allow(by) => ("approved", by.join(", ")),
@@ -552,6 +643,51 @@ impl Hub {
     }
 }
 
+/// The run's provider's prompt layout (`autoApprove`), and whether its CLI's
+/// PermissionRequest state hook is installed (and can reach this host: not from inside a
+/// container).
+fn prompt_reading(run: &Run) -> (Option<String>, bool) {
+    use super::state_hooks as sh;
+    let provider = run.account.split('@').next().unwrap_or_default();
+    let Ok(spec) = crate::store::get_provider(provider) else {
+        return (None, false);
+    };
+    let expected = run.sandbox.is_none()
+        && sh::cli(&spec.id).is_some_and(|cli| {
+            sh::read_settings(&sh::config_path(&spec, cli))
+                .is_ok_and(|v| sh::installed_events(&v, cli).contains(&"PermissionRequest"))
+        });
+    (spec.auto_approve.clone(), expected)
+}
+
+/// Whether a hook-reported request (`kind`, exact `subject`) is the prompt on screen.
+/// A file may show relative to the run's folder. A tool other than bash or a file edit
+/// (`other`) is the prompt on screen when that one isn't bash or an edit either.
+fn same_request(kind: &str, subject: &str, ask: &approve::Ask, cwd: &Path) -> bool {
+    if kind == "other" {
+        return !matches!(ask.kind.as_str(), "bash" | "edit");
+    }
+    if kind != ask.kind {
+        return false;
+    }
+    match kind {
+        "bash" => subject.trim() == ask.subject.trim(),
+        _ => {
+            let shown = Path::new(&ask.subject);
+            let abs = |p: &Path| {
+                if p.is_relative() {
+                    cwd.join(p)
+                } else {
+                    p.to_path_buf()
+                }
+            };
+            let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+            !ask.subject.is_empty()
+                && (subject == ask.subject || canon(abs(shown)) == canon(abs(Path::new(subject))))
+        }
+    }
+}
+
 /// Waits for a `runs` slot when `"limits"` caps how many runs are alive, or the machine is
 /// too busy to start one more. The run shows as queued meanwhile. The slot is held until
 /// the host exits, which is when the CLI has.
@@ -640,11 +776,15 @@ fn host(id: &str) -> Result<i32> {
     save(&run)?;
 
     let master = Arc::new(File::from(master));
+    let (prompt_format, hooks_expected) = prompt_reading(&run);
     let hub = Arc::new(Mutex::new(Hub {
         detector: Detector::new(&run.waiting_patterns).with_limits(&run.limit_patterns),
         notifier: Notifier::from_config(),
         run: run.clone(),
         screen: screen::new_parser(run.rows.max(1), run.cols.max(1), 0),
+        pty: Some(master.clone()),
+        prompt_format,
+        hooks_expected,
         ..Default::default()
     }));
     let (done_tx, done_rx) = mpsc::channel::<()>();
@@ -1094,10 +1234,13 @@ fn hook_reader(rx: &mpsc::Receiver<Option<(UnixStream, Gate)>>, hub: &Mutex<Hub>
         if h.approve_due && quiet {
             h.approve_now(master);
         }
+        // A prompt waiting for its hook report that never came is judged without it.
+        h.retry_approve();
         h.settle(Instant::now());
         timeout = if h.approve_due {
             Some(APPROVE_EVERY)
-        } else if h.pending.is_some() {
+        } else if h.pending.is_some() || h.unjudged.is_some() {
+            // A held-back block, or a prompt waiting for its hook report (HOOK_WAIT).
             Some(Duration::from_millis(100))
         } else {
             None
@@ -1304,6 +1447,65 @@ mod tests {
         let mut client = screen::new_parser(4, 20, 0);
         client.process(&screen::snapshot(&h.screen));
         assert_eq!(screen::text(&client), ["uno", "two"]);
+    }
+
+    /// A hook report vouches for one prompt, and only for a short while: a prompt the agent
+    /// draws later with the same command isn't answered on its strength.
+    #[test]
+    fn old_or_used_hook_reports_approve_nothing() {
+        let t = crate::testutil::TempDir::new();
+        let master_path = t.path().join("pty");
+        let prompt = "────────────────────────────────────────\r\n Bash command\r\n\
+                      ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\r\n cargo test\r\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\r\n\
+                      \r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No";
+        let hub = |asks: Vec<(String, String, Instant)>| {
+            let mut h = Hub {
+                prompt_format: Some("claude-code".into()),
+                rules: approve::starter(),
+                // Not reread from disk while the test runs.
+                rules_at: i64::MAX / 2,
+                hooks_seen: true,
+                hook_asks: asks,
+                // Waited for its report long enough: judged now.
+                unjudged: Some((
+                    "bash: cargo test".into(),
+                    Instant::now() - Duration::from_secs(5),
+                )),
+                ..Default::default()
+            };
+            h.run.id = format!("no-such-run-{}", std::process::id());
+            h.run.cwd = t.path().to_string_lossy().into_owned();
+            h.screen.process(prompt.as_bytes());
+            h
+        };
+        let report = |age: u64| {
+            (
+                "bash".to_string(),
+                "cargo test".to_string(),
+                Instant::now() - Duration::from_secs(age),
+            )
+        };
+        let master = File::create(&master_path).unwrap();
+        // Older than HOOK_ASK_TTL.
+        let mut h = hub(vec![report(31)]);
+        assert!(!h.auto_approve(&master));
+        // Judged (and left for you), not skipped.
+        assert_eq!(
+            (h.judged.as_deref(), h.held),
+            (Some("bash: cargo test"), true)
+        );
+        assert!(h.hook_asks.is_empty());
+        // Used up by the prompt it matched (whatever its verdict).
+        let mut h = hub(vec![report(1)]);
+        let ask = approve::read_prompt(&screen::text(&h.screen)).unwrap();
+        assert!(h.take_hook_ask(&ask, t.path(), Instant::now()));
+        assert!(!h.take_hook_ask(&ask, t.path(), Instant::now()));
+        assert!(!h.auto_approve(&master));
+        assert!(h.held);
+        assert_eq!(std::fs::read(&master_path).unwrap(), b"");
+        // A fresh one matches.
+        let mut h = hub(vec![report(29)]);
+        assert!(h.take_hook_ask(&ask, t.path(), Instant::now()));
     }
 
     #[test]
