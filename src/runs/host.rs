@@ -29,6 +29,9 @@ const LOG_ROTATE: u64 = 4 * 1024 * 1024;
 /// How long a hook-reported permission block is held back for auto-approve to answer it
 /// (see `Hub::apply`).
 const GRACE: Duration = Duration::from_millis(1500);
+/// How often, at most, auto-approve reads the screen while output streams, and how long
+/// the output must be quiet before it reads it once more (see `Hub::approve_due`).
+const APPROVE_EVERY: Duration = Duration::from_millis(100);
 
 pub fn main(args: &[String]) -> i32 {
     let Some(id) = args.first() else {
@@ -239,6 +242,15 @@ struct Hub {
     auto_answered: Option<Instant>,
     /// A hook-reported block not announced yet, and since when (see `apply`).
     pending: Option<(String, Instant)>,
+    /// When auto-approve last read the screen, and whether there has been output since.
+    /// Reading the screen is costly, so it is read when a prompt is likely: the new output
+    /// has a prompt's words, or the output has gone quiet; otherwise at most every
+    /// APPROVE_EVERY.
+    approve_at: Option<Instant>,
+    approve_due: bool,
+    /// Wakes the hook reader (see `hook_reader`), which otherwise sleeps until a hook
+    /// connects: for a held-back block, or output auto-approve hasn't read yet.
+    wake: Option<mpsc::Sender<Option<UnixStream>>>,
 }
 
 /// Starts `amux failover <run> [extra…]` in its own session: failover stops this run,
@@ -291,6 +303,9 @@ impl Default for Hub {
             held: false,
             auto_answered: None,
             pending: None,
+            approve_at: None,
+            approve_due: false,
+            wake: None,
         }
     }
 }
@@ -414,6 +429,49 @@ impl Hub {
         approved
     }
 
+    /// Auto-approve reads the screen now; when it answered, the run isn't waiting after
+    /// all, and no one needs to hear about it. True when it answered.
+    fn approve_now(&mut self, master: &File) -> bool {
+        self.approve_at = Some(Instant::now());
+        self.approve_due = false;
+        if !self.auto_approve(master) {
+            return false;
+        }
+        let cleared = self.detector.answered();
+        // A hook-reported block goes back to working: record that too.
+        let record = self.detector.take_record();
+        self.set_status(record);
+        self.pending = None;
+        if self.run.waiting.is_some() {
+            self.apply(cleared);
+        }
+        true
+    }
+
+    /// New output came: whether auto-approve should read the screen now. Otherwise the
+    /// hook reader reads it once the output goes quiet.
+    fn approve_for(&mut self, chunk: &[u8]) -> bool {
+        if !self.auto_approving() {
+            return false;
+        }
+        let likely = [&b"Do you want"[..], b"1. Yes"]
+            .iter()
+            .any(|w| memchr::memmem::find(chunk, w).is_some());
+        if likely || self.approve_at.is_none_or(|t| t.elapsed() >= APPROVE_EVERY) {
+            return true;
+        }
+        if !std::mem::replace(&mut self.approve_due, true) {
+            self.wake();
+        }
+        false
+    }
+
+    fn wake(&self) {
+        if let Some(w) = &self.wake {
+            let _ = w.send(None);
+        }
+    }
+
     fn title(&self) -> String {
         format!("amux: {} ({})", self.run.id, self.run.account)
     }
@@ -435,6 +493,7 @@ impl Hub {
                     && self.auto_approving()
                 {
                     self.pending = Some((reason, Instant::now()));
+                    self.wake();
                     return;
                 }
                 self.announce(reason);
@@ -596,10 +655,11 @@ fn host(id: &str) -> Result<i32> {
     }
     // State hooks' connections, in the order they came, read off the accept thread so a
     // slow one never holds up a client attaching. It also announces held-back blocks.
-    let (hooks_tx, hooks_rx) = mpsc::channel::<UnixStream>();
+    let (hooks_tx, hooks_rx) = mpsc::channel::<Option<UnixStream>>();
+    lock(&hub).wake = Some(hooks_tx.clone());
     {
-        let hub = hub.clone();
-        std::thread::spawn(move || hook_reader(&hooks_rx, &hub));
+        let (master, hub) = (master.clone(), hub.clone());
+        std::thread::spawn(move || hook_reader(&hooks_rx, &hub, &master));
     }
     {
         let (master, hub) = (master.clone(), hub.clone());
@@ -932,17 +992,8 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         // caused it (each saves run.json).
         let record = h.detector.take_record();
         h.set_status(record);
-        if h.auto_approve(master) {
-            // Answered for you: not waiting after all, and no one needs to hear about it.
-            let cleared = h.detector.answered();
-            // A hook-reported block goes back to working: record that too.
-            let record = h.detector.take_record();
-            h.set_status(record);
-            h.pending = None;
-            if h.run.waiting.is_some() {
-                h.apply(cleared);
-            }
-        } else {
+        // Answered for you: not waiting after all (see `approve_now`).
+        if !(h.approve_for(chunk) && h.approve_now(master)) {
             h.apply(change);
         }
         h.settle(Instant::now());
@@ -970,25 +1021,43 @@ enum Lead {
     Other,
 }
 
-/// Reads state hooks' reports, one connection at a time in the order they came, and
-/// announces held-back blocks when their time is up (see `Hub::settle`).
-fn hook_reader(rx: &mpsc::Receiver<UnixStream>, hub: &Mutex<Hub>) {
+/// Reads state hooks' reports, one connection at a time in the order they came (None
+/// only wakes it), announces held-back blocks when their time is up (see `Hub::settle`),
+/// and has auto-approve read the screen once output it skipped has gone quiet. With
+/// nothing of that to do, it sleeps until woken.
+fn hook_reader(rx: &mpsc::Receiver<Option<UnixStream>>, hub: &Mutex<Hub>, master: &File) {
+    let mut timeout = None;
     loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(stream) => {
+        let got = match timeout {
+            Some(t) => rx.recv_timeout(t),
+            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match got {
+            Ok(Some(stream)) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
                 if let Ok((STATE, data)) = read_frame(&mut &stream) {
                     lock(hub).hook_report(&data);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(None) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
         let mut h = lock(hub);
         if h.run.exit_code.is_some() {
             return;
         }
+        let quiet = time::now_ms() - h.last_out >= APPROVE_EVERY.as_millis() as i64;
+        if h.approve_due && quiet {
+            h.approve_now(master);
+        }
         h.settle(Instant::now());
+        timeout = if h.approve_due {
+            Some(APPROVE_EVERY)
+        } else if h.pending.is_some() {
+            Some(Duration::from_millis(100))
+        } else {
+            None
+        };
     }
 }
 
@@ -1058,12 +1127,12 @@ fn serve(
     hub: &Arc<Mutex<Hub>>,
     master: &Arc<File>,
     pid: u32,
-    hooks: &mpsc::Sender<UnixStream>,
+    hooks: &mpsc::Sender<Option<UnixStream>>,
 ) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let watching = match leading(&stream) {
         Lead::State => {
-            let _ = hooks.send(stream);
+            let _ = hooks.send(Some(stream));
             return;
         }
         Lead::Snapshot => {

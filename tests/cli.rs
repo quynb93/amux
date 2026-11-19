@@ -4129,6 +4129,50 @@ fn works_on_github_issues_and_runs_commands_on_a_schedule() {
     panic!("the scheduler is still going");
 }
 
+/// Auto-approve reads the screen only when a prompt is likely, to save the cost of
+/// rendering it for every chunk. A prompt drawn right after streaming output, with its
+/// words apart (cursor moves instead of spaces, so no chunk holds "Do you want"), is
+/// still answered once the output goes quiet.
+#[test]
+fn auto_approve_answers_a_prompt_drawn_mid_stream() {
+    let s = Sandbox::new("allow2");
+    let bin = s.home.join("bin/perm-cli");
+    write(
+        &bin,
+        "#!/bin/sh\nstty -icanon -echo\ni=0; while [ $i -lt 50 ]; do i=$((i+1)); echo \"building $i\"; sleep 0.01; done\n\
+         printf '%s\\n' '────────────────' ' Bash command' '╌╌╌╌╌╌╌╌╌╌' ' cargo test --all' '╌╌╌╌╌╌╌╌╌╌'\n\
+         printf ' Do\\033[1Cyou\\033[1Cwant\\033[1Cto\\033[1Cproceed?\\r\\n ❯ 1.\\033[1CYes\\r\\n   2. No\\r\\n'\n\
+         a=$(dd bs=1 count=1 2>/dev/null); echo \"answer $a\"; read x\n",
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = bin.to_str().unwrap().into();
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    assert_eq!(s.amux(&["allow", "bash: cargo test*"]).code, 0);
+    assert_eq!(s.amux(&["spawn", "--name", "mid", "fake"]).code, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let out = s.amux(&["peek", "mid"]).out;
+        if out.contains("answer 1") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never answered:\n{out}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let log = s.amux(&["allow", "--log", "mid"]).out;
+    assert!(
+        log.contains("approved") && log.contains("cargo test --all"),
+        "{log}"
+    );
+    s.amux(&["stop", "mid"]);
+}
+
 #[test]
 fn answers_permission_prompts_the_rules_allow() {
     let s = Sandbox::new("allow");

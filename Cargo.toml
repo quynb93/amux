@@ -9,6 +9,7 @@ repository = "https://github.com/quynb93/amux"
 
 [dependencies]
 anyhow = "1"
+memchr = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
