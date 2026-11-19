@@ -3532,7 +3532,8 @@ fn serves_the_phone_app_through_tailscale() {
     write(
         &ts,
         &format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\n  status) echo '{{\"Self\":{{\"DNSName\":\"box.tail1.ts.net.\"}}}}';;\n  serve) [ -n \"$TS_FAIL\" ] && {{ echo 'HTTPS is not enabled' >&2; exit 1; }}; sleep 5;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\n  status) echo '{{\"Self\":{{\"DNSName\":\"box.tail1.ts.net.\"}}}}';;\n  serve) [ \"$3\" = off ] && exit 0; [ -n \"$TS_FAIL\" ] && {{ echo 'HTTPS is not enabled' >&2; exit 1; }}; trap 'echo TERM >> \"{}\"; exit 0' TERM; sleep 5 & wait;;\nesac\n",
+            calls.display(),
             calls.display()
         ),
     );
@@ -3559,11 +3560,21 @@ fn serves_the_phone_app_through_tailscale() {
         &format!("GET /?t={token} HTTP/1.1\r\nHost: amux.localhost\r\n\r\n"),
     );
     assert!(login.contains("; Secure"), "{login}");
+    let named = http(
+        &format!("127.0.0.1:{port}"),
+        "GET /manifest.webmanifest HTTP/1.1\r\nHost: box.tail1.ts.net\r\n\r\n",
+    );
+    assert!(named.starts_with("HTTP/1.1 200"), "{named}");
     assert!(fs::read_to_string(s.amux_home.join("serve.json"))
         .unwrap()
         .contains("https://box.tail1.ts.net"));
-    let _ = srv.kill();
-    let _ = srv.wait();
+    // Killed, it takes Tailscale's forwarding down with it.
+    unsafe { libc::kill(srv.id() as i32, libc::SIGTERM) };
+    let st = srv.wait().unwrap();
+    assert_eq!(st.code(), Some(128 + libc::SIGTERM), "{st:?}");
+    let called = fs::read_to_string(&calls).unwrap();
+    assert!(called.contains("TERM"), "{called}");
+    assert!(called.contains("serve --https=443 off"), "{called}");
 
     let failed = s.amux_with(
         &["serve", "--listen", "127.0.0.1:0", "--tailscale"],
