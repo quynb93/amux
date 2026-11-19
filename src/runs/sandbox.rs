@@ -37,6 +37,16 @@ pub struct Sandbox {
     /// `-e` entries: a bare name takes its value from the host's environment (the
     /// account's variables, AMUX_RUN, a token); `NAME=value` is set as given.
     pub env: Vec<String>,
+    /// Which amux home started the container: a short hash of the canonical AMUX_HOME and
+    /// your uid. It is in the container's name and its `amux.home` label, so runs of
+    /// another home or user on the same engine never share a name, and amux only ever
+    /// removes its own containers. Empty for runs saved before it was.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home: String,
+    /// The container's name, `amux-<home>-<run>`. Empty for runs saved before it was,
+    /// whose containers are named `amux-<run>`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -95,9 +105,14 @@ impl Mount {
 }
 
 impl Sandbox {
-    /// The container's name: `amux-<run>`.
-    pub fn container(id: &str) -> String {
-        format!("amux-{id}")
+    /// The container's name: the saved one, or `amux-<run>` for a run saved before names
+    /// were.
+    pub fn container(&self, id: &str) -> String {
+        if self.name.is_empty() {
+            format!("amux-{id}")
+        } else {
+            self.name.clone()
+        }
     }
 
     /// `docker` or `podman`, for display.
@@ -125,10 +140,13 @@ impl Sandbox {
             "--pull".into(),
             "never".into(),
             "--name".into(),
-            Self::container(id),
+            self.container(id),
             "--label".into(),
             format!("amux.run={id}"),
         ];
+        if !self.home.is_empty() {
+            c.extend(["--label".into(), format!("amux.home={}", self.home)]);
+        }
         if self.podman() {
             // Rootless podman maps your uid to root unless told to keep it.
             c.push("--userns=keep-id".into());
@@ -154,16 +172,58 @@ impl Sandbox {
         c
     }
 
-    /// Removes the run's container if it's still there (`<engine> rm -f`). Quiet and
-    /// best-effort: with `--rm` it is usually gone already.
+    /// `<engine> ps` filters that match only this run's container: its run and home
+    /// labels, or for a run saved before homes were, its run label and name.
+    pub fn filters(&self, id: &str) -> Vec<String> {
+        let mut f = vec![format!("label=amux.run={id}")];
+        if self.home.is_empty() {
+            f.push(format!("name={}", self.container(id)));
+        } else {
+            f.push(format!("label=amux.home={}", self.home));
+        }
+        f
+    }
+
+    /// Removes the run's container if it's still there. Quiet and best-effort: with `--rm`
+    /// it is usually gone already. Only a container whose labels say it is this run's is
+    /// removed (`<engine> ps -a -q --filter …`, then `rm -f` by id), never another home's
+    /// or another user's.
     pub fn remove(&self, id: &str) {
+        let mut ps = Command::new(&self.engine);
+        ps.args(["ps", "-a", "-q"]);
+        for f in self.filters(id) {
+            ps.args(["--filter", &f]);
+        }
+        let Ok(out) = ps.stdin(Stdio::null()).stderr(Stdio::null()).output() else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
         let _ = Command::new(&self.engine)
-            .args(["rm", "-f", &Self::container(id)])
+            .args(["rm", "-f"])
+            .args(&ids)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
+}
+
+/// An amux home's id in container names and labels: a short hash of the canonical
+/// AMUX_HOME and your uid.
+pub fn home_id(home: &Path, uid: u32) -> String {
+    use sha2::{Digest, Sha256};
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let h = Sha256::digest(format!("{}\0{uid}", home.to_string_lossy()).as_bytes());
+    format!("{h:x}")[..8].to_string()
 }
 
 /// `"sandbox"` in ~/.amux/config.json.
@@ -358,6 +418,7 @@ fn push_mount(out: &mut Vec<Mount>, m: Mount) {
 /// image are here and that the account can sign in from inside, then lists the mounts and
 /// the variables to pass. `cwd` is the folder the run starts in.
 pub fn plan(
+    id: &str,
     req: &Request,
     cfg: &Config,
     spec: &ProviderSpec,
@@ -451,7 +512,10 @@ pub fn plan(
     vars.extend(git_identity(cwd));
 
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let home = home_id(&crate::paths::AMUX_HOME, uid);
     Ok(Sandbox {
+        name: format!("amux-{home}-{id}"),
+        home,
         engine,
         image,
         network: req.network.or(cfg.network).unwrap_or(true),
@@ -484,6 +548,8 @@ mod tests {
                 Mount::same(Path::new("/h/.claude")),
             ],
             env: args(&["CLAUDE_CONFIG_DIR", "AMUX_ACCOUNT", "AMUX_RUN", "HOME=/tmp"]),
+            home: "0123abcd".into(),
+            name: "amux-0123abcd-claude-1".into(),
         }
     }
 
@@ -497,7 +563,8 @@ mod tests {
         );
         assert_eq!(
             c.join(" "),
-            "docker run --rm -it --init --pull never --name amux-claude-1 --label amux.run=claude-1 \
+            "docker run --rm -it --init --pull never --name amux-0123abcd-claude-1 \
+             --label amux.run=claude-1 --label amux.home=0123abcd \
              --user 501:20 -w /w/app-claude-1/src \
              -v /w/app-claude-1:/w/app-claude-1 -v /src/app/.git:/src/app/.git \
              -v /h/.amux/accounts/claude/work/.claude:/h/.amux/accounts/claude/work/.claude \
@@ -509,7 +576,10 @@ mod tests {
 
     #[test]
     fn no_network_and_podman_keep_your_uid() {
+        // A run saved before containers had a home: the old name, and no home label.
         let mut s = sb();
+        s.home.clear();
+        s.name.clear();
         s.network = false;
         s.engine = "/usr/local/bin/podman".into();
         s.mounts = vec![Mount::parse("/data:/data:ro").unwrap()];
@@ -521,6 +591,68 @@ mod tests {
              --userns=keep-id --user 501:20 --network none -w /w -v /data:/data:ro amux-agents:1 codex"
         );
         assert_eq!(s.engine_name(), "podman");
+        assert_eq!(s.filters("x"), args(&["label=amux.run=x", "name=amux-x"]));
+    }
+
+    #[test]
+    fn containers_are_named_and_labelled_per_amux_home() {
+        let s = sb();
+        assert_eq!(s.container("claude-1"), "amux-0123abcd-claude-1");
+        assert_eq!(
+            s.filters("claude-1"),
+            args(&["label=amux.run=claude-1", "label=amux.home=0123abcd"])
+        );
+        // The id depends on the home and the uid, and is stable for both.
+        let (a, b) = (TempDir::new(), TempDir::new());
+        let id = home_id(a.path(), 501);
+        assert_eq!(id.len(), 8);
+        assert_eq!(id, home_id(a.path(), 501));
+        assert_ne!(id, home_id(b.path(), 501));
+        assert_ne!(id, home_id(a.path(), 502));
+        // A run.json from before keeps working: no home or name, the old container name.
+        let old: Sandbox = serde_json::from_value(json!({
+            "engine": "docker", "image": "i", "network": true, "user": "1:1",
+            "mounts": [], "env": []
+        }))
+        .unwrap();
+        assert_eq!(old.container("r"), "amux-r");
+        let saved = serde_json::to_value(&s).unwrap();
+        assert_eq!(saved["name"], "amux-0123abcd-claude-1");
+        assert_eq!(saved["home"], "0123abcd");
+    }
+
+    #[test]
+    fn removes_only_its_own_container() {
+        // A fake engine: `ps` lists a container only for this home's filters; `rm` is logged.
+        let d = TempDir::new();
+        let log = d.path().join("log");
+        let engine = d.path().join("engine");
+        write(
+            &engine,
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> {}\n\
+                 [ \"$1\" = ps ] && case \"$*\" in *amux.home=0123abcd*) echo c0ffee;; esac\nexit 0\n",
+                log.display()
+            ),
+        );
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = sb();
+        s.engine = engine.to_string_lossy().into_owned();
+        s.remove("claude-1");
+        let mut other = s.clone();
+        other.home = "ffffffff".into();
+        other.name = "amux-ffffffff-claude-1".into();
+        other.remove("claude-1");
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            [
+                "ps -a -q --filter label=amux.run=claude-1 --filter label=amux.home=0123abcd",
+                "rm -f c0ffee",
+                "ps -a -q --filter label=amux.run=claude-1 --filter label=amux.home=ffffffff",
+            ]
+        );
     }
 
     #[test]

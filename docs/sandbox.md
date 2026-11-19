@@ -8,14 +8,15 @@ amux spawn --sandbox=podman --image amux-agents --worktree codex@me
 amux try 3 claude@ci -p "speed up the parser" --sandbox --image amux-agents
 ```
 
-Everything else stays the same. The run host still runs on your machine and owns the run's terminal, so `amux attach`, `ps`, `ui`, `send`, `wait`, auto-approve, the phone app, `amux diff`, `verify`, `pr` and autopilot work as they do for any run. In `amux ps` the account shows `[sandbox]`, and in `amux ui` the run says `sandboxed`. `run.json` has a `sandbox` field with the engine, image, network, mounts and variables.
+Everything else stays the same. The run host still runs on your machine and owns the run's terminal, so `amux attach`, `ps`, `ui`, `send`, `wait`, auto-approve, the phone app, `amux diff`, `verify`, `pr` and autopilot work as they do for any run. In `amux ps` the account shows `[sandbox]`, and in `amux ui` the run says `sandboxed`. `run.json` has a `sandbox` field with the engine, image, network, mounts, variables and the container's name.
 
 ## The container
 
 For a worktree run of `claude@ci` started with `amux spawn --sandbox --image amux-agents --worktree claude@ci --model opus`, the run host starts:
 
 ```sh
-docker run --rm -it --init --pull never --name amux-claude-1 --label amux.run=claude-1 \
+docker run --rm -it --init --pull never --name amux-3f9a1c2e-claude-1 \
+  --label amux.run=claude-1 --label amux.home=3f9a1c2e \
   --user 501:20 -w /Users/me/.amux/worktrees/app-claude-1 \
   -v /Users/me/.amux/worktrees/app-claude-1:/Users/me/.amux/worktrees/app-claude-1 \
   -v /Users/me/src/app/.git:/Users/me/src/app/.git \
@@ -112,7 +113,9 @@ Set defaults in `~/.amux/config.json`:
 
 ## Stopping
 
-The container is named `amux-<run>`. `amux stop` sends the signal as usual. If the run hasn't ended after 5 seconds, amux removes the container with `<engine> rm -f amux-<run>`. `amux rm --force` does the same, and the run host removes the container whenever the engine's client exits, so no container is left running after its run has ended.
+The container is named `amux-<home>-<run>`, where `<home>` is a short hash of your amux home (`AMUX_HOME`, resolved) and your uid, so two amux homes or two users on one Docker or Podman daemon never pick the same name for runs that share a name. The container also carries the labels `amux.run=<run>` and `amux.home=<home>`, and its name and home are saved in `run.json`, so `amux revive`, `stop` and `rm` always find the same container.
+
+`amux stop` sends the signal as usual. If the run hasn't ended after 5 seconds, amux removes the container. `amux rm --force` does the same, and the run host removes the container whenever the engine's client exits (and before it starts one, in case a revived run's old container is still there), so no container is left running after its run has ended. amux only ever removes a container whose labels match the run and the home: it lists them with `<engine> ps -a -q --filter label=amux.run=<run> --filter label=amux.home=<home>` and removes those with `<engine> rm -f <id>`. A run started before containers had a home in their name keeps its old name, `amux-<run>`, and is matched by its `amux.run` label and that name.
 
 ## Limits
 

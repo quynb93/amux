@@ -381,6 +381,7 @@ fn runs_the_cli_in_a_sandbox_container() {
         "#!/bin/sh\necho \"$*\" >> \"$HOME/engine.log\"\n\
          case \"$1\" in\n\
            image) [ \"$3\" = amux-test:1 ] && exit 0; exit 1;;\n\
+           ps) echo c0ffee; exit 0;;\n\
            rm) exit 0;;\n\
            run) shift; while [ $# -gt 0 ]; do a=$1; shift; [ \"$a\" = amux-test:1 ] && break; done\n\
                 PATH=\"$(dirname \"$0\"):$PATH\" exec \"$@\";;\n\
@@ -450,8 +451,21 @@ fn runs_the_cli_in_a_sandbox_container() {
     let overlay = s.overlay("one");
     let (o, sh) = (overlay.display(), s.shared.display());
     let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(s.amux_home.join("runs/fake-1/run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["sandbox"]["image"], "amux-test:1");
+    assert_eq!(saved["sandbox"]["network"], false);
+    // The container's name and label carry this amux home's id, saved for revive and stop.
+    let home = saved["sandbox"]["home"].as_str().unwrap();
+    assert_eq!(home.len(), 8, "{saved}");
+    assert_eq!(saved["sandbox"]["name"], format!("amux-{home}-fake-1"));
     for want in [
-        "run --rm -it --init --pull never --name amux-fake-1 --label amux.run=fake-1".to_string(),
+        format!(
+            "run --rm -it --init --pull never --name amux-{home}-fake-1 \
+             --label amux.run=fake-1 --label amux.home={home}"
+        ),
         format!("--user {}:", uid.trim()),
         "--network none".into(),
         format!("-w {}", proj.display()),
@@ -464,13 +478,15 @@ fn runs_the_cli_in_a_sandbox_container() {
     ] {
         assert!(run.contains(&want), "{want:?} not in {run}");
     }
-    assert!(log.contains("rm -f amux-fake-1"), "{log}");
-    let saved: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(s.amux_home.join("runs/fake-1/run.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(saved["sandbox"]["image"], "amux-test:1");
-    assert_eq!(saved["sandbox"]["network"], false);
+    // Only a container with this run's and this home's labels is removed, by its id.
+    assert!(
+        log.contains(&format!(
+            "ps -a -q --filter label=amux.run=fake-1 --filter label=amux.home={home}"
+        )),
+        "{log}"
+    );
+    assert!(log.contains("rm -f c0ffee"), "{log}");
+    assert!(!log.contains("rm -f amux-"), "{log}");
 
     // stop ends a sandboxed run like any other; --no-sandbox runs on the machine.
     let chat = [("FAKE_CHAT", "1")];
