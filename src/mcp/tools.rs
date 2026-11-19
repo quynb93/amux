@@ -399,6 +399,15 @@ pub fn call(name: &str, args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> V
         "list" => list_runs(args),
         "wait" => wait(args, stop),
         "peek" => peek(args),
+        "send" | "stop" if !own_worker(s(args, "run").unwrap_or_default()) => text_result(
+            &format!(
+                "From inside a run, {name} works only on that run's own workers, and {} isn't one of {}'s. `list` shows them.",
+                s(args, "run").unwrap_or_default(),
+                inside().unwrap_or_default()
+            ),
+            true,
+            None,
+        ),
         "send" => send(args),
         "report" => report(args),
         "diff" => {
@@ -607,6 +616,22 @@ fn wait(args: &Map<String, Value>, stop: &dyn Fn() -> bool) -> Value {
             text_result(&msg, true, None)
         }
     }
+}
+
+/// The run this server was started inside (`AMUX_RUN`), if any.
+fn inside() -> Option<String> {
+    std::env::var("AMUX_RUN").ok().filter(|v| !v.is_empty())
+}
+
+/// Whether `send` and `stop` may act on `run`: anything when this server isn't inside a
+/// run (you started it), else only that run's own workers (their `lead` is it). Runs on
+/// other machines have no lead, so they're refused from inside a run.
+fn own_worker(run: &str) -> bool {
+    let Some(me) = inside() else {
+        return true;
+    };
+    !run.contains(':')
+        && crate::runs::load(run).is_ok_and(|r| r.lead.as_deref() == Some(me.as_str()))
 }
 
 fn peek(args: &Map<String, Value>) -> Value {

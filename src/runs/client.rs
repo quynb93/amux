@@ -105,6 +105,7 @@ pub fn send_key(run: &Run, name: &str) -> Result<()> {
     if run.state() != State::Running {
         bail!("{} is not running.", run.id);
     }
+    super::peer::check_typing(run)?;
     let stream = connect(&run.id).map_err(|_| anyhow!("Could not connect to {}.", run.id))?;
     let mut w = &stream;
     write_frame(&mut w, WATCH, &[1])?;
@@ -122,6 +123,7 @@ pub fn send_text(run: &Run, text: &str, submit: bool) -> Result<()> {
         State::Queued => bail!("{} is queued and hasn't started yet.", run.id),
         _ => bail!("{} is not running.", run.id),
     }
+    super::peer::check_typing(run)?;
     let text = sanitize(text);
     // Only multi-line text needs to know whether the CLI takes a bracketed paste.
     let paste = text.contains('\n') && super::screen::capture(run).screen().bracketed_paste();
