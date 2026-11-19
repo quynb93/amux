@@ -1,7 +1,7 @@
 //! Notifications on your phone, for when you're away from the computer: a run needs you,
 //! stalled, hit a usage limit, finished, or its tests or CI came back. Sent through
-//! ntfy (ntfy.sh or your own server), Pushover, or any webhook (Slack and Discord take
-//! the same one). Set up with `amux phone`; kept in ~/.amux/phone.json (0600).
+//! ntfy (ntfy.sh or your own server), Pushover, any webhook (Slack and Discord take
+//! the same one), or Web Push straight to the phone app (webpush.rs). Set up with `amux phone`; kept in ~/.amux/phone.json (0600).
 //!
 //! Each message is sent by a short-lived `amux __push` process, so a slow network never
 //! holds up a run, and a command that exits right after an event still gets it out.
@@ -28,7 +28,7 @@ pub const EVENTS: [&str; 8] = [
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Phone {
-    /// "ntfy", "pushover" or "webhook".
+    /// "ntfy", "pushover", "webhook" or "webpush".
     pub service: String,
     /// ntfy: the topic's URL (https://ntfy.sh/<topic>). webhook: where to POST.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -186,6 +186,17 @@ pub fn deliver(p: &Phone, event: &str, run: &str, title: &str, message: &str) ->
     };
     let link = p.link(run);
     let res = match p.service.as_str() {
+        "webpush" => {
+            let urgent = priority(event, &message) > 3;
+            return super::webpush::deliver(
+                &agent(),
+                run,
+                title,
+                &message,
+                link.as_deref(),
+                urgent,
+            );
+        }
         "ntfy" => {
             let (server, topic) = p
                 .url
