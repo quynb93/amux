@@ -24,6 +24,7 @@ work/            what runs do to code and to the machine:
                    Nothing here prints.
 runs/            a run's life: host (pty + socket), client (connect, send input),
                    state (classify: working, waiting, idle…), detect, program (OSC 7501),
+                   procs (a CLI's process tree and the files it holds open),
                    screen, attach, notify (desktop), push (phone: ntfy, Pushover, webhook,
                    Web Push), webpush (RFC 8291 encryption and VAPID, with `ring`)
 git.rs, launch.rs, overlay.rs, store.rs, sessions.rs, providers.rs, …   foundations

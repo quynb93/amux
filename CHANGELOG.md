@@ -8,6 +8,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 - Review runs on other machines in `amux ui`: `c` on `gpu:claude-1` opens its diff with comments and hunk dropping, as for local runs. amux on that machine reads the diff (`amux __review-data`, internal), keeps the comments (`amux comment`, `amux comments`), and drops hunks (`amux review --drop … --expect <digest>`) with the same all-or-nothing check, the refusal while the agent is working, the undo patch in `runs/<id>/dropped/` there and the note to the agent. `--expect` refuses the drop if the run's diff changed since the review was read, so `file:n` names the same hunk. `amux review <machine>:<run>` now runs on that machine instead of refusing. When amux there is too old to serve a review, `c` says so and opens the diff in your pager as before.
 
+### Fixed
+
+- A Codex run is linked to its own session even when another Codex run started in the same folder within the same second or two. Codex keeps a session's rollout file open for as long as the session lives (the codex-rs rollout recorder, in every release checked from rust-v0.10.0 to rust-v0.170.0), so amux takes the rollout that the run's Codex process (or a process it started, such as the native binary under the npm wrapper) holds open: on Linux from `/proc/<pid>/fd`, on macOS from `proc_pidinfo`. Nothing is passed to Codex, so the agent sees nothing different. Before Codex has written its file (the first turn), amux falls back to the session that started in the folder just after the run, skipping any rollout another live run's Codex holds.
+
 ## [0.11.13] - 2026-11-19
 
 Web push to the phone app, and fixes from the 0.11.12 reviews.
