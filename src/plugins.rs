@@ -10,7 +10,7 @@
 //!
 //! Both get `AMUX_BIN` (this amux), `AMUX_HOME` and, where there is one, `AMUX_RUN`,
 //! plus `AMUX_EVENT` and `AMUX_MESSAGE` for hooks. A plugin or hook file must belong to
-//! you and not be writable by others, or amux won't run it.
+//! you, and neither it nor its folder may be writable by others, or amux won't run it.
 
 use crate::paths;
 use anyhow::{bail, Result};
@@ -26,15 +26,39 @@ pub fn hooks_dir() -> PathBuf {
     paths::AMUX_HOME.join("hooks")
 }
 
-/// An executable you own that no one else can change.
+/// An executable you own that no one else can change: neither the file nor the folder
+/// it is in (where someone could swap it). A symlink is judged by what it points to, and
+/// its own folder must be safe too.
 fn trusted_exe(p: &Path) -> bool {
-    let Ok(m) = std::fs::metadata(p) else {
+    let me = unsafe { libc::getuid() };
+    let safe_dir = |f: &Path| {
+        f.parent()
+            .and_then(|d| std::fs::metadata(d).ok())
+            .is_some_and(|m| {
+                m.is_dir() && m.permissions().mode() & 0o022 == 0 && (m.uid() == me || m.uid() == 0)
+            })
+    };
+    let Ok(l) = std::fs::symlink_metadata(p) else {
+        return false;
+    };
+    if !safe_dir(p) {
+        return false;
+    }
+    let real = if l.file_type().is_symlink() {
+        match std::fs::canonicalize(p) {
+            Ok(r) if safe_dir(&r) => r,
+            _ => return false,
+        }
+    } else {
+        p.to_path_buf()
+    };
+    let Ok(m) = std::fs::symlink_metadata(&real) else {
         return false;
     };
     m.is_file()
         && m.permissions().mode() & 0o111 != 0
         && m.permissions().mode() & 0o022 == 0
-        && m.uid() == unsafe { libc::getuid() }
+        && m.uid() == me
 }
 
 pub fn valid_name(n: &str) -> bool {
@@ -88,6 +112,10 @@ pub fn list() -> Vec<Plugin> {
         }
     }
     for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        // An empty or relative entry means the current folder, which could be anyone's.
+        if !dir.is_absolute() {
+            continue;
+        }
         if let Ok(rd) = std::fs::read_dir(&dir) {
             let mut v: Vec<_> = rd.flatten().map(|e| e.path()).collect();
             v.sort();
@@ -198,5 +226,21 @@ mod tests {
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(trusted_exe(&p));
         assert!(!valid_name("../x") && valid_name("pr-summary"));
+
+        // In a folder others can write to, it could be swapped: not trusted.
+        let open = t.path().join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        let q = open.join("amux-x");
+        write(&q, "#!/bin/sh\n");
+        std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted_exe(&q));
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!trusted_exe(&q), "its folder is writable by others");
+        // A link from a safe folder to a file in that folder isn't trusted either.
+        let link = t.path().join("amux-y");
+        std::os::unix::fs::symlink(&q, &link).unwrap();
+        assert!(!trusted_exe(&link));
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted_exe(&link), "a link to a trusted file is fine");
     }
 }

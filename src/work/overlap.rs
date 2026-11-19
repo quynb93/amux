@@ -152,9 +152,21 @@ fn change_of(run: &Run, repo: &Path, target: &str) -> Result<Option<Change>> {
     }))
 }
 
+/// A target branch given with `--into`: never one git would read as an option.
+pub fn check_into(b: &str) -> Result<()> {
+    if b.is_empty() || b.starts_with('-') || b.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        anyhow::bail!("\"{b}\" isn't a branch name.");
+    }
+    Ok(())
+}
+
 /// Overlap reports, one per repo that has runs with worktrees. `into`: the target branch
 /// (else each repo's checked-out branch). `only`: limit to these runs.
 pub fn reports(into: Option<&str>, only: &[String]) -> Result<Vec<Report>> {
+    if let Some(b) = into {
+        check_into(b)?;
+    }
     let mut by_repo: BTreeMap<String, Vec<Run>> = BTreeMap::new();
     for r in runs::list() {
         if !only.is_empty() && !only.contains(&r.id) {
@@ -239,6 +251,9 @@ pub struct LandOpts {
 /// Lands runs into their target branch one at a time (see the module docs). Never
 /// rewrites the target's history or touches the main checkout's uncommitted work.
 pub fn land(ids: &[String], o: &LandOpts, mut progress: impl FnMut(&str)) -> Result<Vec<Landed>> {
+    if let Some(b) = &o.into {
+        check_into(b)?;
+    }
     let mut out = vec![];
     for id in ids {
         let run = runs::find(id)?;
@@ -403,6 +418,14 @@ fn land_one(run: &Run, o: &LandOpts, progress: &mut impl FnMut(&str)) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_target_branch_is_never_an_option() {
+        assert!(check_into("main").is_ok() && check_into("release/1.2").is_ok());
+        for bad in ["-x", "--upload-pack=touch /tmp/x", "", "a b", "a\nb"] {
+            assert!(check_into(bad).is_err(), "{bad}");
+        }
+    }
     use crate::testutil::{write, TempDir};
 
     fn g(dir: &Path, args: &[&str]) -> String {
