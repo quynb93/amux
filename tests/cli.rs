@@ -3325,6 +3325,28 @@ fn web_push_reaches_the_phone_app_encrypted() {
         .mode();
     assert_eq!(mode & 0o077, 0, "subscriptions are private");
     assert!(s.amux(&["phone"]).out.contains("Devices: 2 (iPhone, Mac)"));
+    let listed = s.amux(&["phone", "devices"]).out;
+    assert!(
+        listed.contains(" 1. iPhone  (127.0.0.1") && listed.contains(" 2. Mac  (127.0.0.1"),
+        "{listed}"
+    );
+    // Only the browsers' push services are taken (the local one is the tests' own).
+    let evil = serde_json::json!({
+        "endpoint": "https://169.254.169.254/latest/meta-data",
+        "keys": { "p256dh": B64.encode([4u8; 65]), "auth": B64.encode([1u8; 16]) },
+    })
+    .to_string();
+    let r = http(
+        &addr,
+        &format!(
+            "POST /api/push HTTP/1.1\r\nHost: amux.localhost\r\nCookie: {cookie}\r\nX-Amux: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{evil}",
+            evil.len()
+        ),
+    );
+    assert!(
+        r.starts_with("HTTP/1.1 400") && r.contains("isn't a known push service"),
+        "{r}"
+    );
 
     // `amux phone test`: one encrypted message to each device; the gone one is removed.
     let out = s.amux(&["phone", "test"]);
@@ -3429,6 +3451,50 @@ fn web_push_reaches_the_phone_app_encrypted() {
     );
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
     assert!(s.amux(&["phone"]).out.contains("No device"));
+
+    // `amux phone devices rm`: one, or all.
+    subscribe("/push/a", "iPhone");
+    subscribe("/push/b", "Android");
+    subscribe("/push/c", "Mac");
+    let rm = s.amux(&["phone", "devices", "rm", "2"]);
+    assert!(rm.out.contains("Forgot device 2"), "{}", rm.err);
+    let listed = s.amux(&["phone", "devices"]).out;
+    assert!(
+        listed.contains("iPhone") && !listed.contains("Android") && listed.contains("Mac"),
+        "{listed}"
+    );
+    assert_ne!(s.amux(&["phone", "devices", "rm", "9"]).code, 0);
+    assert!(s
+        .amux(&["phone", "devices", "rm", "all"])
+        .out
+        .contains("Forgot 2 devices"));
+    assert!(s.amux(&["phone", "devices"]).out.contains("No device"));
+    let _ = srv.kill();
+    let _ = srv.wait();
+
+    // A new token forgets the devices that subscribed with the old link.
+    let (mut srv, _) = start_serve(
+        &s,
+        &["--listen", "127.0.0.1:0"],
+        &[("AMUX_WEBPUSH_LOCAL_HTTP", "1")],
+    );
+    let link = |out: &str| out.lines().find(|l| l.contains("?t=")).unwrap().to_string();
+    let _ = srv.kill();
+    let _ = srv.wait();
+    fs::write(
+        s.amux_home.join("webpush-subs.json"),
+        format!(r#"{{"subscriptions":[{{"endpoint":"{push_addr}/push/x","p256dh":"{}","auth":"{}"}}]}}"#,
+            B64.encode([4u8; 65]), B64.encode([1u8; 16])),
+    )
+    .unwrap();
+    let (mut srv, out) = start_serve(
+        &s,
+        &["--listen", "127.0.0.1:0", "--new-token"],
+        &[("AMUX_WEBPUSH_LOCAL_HTTP", "1")],
+    );
+    assert!(out.contains("Forgot the 1 device"), "{out}");
+    assert!(link(&out).contains("?t="));
+    assert!(s.amux(&["phone", "devices"]).out.contains("No device"));
     let _ = srv.kill();
     let _ = srv.wait();
 }

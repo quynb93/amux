@@ -182,13 +182,68 @@ fn save_at(file: &Path, subs: Vec<Sub>) -> Result<()> {
     )
 }
 
-/// Checks a subscription from the app: a push service's URL (HTTPS), a P-256 point and a
-/// 16-byte secret. Plain HTTP to this machine is accepted only when
+/// The browsers' push services: Chrome and Edge (FCM, `*.googleapis.com`), Safari
+/// (`*.push.apple.com`), Firefox (`*.push.services.mozilla.com`) and Windows (WNS). A
+/// subscription must point at one of these, or at a host added with `"webpush":
+/// {"allowHosts": [...]}` in config.json (`"*"` allows any), so a client of `amux serve`
+/// can't make amux send requests to any server it likes.
+const PUSH_SERVICES: [&str; 5] = [
+    "googleapis.com",
+    "push.apple.com",
+    "push.services.mozilla.com",
+    "notify.windows.com",
+    "wns.windows.com",
+];
+
+/// The push service hosts subscriptions may use: the known ones and the configured ones.
+pub fn allowed_hosts() -> Vec<String> {
+    let mut v: Vec<String> = PUSH_SERVICES.iter().map(|h| h.to_string()).collect();
+    v.extend(crate::store::config_strings("webpush", "allowHosts"));
+    v
+}
+
+/// Whether `host` is `allowed` or under one of them (`push.apple.com` allows
+/// `web.push.apple.com`); a leading `*.` is the same.
+fn host_allowed(host: &str, allowed: &[String]) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    allowed.iter().any(|a| {
+        let a = a.trim().trim_start_matches("*.").to_ascii_lowercase();
+        a == "*" || host == a || host.ends_with(&format!(".{a}"))
+    })
+}
+
+/// Checks a subscription from the app: a known push service's URL (HTTPS), a P-256 point
+/// and a 16-byte secret. Plain HTTP to this machine is accepted only when
 /// `AMUX_WEBPUSH_LOCAL_HTTP=1` is set (the tests' stand-in push service), so a client of
 /// `amux serve` can't make amux send requests to local ports.
 pub fn validate(endpoint: &str, p256dh: &str, auth: &str, device: &str) -> Result<Sub> {
-    let local_http = std::env::var("AMUX_WEBPUSH_LOCAL_HTTP").is_ok_and(|v| v == "1");
-    validate_with(endpoint, p256dh, auth, device, local_http)
+    validate_with(
+        endpoint,
+        p256dh,
+        auth,
+        device,
+        local_http(),
+        &allowed_hosts(),
+    )
+}
+
+/// The tests' stand-in push service on this machine, over plain HTTP.
+fn local_http() -> bool {
+    std::env::var("AMUX_WEBPUSH_LOCAL_HTTP").is_ok_and(|v| v == "1")
+}
+
+/// Whether amux may send to `endpoint` (a subscription made before the list of push
+/// services, or edited by hand, is skipped).
+fn endpoint_allowed(u: &url::Url, local_http: bool, allowed: &[String]) -> bool {
+    let local = matches!(
+        u.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+    );
+    match (u.scheme(), u.host_str()) {
+        ("http", Some(_)) => local && local_http,
+        ("https", Some(h)) => (local && local_http) || host_allowed(h, allowed),
+        _ => false,
+    }
 }
 
 fn validate_with(
@@ -197,19 +252,20 @@ fn validate_with(
     auth: &str,
     device: &str,
     local_http: bool,
+    allowed: &[String],
 ) -> Result<Sub> {
     if endpoint.len() > 2048 {
         bail!("the endpoint is too long");
     }
     let u = url::Url::parse(endpoint).map_err(|_| anyhow!("the endpoint isn't a URL"))?;
-    let local = matches!(
-        u.host_str(),
-        Some("127.0.0.1") | Some("localhost") | Some("[::1]")
-    );
-    if !(u.scheme() == "https" || (u.scheme() == "http" && local && local_http))
-        || u.host_str().is_none()
-    {
+    if u.scheme() != "https" && !(u.scheme() == "http" && local_http) {
         bail!("the endpoint should be an https URL");
+    }
+    if !endpoint_allowed(&u, local_http, allowed) {
+        bail!(
+            "{} isn't a known push service; add it to \"webpush\": {{\"allowHosts\": [...]}} in ~/.amux/config.json if it's yours",
+            u.host_str().unwrap_or_default()
+        );
     }
     let key = unb64(p256dh).context("p256dh")?;
     if key.len() != 65 || key[0] != 4 {
@@ -261,6 +317,11 @@ fn remove_at(file: &Path, endpoints: &[&str]) -> Result<usize> {
 
 pub fn remove(endpoint: &str) -> Result<usize> {
     remove_at(&subs_file(), &[endpoint])
+}
+
+/// Forgets every device; returns how many there were.
+pub fn remove_all() -> Result<usize> {
+    edit_at(&subs_file(), |subs| std::mem::take(subs).len())
 }
 
 struct Len(usize);
@@ -444,7 +505,16 @@ pub fn deliver(
     link: Option<&str>,
     urgent: bool,
 ) -> Result<()> {
-    let subs = load_at(&subs_file())?;
+    // Devices saved before amux knew the push services (or added to the file by hand)
+    // get nothing unless they use one. A plain-HTTP local one could only have been
+    // subscribed with the tests' AMUX_WEBPUSH_LOCAL_HTTP, so it's kept.
+    let allowed = allowed_hosts();
+    let subs: Vec<Sub> = load_at(&subs_file())?
+        .into_iter()
+        .filter(|s| {
+            url::Url::parse(&s.endpoint).is_ok_and(|u| endpoint_allowed(&u, true, &allowed))
+        })
+        .collect();
     if subs.is_empty() {
         bail!(
             "no device has turned on notifications yet: open the phone app (amux serve, over HTTPS), Monitor → Notifications"
@@ -650,6 +720,11 @@ mod tests {
         let file = dir.path().join("webpush-subs.json");
         let p256dh = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
         let auth = "BTBZMqHH6r4Tts7J_aSIgg";
+        let known: Vec<String> = PUSH_SERVICES.iter().map(|h| h.to_string()).collect();
+        let mut with_example = known.clone();
+        with_example.extend(["push.example".to_string(), "p".to_string()]);
+        let validate =
+            |e: &str, k: &str, a: &str, d: &str| validate_with(e, k, a, d, false, &with_example);
         let a = validate(
             "https://fcm.googleapis.com/fcm/send/a",
             p256dh,
@@ -693,8 +768,37 @@ mod tests {
 
         // What a subscription has to look like.
         assert!(validate("http://push.example/x", p256dh, auth, "").is_err());
-        assert!(validate_with("http://127.0.0.1:9/x", p256dh, auth, "", false).is_err());
-        assert!(validate_with("http://127.0.0.1:9/x", p256dh, auth, "", true).is_ok());
+        assert!(validate_with("http://127.0.0.1:9/x", p256dh, auth, "", false, &known).is_err());
+        assert!(validate_with("http://127.0.0.1:9/x", p256dh, auth, "", true, &known).is_ok());
+        // Only the browsers' push services, unless configured.
+        for ok in [
+            "https://fcm.googleapis.com/fcm/send/x",
+            "https://web.push.apple.com/x",
+            "https://updates.push.services.mozilla.com/wpush/v2/x",
+            "https://db5p.notify.windows.com/w/?token=x",
+            "https://wns2-par02p.notify.windows.com/w/x",
+        ] {
+            assert!(
+                validate_with(ok, p256dh, auth, "", false, &known).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "https://push.example/x",
+            "https://169.254.169.254/latest",
+            "https://googleapis.com.evil.net/x",
+            "https://evilgoogleapis.com/x",
+            "https://127.0.0.1:9/x",
+        ] {
+            assert!(
+                validate_with(bad, p256dh, auth, "", false, &known).is_err(),
+                "{bad}"
+            );
+        }
+        let any = ["*".to_string()];
+        assert!(validate_with("https://push.example/x", p256dh, auth, "", false, &any).is_ok());
+        let star = ["*.example.net".to_string()];
+        assert!(validate_with("https://a.example.net/x", p256dh, auth, "", false, &star).is_ok());
         assert!(validate("file:///etc/passwd", p256dh, auth, "").is_err());
         assert!(validate("https://p/x", "BCVx", auth, "").is_err());
         assert!(validate("https://p/x", p256dh, "AAAA", "").is_err());
