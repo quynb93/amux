@@ -344,6 +344,8 @@ struct App {
     rx: mpsc::Receiver<Done>,
     busy: usize,
     last_reload: Option<Instant>,
+    /// Runs' files as last read: a reload parses only those that changed.
+    files: runs::cache::RunFiles,
     /// Lines scrolled back in the preview.
     scroll: usize,
     pending: Option<Pending>,
@@ -453,6 +455,7 @@ impl App {
             rx,
             busy: 0,
             last_reload: None,
+            files: runs::cache::RunFiles::default(),
             scroll: 0,
             pending: None,
             deferred: None,
@@ -516,7 +519,7 @@ impl App {
 
     fn reload(&mut self) {
         let now = time::now_ms();
-        let all = runs::list();
+        let all = self.files.list();
         let remote = self.remote_rows();
         self.total = all.len() + remote.len();
         let filter = self.filter.to_lowercase();
@@ -525,15 +528,15 @@ impl App {
             .into_iter()
             .filter(|run| filter.is_empty() || matches_filter(run, &filter))
             .map(|run| {
-                let (kind, label) = classify(
-                    &run.state(),
-                    run.waiting.as_ref(),
-                    run.status.as_ref(),
-                    last_output(&run),
-                    now,
-                );
-                let verify = verify::load(&run.id).map(|v| v.label());
-                let pr = github::load(&run.id);
+                let state = run.state();
+                // Only a running run's state depends on when it last printed.
+                let out = matches!(state, runs::State::Running)
+                    .then(|| last_output(&run))
+                    .flatten();
+                let (kind, label) =
+                    classify(&state, run.waiting.as_ref(), run.status.as_ref(), out, now);
+                let verify = self.files.verify(&run.id).map(|v| v.label());
+                let pr = self.files.pr(&run.id);
                 Row {
                     run,
                     kind,

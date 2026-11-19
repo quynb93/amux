@@ -934,11 +934,18 @@ fn quota_watch(hub: &Mutex<Hub>) {
     }
 }
 
-/// Appends to output.log, moving it to output.log.1 once it passes LOG_ROTATE.
+/// How long output may sit in the log's buffer while the CLI keeps printing.
+const LOG_FLUSH: Duration = Duration::from_millis(100);
+
+/// Appends to output.log, moving it to output.log.1 once it passes LOG_ROTATE. Writes are
+/// buffered (one system call per 64 KB rather than per chunk); the pump flushes whenever
+/// it is about to wait for output, and at least every LOG_FLUSH, so `amux logs` and
+/// `ps`'s working/idle stay current.
 struct Log {
     path: PathBuf,
-    file: Option<File>,
+    file: Option<io::BufWriter<File>>,
     size: u64,
+    flushed: Instant,
 }
 
 impl Log {
@@ -948,13 +955,21 @@ impl Log {
             .as_ref()
             .and_then(|f| f.metadata().ok())
             .map_or(0, |m| m.len());
-        Log { path, file, size }
+        Log {
+            path,
+            file: file.map(|f| io::BufWriter::with_capacity(64 * 1024, f)),
+            size,
+            flushed: Instant::now(),
+        }
     }
 
     fn write(&mut self, d: &[u8]) {
         if self.size >= LOG_ROTATE {
+            self.flush();
             let _ = fs::rename(&self.path, self.path.with_extension("log.1"));
-            self.file = fsx::open_append(&self.path).ok();
+            self.file = fsx::open_append(&self.path)
+                .ok()
+                .map(|f| io::BufWriter::with_capacity(64 * 1024, f));
             self.size = 0;
         }
         if let Some(f) = &mut self.file {
@@ -962,13 +977,36 @@ impl Log {
                 self.size += d.len() as u64;
             }
         }
+        if self.flushed.elapsed() >= LOG_FLUSH {
+            self.flush();
+        }
     }
+
+    fn flush(&mut self) {
+        if let Some(f) = &mut self.file {
+            let _ = f.flush();
+        }
+        self.flushed = Instant::now();
+    }
+}
+
+/// Whether reading `fd` would wait.
+fn would_block(fd: RawFd) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    unsafe { libc::poll(&mut p, 1, 0) == 0 }
 }
 
 fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
     let mut log = Log::open(log);
     let mut buf = [0u8; 16 * 1024];
     loop {
+        if would_block(master.as_raw_fd()) {
+            log.flush();
+        }
         let n = match (&*master).read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
