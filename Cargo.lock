@@ -21,6 +21,7 @@ dependencies = [
  "anyhow",
  "base64",
  "libc",
+ "memchr",
  "ratatui",
  "ring",
  "rustls",
