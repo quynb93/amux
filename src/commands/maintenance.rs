@@ -171,6 +171,15 @@ pub fn doctor_cmd() -> Result<i32> {
         };
         println!("note state hooks, {line}{hint}");
     }
+    #[cfg(unix)]
+    for (ok, line) in crate::mcp::install::status_lines() {
+        let hint = if ok {
+            ""
+        } else {
+            "; `amux mcp --install` adds it"
+        };
+        println!("note mcp server, {line}{hint}");
+    }
     let mut home_envs: Vec<&str> = providers.iter().map(|p| p.home_env.as_str()).collect();
     home_envs.sort_unstable();
     home_envs.dedup();

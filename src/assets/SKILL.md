@@ -79,6 +79,8 @@ changed, tests, their reports) and `amux team wait` blocks until the next one fi
 needs you, then prints what it reported. Loop on it instead of polling. A worker ends with
 `amux report "<what it did, how it checked, what's left>"`. Workers can't start workers.
 To hand a whole goal to a lead agent: `amux lead --workers 3 claude -p "<goal>"`.
+If you have amux's MCP tools (`amux mcp --install`), `spawn`, `wait`, `peek`, `send`,
+`report`, `diff`, `verify` and `land` do the same as these commands, with the same limits.
 
 ## Permission prompts
 
