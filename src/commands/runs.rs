@@ -1155,6 +1155,10 @@ pub fn rm_cmd(argv: &[String]) -> Result<i32> {
                 sb.remove(&run.id);
             }
             wait_exit(&run.id, Duration::from_secs(3));
+        } else if let (State::Lost, Some(sb)) = (run.state(), &run.sandbox) {
+            // Its host died without ending the container, which may still be working in
+            // the checkout: end it with the run.
+            sb.remove(&run.id);
         }
         let note = run
             .worktree
