@@ -799,8 +799,8 @@ const USAGE: &str =
     "amux serve [--listen <host:port>] [--tls | --cert <pem> --key <pem> | --tailscale] [--new-token]";
 
 /// `--tailscale`: Tailscale serves https://<machine>.ts.net with a real certificate and
-/// passes requests to amux on this machine. Stops when amux does.
-fn start_tailscale(port: u16) -> Result<(String, std::process::Child)> {
+/// passes requests to amux on this machine. Stops when amux does (see `Proxy`).
+fn start_tailscale(port: u16) -> Result<(String, Proxy)> {
     let Some(bin) = crate::tls::tailscale_bin() else {
         bail!("Tailscale isn't installed (tailscale.com/download), or use --tls.");
     };
@@ -826,7 +826,81 @@ fn start_tailscale(port: u16) -> Result<(String, std::process::Child)> {
             );
         }
     }
-    Ok((format!("https://{name}"), child))
+    Ok((format!("https://{name}"), Proxy { bin, child }))
+}
+
+/// The `tailscale serve` that forwards to this server.
+struct Proxy {
+    bin: String,
+    child: std::process::Child,
+}
+
+impl Proxy {
+    /// Ends it: SIGTERM first, so it takes its forwarding down itself, then `tailscale
+    /// serve --https=443 off` in case it didn't, so the tailnet name doesn't keep pointing
+    /// at a port no one (or someone else) listens on.
+    fn stop(&mut self) {
+        let pid = self.child.id() as libc::pid_t;
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        for _ in 0..20 {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = Command::new(&self.bin)
+            .args(["serve", "--https=443", "off"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// The write end of the pipe the signal handler writes to.
+static SIGNAL_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    let fd = SIGNAL_PIPE.load(Ordering::SeqCst);
+    if fd >= 0 {
+        let b = sig as u8;
+        // Only async-signal-safe calls here.
+        unsafe { libc::write(fd, (&b as *const u8).cast(), 1) };
+    }
+}
+
+/// On SIGTERM, SIGINT or SIGHUP: stops `proxy` (if any) and exits, from a thread of its
+/// own (a self-pipe), so a killed `amux serve` doesn't leave Tailscale forwarding.
+fn exit_on_signals(proxy: Option<Proxy>) -> Result<()> {
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    for fd in fds {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    SIGNAL_PIPE.store(fds[1], Ordering::SeqCst);
+    let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        unsafe { libc::signal(sig, handler) };
+    }
+    let read_fd = fds[0];
+    std::thread::Builder::new()
+        .name("amux-serve-signals".into())
+        .spawn(move || {
+            let mut proxy = proxy;
+            let mut b = 0u8;
+            let n = unsafe { libc::read(read_fd, (&mut b as *mut u8).cast(), 1) };
+            if n == 1 {
+                if let Some(p) = proxy.as_mut() {
+                    p.stop();
+                }
+                std::process::exit(128 + b as i32);
+            }
+        })?;
+    Ok(())
 }
 
 /// This machine's name, for a request that uses it (`box` or `box.local`).
@@ -919,8 +993,8 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
     // 127.0.0.1), so the login cookie isn't shared with every other server on 127.0.0.1.
     let own_name = !tailscale && !tls && ip.is_loopback();
     let base = if tailscale {
-        let (url, child) = start_tailscale(port)?;
-        proxy = Some(child);
+        let (url, p) = start_tailscale(port)?;
+        proxy = Some(p);
         hosts.push(url.trim_start_matches("https://").to_ascii_lowercase());
         url
     } else {
@@ -989,6 +1063,7 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
     }));
     let config: Option<&'static Arc<rustls::ServerConfig>> =
         config.map(|c| &*Box::leak(Box::new(c)));
+    exit_on_signals(proxy)?;
     static OPEN: AtomicUsize = AtomicUsize::new(0);
     for stream in listener.incoming().flatten() {
         // Too many at once (someone opening connections and holding them): close the new
@@ -1015,7 +1090,6 @@ pub fn serve_cmd(argv: &[String]) -> Result<i32> {
             OPEN.fetch_sub(1, Ordering::SeqCst);
         }
     }
-    drop(proxy);
     Ok(0)
 }
 
