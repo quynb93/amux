@@ -248,6 +248,28 @@ fn misplaced_option<'a>(provider: &str, args: &'a [String]) -> Option<&'a str> {
     })
 }
 
+/// Why a spawn stops when `amux map` chose an account that is limited: which account,
+/// until when, and how to use another one anyway.
+fn mapped_but_limited(
+    acct: &crate::store::Account,
+    l: &crate::work::limits::Limit,
+    folder: &Path,
+    now: i64,
+) -> String {
+    let (p, f) = (&acct.provider, tildify(folder));
+    let at = time::iso(l.resets_at);
+    format!(
+        "{} is limited ({}) until {} {} UTC ({}). `amux map` chose it for {f}, so amux won't \
+         move this run to another account. Wait, or name the account to use: \
+         amux spawn … {p}@<name> (or change the map: amux map {f} {p}@<name>).",
+        acct.id(),
+        l.reason,
+        &at[..10],
+        &at[11..16],
+        crate::work::quota::until(l.resets_at, now),
+    )
+}
+
 pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     // `--on <machine>[:<dir>]`: the same spawn, on that machine, in that folder.
     if let Some(i) = argv.iter().position(|a| a == "--on") {
@@ -281,9 +303,17 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     };
     // A name given outright wins; then `amux map` for the run's folder, then the default.
     // No account named and none mapped: one that hasn't hit its usage limit and, with
-    // `limits.switchAt`, the one with the most headroom.
+    // `limits.switchAt`, the one with the most headroom. One named outright is used as
+    // asked, and one the folder's map chose is never swapped for another (work code must
+    // not go to a personal account): spawning stops instead.
     let (acct, chosen) = match resolve_account_in(acct_ref, Some(&cwd)) {
-        Ok((a, c @ (Chosen::Named | Chosen::Folder(_)))) => (a, c),
+        Ok((a, Chosen::Folder(f))) => {
+            if let Some(l) = crate::work::limits::of(&a.id()) {
+                bail!("{}", mapped_but_limited(&a, &l, &f, time::now_ms()));
+            }
+            (a, Chosen::Folder(f))
+        }
+        Ok((a, Chosen::Named)) => (a, Chosen::Named),
         picked => {
             let default = picked.as_ref().ok().map(|(a, _)| a);
             match crate::work::limits::pick_for_spawn(acct_ref, default) {
@@ -1236,6 +1266,25 @@ mod tests {
         assert_eq!(misplaced_option("codex", &a), Some("--worktree"));
         assert_eq!(misplaced_option("gemini", &args(&["--sandbox"])), None);
         assert_eq!(misplaced_option("claude", &args(&["--model", "x"])), None);
+    }
+
+    #[test]
+    fn a_mapped_limited_account_says_who_until_when_and_how_to_override() {
+        let acct: crate::store::Account = serde_json::from_value(
+            serde_json::json!({"provider": "claude", "name": "work", "auth": "login"}),
+        )
+        .unwrap();
+        let now = 1_700_000_000_000;
+        let l = crate::work::limits::Limit {
+            reason: "You've hit your limit".into(),
+            since: now,
+            resets_at: now + 2 * 3_600_000 + 5 * 60_000,
+            run: None,
+        };
+        let m = mapped_but_limited(&acct, &l, Path::new("/src/app"), now);
+        assert!(m.starts_with("claude@work is limited (You've hit your limit) until 2023-11-15 00:18 UTC (in 2h 5m)"), "{m}");
+        assert!(m.contains("`amux map` chose it for /src/app"), "{m}");
+        assert!(m.contains("amux spawn … claude@<name>"), "{m}");
     }
 
     #[test]

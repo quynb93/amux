@@ -420,7 +420,7 @@ codex@me         -                -                                        ok   
 ```
 
 - A run whose CLI says it hit its limit shows `waiting` with the message, and the account is marked limited until the reset time the message names. You get a notification, and `~/.amux/hooks/on-limited` runs.
-- `amux spawn claude` (no account named) skips limited accounts.
+- `amux spawn claude` (no account named) skips limited accounts, unless `amux map` chose the account for the folder: then it stops and says until when, rather than send the work to another account. Name an account to use one anyway.
 - **`failover`** resumes the run's session (`claude --resume <id>`, `codex resume <id>`) under another account of the same CLI, in the same folder and worktree, and tells the agent to carry on. Set `"limits": { "onLimit": "failover" }` in `~/.amux/config.json` to do it automatically, or keep the default (`wait`), where the CLI waits for the reset itself.
 - The messages amux watches for are each provider's `limitPatterns`. `amux update --patterns` fetches the current wording ([Updates](#updates)), and you can add your own in `config.json` if a CLI words them differently.
 - Check that moving work between accounts is allowed by your provider's terms.

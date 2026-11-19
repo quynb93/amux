@@ -111,10 +111,18 @@ pub fn doctor_cmd() -> Result<i32> {
     };
     let providers = load_providers()?;
     let accounts = load_accounts()?;
+    let builtins: Vec<String> = crate::providers::builtin()
+        .iter()
+        .filter_map(|b| b["id"].as_str().map(str::to_string))
+        .collect();
     for p in providers {
         let found = which(&p.bin);
-        // A built-in CLI you don't use isn't a problem: say so, and move on.
-        if found.is_none() && !accounts.iter().any(|a| a.provider == p.id) {
+        // A built-in CLI you don't use isn't a problem: say so, and move on. A provider
+        // you defined yourself is one you meant to use, so its missing binary fails below.
+        if found.is_none()
+            && builtins.contains(&p.id)
+            && !accounts.iter().any(|a| a.provider == p.id)
+        {
             println!(
                 "--   {}: binary \"{}\" not installed (no accounts)",
                 p.id, p.bin
