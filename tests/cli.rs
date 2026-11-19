@@ -536,6 +536,47 @@ fn attaches_to_a_running_cli_and_stops_it() {
     );
 }
 
+/// `amux peek` and `amux send` ask the host for its screen alone, so a run that never
+/// stops printing doesn't hold them up until it goes quiet.
+#[test]
+fn peek_and_send_dont_wait_for_a_busy_run_to_go_quiet() {
+    let s = Sandbox::new("busy");
+    let bin = s.home.join("bin/busy-cli");
+    write(
+        &bin,
+        "#!/bin/sh\nprintf '\\033[?2004h'\ni=0; while true; do i=$((i+1)); echo \"tick $i\"; sleep 0.02; done\n",
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = bin.to_str().unwrap().into();
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    assert_eq!(s.amux(&["spawn", "--name", "busy", "fake"]).code, 0);
+    wait_ps(&s, "busy", "running");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let t = std::time::Instant::now();
+    let peek = s.amux(&["peek", "busy"]);
+    assert!(peek.out.contains("tick"), "{}", peek.out);
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(1500),
+        "peek took {:?}",
+        t.elapsed()
+    );
+    // One line: no need to look at the screen. Several: a quick look for bracketed paste.
+    for text in ["hello", "two\nlines"] {
+        let t = std::time::Instant::now();
+        assert_eq!(s.amux(&["send", "busy", text]).code, 0);
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(1500),
+            "send took {:?}",
+            t.elapsed()
+        );
+    }
+    s.amux(&["stop", "busy"]);
+}
+
 /// `spawn --sandbox` with a fake container engine: it records its arguments, answers
 /// `image inspect` and `rm`, and for `run` starts the fake CLI named after the image.
 #[test]

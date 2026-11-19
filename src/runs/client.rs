@@ -123,9 +123,10 @@ pub fn send_text(run: &Run, text: &str, submit: bool) -> Result<()> {
         _ => bail!("{} is not running.", run.id),
     }
     let text = sanitize(text);
-    let paste = super::screen::capture(run).screen().bracketed_paste();
+    // Only multi-line text needs to know whether the CLI takes a bracketed paste.
+    let paste = text.contains('\n') && super::screen::capture(run).screen().bracketed_paste();
     let mut payload = Vec::new();
-    if text.contains('\n') && paste {
+    if paste {
         payload.extend_from_slice(b"\x1b[200~");
         payload.extend_from_slice(text.trim_end_matches('\n').as_bytes());
         payload.extend_from_slice(b"\x1b[201~");
