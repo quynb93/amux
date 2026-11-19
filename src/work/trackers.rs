@@ -105,7 +105,8 @@ pub fn forget_key(source: Source) {
     secrets::delete_secret(&secret_name(source), &secret_file(source))
 }
 
-fn env(name: &str) -> Option<String> {
+/// An environment variable, unless unset or blank.
+pub fn env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|v| v.trim().to_string())
@@ -131,7 +132,8 @@ pub struct Jira {
 /// Jira's site, email and token: JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, or the stored ones.
 pub fn jira() -> Result<Jira> {
     let saved = load_saved().jira.unwrap_or_default();
-    let url = env("JIRA_URL").unwrap_or(saved.url);
+    // JIRA_URL may be given bare (acme.atlassian.net), as `tracker login` takes it.
+    let url = env("JIRA_URL").map_or(saved.url, |u| site_url(&u).unwrap_or(u));
     let email = env("JIRA_EMAIL").unwrap_or(saved.email);
     let token = env("JIRA_API_TOKEN").or_else(|| stored_key(Source::Jira));
     match token {

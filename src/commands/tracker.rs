@@ -91,13 +91,9 @@ pub fn tracker_cmd(argv: &[String]) -> Result<i32> {
     }
 }
 
-fn set(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|v| !v.trim().is_empty())
-}
-
 /// Where each tracker's key comes from. Asks no service.
 fn status() -> Result<i32> {
-    let linear = if set("LINEAR_API_KEY") {
+    let linear = if trackers::env("LINEAR_API_KEY").is_some() {
         "LINEAR_API_KEY from the environment".to_string()
     } else if trackers::stored_key(Source::Linear).is_some() {
         "a stored key".to_string()
@@ -107,7 +103,7 @@ fn status() -> Result<i32> {
     println!("Linear  {linear}");
     let jira = match trackers::jira() {
         Ok(j) => {
-            let from = if set("JIRA_API_TOKEN") {
+            let from = if trackers::env("JIRA_API_TOKEN").is_some() {
                 "JIRA_API_TOKEN"
             } else {
                 "a stored token"
