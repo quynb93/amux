@@ -366,7 +366,8 @@ amux review tests --drop src/parser.rs:2  # drop that hunk; --drop src/parser.rs
 - **What happens.** The hunks are taken out of the run's worktree with `git apply -R`. A new file git doesn't track yet is deleted. If the worktree had nothing else uncommitted, amux commits the result as "Drop N hunks (amux review)", so `land` can take the branch as it is. Otherwise the change stays uncommitted next to the agent's own work, and its next commit takes it.
 - **The agent is told** which file:lines were dropped and not to add them back (`--no-tell` skips that).
 - **Nothing is lost by surprise.** Everything is checked first, and if any hunk no longer matches what you reviewed (the agent changed those lines since), nothing is dropped and you're told why. While the agent is working on a turn, dropping is refused (`--force` skips this check in the CLI). Each drop is saved as a patch in `runs/<id>/dropped/`, and the command prints how to put it back with `git apply`.
-- Binary changes to tracked files can't be dropped hunk by hunk. Runs on another machine can't drop hunks yet; `c` opens their diff in your pager.
+- Binary changes to tracked files can't be dropped hunk by hunk.
+- **Runs on another machine** (`gpu:claude-1`) are reviewed the same way: amux there reads the diff and keeps the comments, and drops hunks with the same checks, undo patch (in `runs/<id>/dropped/` on that machine) and note to the agent. A drop is refused if the run's diff there changed since you opened the review. `amux review gpu:claude-1 …` runs on that machine too. If amux there is too old to serve a review, `c` opens the run's diff in your pager instead and says to update amux there.
 
 ### Shared notes and separate ports
 
@@ -647,7 +648,7 @@ amux attach gpu:claude-1                      # every run command takes <machine
 amux send gpu:claude-1 "use the bigger batch"
 ```
 
-- `amux ui` shows every machine's runs in the list, the board and the tiles. Their screens are live, and you can type into them, attach, stop, verify and send, the same as local runs. On another machine, `c` opens the run's diff in your pager.
+- `amux ui` shows every machine's runs in the list, the board and the tiles. Their screens are live, and you can type into them, attach, stop, verify, send and review them (`c`: comments and dropping hunks, through amux there), the same as local runs.
 - amux keeps one SSH connection per machine open for ten minutes and reuses it (OpenSSH ControlMaster), so it is quick. It stores no keys: SSH uses your own config, agent and known hosts. Background checks never wait for a password, so set up key or agent login.
 - `--amux <path>` on `machine add` points at amux there if it isn't on its PATH.
 

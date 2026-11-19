@@ -1696,23 +1696,28 @@ fn streams_events_and_shows_board_and_tiles() {
     s.amux(&["stop", "e"]);
 }
 
+/// A stand-in for ssh in `local`: runs the remote command as "the other machine"
+/// (`remote`, a second sandbox), the way sshd runs it in the user's shell there.
+fn fake_ssh(local: &Sandbox, remote: &Sandbox) -> PathBuf {
+    let ssh = local.home.join("bin/ssh");
+    write(
+        &ssh,
+        &format!(
+            "#!/bin/sh\nfor a; do last=\"$a\"; done\nexport HOME={h} AMUX_HOME={a}\nexec sh -c \"$last\"\n",
+            h = remote.home.display(),
+            a = remote.amux_home.display()
+        ),
+    );
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    ssh
+}
+
 #[test]
 fn runs_and_drives_agents_on_another_machine_over_ssh() {
     let s = Sandbox::new("remote-local");
     let r = Sandbox::new("remote-box");
     r.amux(&["account", "add", "fake", "one", "--no-login"]);
-    // A stand-in for ssh: runs the remote command as "the other machine" (the second
-    // sandbox), the way sshd runs it in the user's shell there.
-    let ssh = s.home.join("bin/ssh");
-    write(
-        &ssh,
-        &format!(
-            "#!/bin/sh\nfor a; do last=\"$a\"; done\nexport HOME={h} AMUX_HOME={a}\nexec sh -c \"$last\"\n",
-            h = r.home.display(),
-            a = r.amux_home.display()
-        ),
-    );
-    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let ssh = fake_ssh(&s, &r);
     let env = [("AMUX_SSH", ssh.to_str().unwrap()), ("FAKE_CHAT", "1")];
     let bin = env!("CARGO_BIN_EXE_amux");
     let add = s.amux_with(
@@ -1768,6 +1773,168 @@ fn runs_and_drives_agents_on_another_machine_over_ssh() {
     assert!(ui.out.contains("got hello box"), "{}", ui.out);
     assert_eq!(s.amux_with(&["stop", "box:w"], &env, None).code, 0);
     assert!(s.amux_with(&["peek", "nobox:w"], &env, None).code != 0);
+}
+
+#[test]
+fn reviews_comments_on_and_drops_hunks_of_a_run_on_another_machine() {
+    let s = Sandbox::new("rreview-local");
+    let r = Sandbox::new("rreview-box");
+    r.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let ssh = fake_ssh(&s, &r);
+    let env = [("AMUX_SSH", ssh.to_str().unwrap()), ("FAKE_CHAT", "1")];
+    let bin = env!("CARGO_BIN_EXE_amux");
+    assert_eq!(
+        s.amux_with(
+            &["machine", "add", "box", "me@box", "--amux", bin],
+            &env,
+            None
+        )
+        .code,
+        0
+    );
+    // The repo is on the box.
+    let repo = r.home.join("repo");
+    let original: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    write(&repo.join("a.rs"), &original);
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let on = format!("box:{}", repo.display());
+    let sp = s.amux_with(
+        &["spawn", "--on", &on, "--name", "w", "--worktree", "fake"],
+        &env,
+        None,
+    );
+    assert_eq!(sp.code, 0, "{}{}", sp.out, sp.err);
+    wait_ps(&r, "w", "running");
+    let wt = r.amux_home.join("worktrees/repo-w");
+    let changed = original
+        .replace("line 2\n", "line two\n")
+        .replace("line 18\n", "line eighteen\n");
+    write(&wt.join("a.rs"), &changed);
+    write(&wt.join("new.txt"), "brand new\n");
+    let ui = |keys: &str| {
+        let o = s.amux_with(
+            &[
+                "ui", "--dump", "--size", "30x120", "--select", "box:w", "--keys", keys,
+            ],
+            &env,
+            None,
+        );
+        format!("{}{}", o.out, o.err)
+    };
+
+    // c opens the review through amux on the box; ⏎ comments on the line there.
+    let commented = ui("c\nkeep two\n");
+    assert!(
+        commented.contains("Review box:w · 2 files · 1 comment to send"),
+        "{commented}"
+    );
+    assert!(commented.contains("+line two"), "{commented}");
+    let there = r.amux(&["comments", "w"]).out;
+    assert!(
+        there.contains("1. a.rs:1  [pending]\n    > line 1\n    keep two"),
+        "{there}"
+    );
+    // x deletes it there.
+    let deleted = ui("cx");
+    assert!(deleted.contains("Deleted 1 comment."), "{deleted}");
+    assert!(r.amux(&["comments", "w"]).out.contains("No comments"));
+    // `amux review` goes to the box too.
+    let list = s.amux_with(&["review", "box:w", "--hunks"], &env, None);
+    assert!(
+        list.out.contains("new.txt  (new, untracked)"),
+        "{}",
+        list.out
+    );
+    // A drop of a diff that isn't the one reviewed is refused, changing nothing.
+    let stale = s.amux_with(
+        &[
+            "review", "box:w", "--drop", "a.rs:1", "--expect", "0", "--force",
+        ],
+        &env,
+        None,
+    );
+    assert!(
+        stale.code != 0 && stale.err.contains("no longer the ones you reviewed"),
+        "{}",
+        stale.err
+    );
+    assert_eq!(fs::read_to_string(wt.join("a.rs")).unwrap(), changed);
+
+    // Space marks the hunk under the cursor, D and y drop it on the box.
+    assert_eq!(s.amux_with(&["stop", "box:w"], &env, None).code, 0);
+    wait_ps(&r, "w", "exited");
+    let asked = ui("c D");
+    assert!(
+        asked.contains("Drop 1 hunk in 1 file from box:w's worktree?"),
+        "{asked}"
+    );
+    let dropped = ui("c Dy");
+    assert!(
+        dropped.contains("Dropped 1 hunk in 1 file from box:w"),
+        "{dropped}"
+    );
+    // The review stays open, read again: one hunk fewer.
+    assert!(dropped.contains("Review box:w · 2 files"), "{dropped}");
+    let now = fs::read_to_string(wt.join("a.rs")).unwrap();
+    assert!(
+        now.contains("line 2\n") && now.contains("line eighteen\n"),
+        "{now}"
+    );
+    // The undo patch is kept on the box.
+    let undo = fs::read_dir(r.amux_home.join("runs/w/dropped"))
+        .unwrap()
+        .count();
+    assert_eq!(undo, 1);
+
+    // amux on the box from before remote reviews: its diff in the pager instead.
+    let old = r.home.join("bin/old-amux");
+    write(
+        &old,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = __review-data ]; then echo \"amux: Unknown command \\\"$1\\\". See \\`amux help\\`.\" >&2; exit 1; fi\nexec {bin} \"$@\"\n"
+        ),
+    );
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+    let add = s.amux_with(
+        &[
+            "machine",
+            "add",
+            "old",
+            "me@box",
+            "--amux",
+            old.to_str().unwrap(),
+        ],
+        &env,
+        None,
+    );
+    assert_eq!(add.code, 0, "{}{}", add.out, add.err);
+    let o = s.amux_with(
+        &[
+            "ui", "--dump", "--size", "30x120", "--select", "old:w", "--keys", "c",
+        ],
+        &env,
+        None,
+    );
+    assert!(
+        o.out.contains("amux on old is too old to review"),
+        "{}",
+        o.out
+    );
+    assert!(!o.out.contains("Review old:w"), "{}", o.out);
 }
 
 /// One HTTP/1.1 request; returns the status line, headers and body as one string.

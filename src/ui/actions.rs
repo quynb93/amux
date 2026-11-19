@@ -204,9 +204,17 @@ impl App {
         else {
             return;
         };
-        // On another machine: its diff in the pager (its files aren't here to review).
-        if crate::remote::split(&id).is_some() {
-            self.pending = Some(Pending::Diff(id));
+        // On another machine: reviewed through amux there, or, when that amux is too old
+        // to, its diff in the pager.
+        if let Some((m, name)) = crate::remote::split(&id) {
+            match review::ReviewView::open_remote(&run, m, name) {
+                Ok(r) => self.mode = Mode::Review(Box::new(r)),
+                Err(review::RemoteOpen::TooOld(why)) => {
+                    self.say(why, false);
+                    self.pending = Some(Pending::Diff(id));
+                }
+                Err(review::RemoteOpen::Failed(e)) => self.say(e, true),
+            }
             return;
         }
         match review::ReviewView::open(&run) {
