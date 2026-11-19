@@ -657,7 +657,13 @@ fn subscribe() -> Option<(u64, std::sync::mpsc::Receiver<String>)> {
         std::thread::spawn(move || {
             if let Some(out) = out {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
-                    feed().subs.retain(|(_, t)| t.send(line.clone()).is_ok());
+                    let mut f = feed();
+                    // Stopped and replaced: what it still had buffered is not for the
+                    // phones watching the new one.
+                    if !f.child.as_ref().is_some_and(|c| c.id() == pid) {
+                        break;
+                    }
+                    f.subs.retain(|(_, t)| t.send(line.clone()).is_ok());
                 }
             }
             // It ended: let the phones' streams end too, so they reconnect.

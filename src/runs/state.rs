@@ -104,13 +104,12 @@ pub fn classify(
 
 /// Classifies a run from its files as they are now.
 pub fn run_kind(run: &Run, now: i64) -> (Kind, String) {
-    classify(
-        &run.state(),
-        run.waiting.as_ref(),
-        run.status.as_ref(),
-        last_output(run),
-        now,
-    )
+    let state = run.state();
+    // Only a running run's state depends on when it last printed.
+    let out = matches!(state, State::Running)
+        .then(|| last_output(run))
+        .flatten();
+    classify(&state, run.waiting.as_ref(), run.status.as_ref(), out, now)
 }
 
 impl Kind {

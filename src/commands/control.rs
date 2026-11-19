@@ -243,15 +243,9 @@ struct Snapshot {
 }
 
 fn snapshot(run: &Run, files: &mut runs::cache::RunFiles, now: i64) -> Snapshot {
-    let state = run.state();
-    // Only a running run's state depends on when it last printed.
-    let out = matches!(state, runs::State::Running)
-        .then(|| runs::state::last_output(run))
-        .flatten();
-    let kind = runs::state::classify(&state, run.waiting.as_ref(), run.status.as_ref(), out, now).0;
     Snapshot {
-        kind,
-        queued: state == runs::State::Queued,
+        kind: run_kind(run, now).0,
+        queued: run.state() == runs::State::Queued,
         reason: run.waiting.as_ref().map(|w| w.reason.clone()),
         verify: files.verify(&run.id).map(|v| v.label()),
         checks: files.pr(&run.id).map(|p| p.label()),
