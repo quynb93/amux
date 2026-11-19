@@ -288,7 +288,11 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     };
     let first = match &issue {
         Some(i) => {
-            o.name.get_or_insert_with(|| i.run_name());
+            // A Linear or Jira key comes from the tracker's answer: check it as --name is.
+            let name = o.name.get_or_insert_with(|| i.run_name());
+            if !valid_name(name) {
+                bail!("{} can't name a run; give it one with --name.", i.label());
+            }
             Some(crate::work::issues::prompt(i, o.prompt.as_deref()))
         }
         None => o.prompt.clone(),

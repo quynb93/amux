@@ -92,9 +92,10 @@ pub fn intake_cmd(argv: &[String]) -> Result<i32> {
             project.as_deref(),
         ))?,
     };
+    let taken = issues::taken(&repo);
     let new: Vec<_> = found
         .into_iter()
-        .filter(|i| !issues::taken(&repo, i))
+        .filter(|i| !taken.contains(&i.intake_id()))
         .take(limit)
         .collect();
     if new.is_empty() {

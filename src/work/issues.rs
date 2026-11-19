@@ -106,7 +106,7 @@ impl Issue {
     }
 
     /// How intake.json remembers it: GitHub's number, or "linear:ENG-123".
-    fn intake_id(&self) -> Value {
+    pub fn intake_id(&self) -> Value {
         match self.source {
             Source::GitHub => self.number.into(),
             _ => self.spawn_ref().into(),
@@ -176,8 +176,13 @@ pub fn parse_ref(r: &str) -> Option<Ref> {
         return tracker_key(key).map(Ref::Linear);
     }
     // https://<site>/browse/PROJ-45
-    if let Some(after) = rest.split("/browse/").nth(1) {
-        return tracker_key(after.split(['/', '?', '#']).next()?).map(Ref::Jira);
+    // (A GitHub repo or owner named "browse" falls through to the GitHub check below.)
+    if let Some(k) = rest
+        .split("/browse/")
+        .nth(1)
+        .and_then(|after| tracker_key(after.split(['/', '?', '#']).next()?))
+    {
+        return Some(Ref::Jira(k));
     }
     // ?selectedIssue=PROJ-45 on a Jira board
     if host.ends_with(".atlassian.net") {
@@ -190,12 +195,43 @@ pub fn parse_ref(r: &str) -> Option<Ref> {
 
 const FIELDS: &str = "number,title,body,url";
 
+/// For an issue given by its URL: the one fetched is on the same Jira site, or in the
+/// same Linear workspace, as the URL. A key alone only names an issue within the site
+/// amux is signed in to, so another site's PROJ-45 would be a different issue.
+fn same_place(r: &str, issue: Issue) -> Result<Issue> {
+    let place = |u: &str| {
+        let u = url::Url::parse(u).ok()?;
+        let host = u.host_str()?.to_ascii_lowercase();
+        // linear.app/<workspace>/issue/…: the workspace is the first path segment.
+        let workspace = match host.as_str() {
+            "linear.app" => u.path_segments()?.next().unwrap_or_default().to_string(),
+            _ => String::new(),
+        };
+        Some((host, workspace))
+    };
+    let (Some(want), Some(got)) = (place(r), place(&issue.url)) else {
+        return Ok(issue);
+    };
+    if want != got {
+        bail!(
+            "{r} is not on the {} amux is signed in to ({}). Run `amux tracker login {}` for it.",
+            match issue.source {
+                Source::Linear => "Linear workspace",
+                _ => "Jira site",
+            },
+            issue.url,
+            issue.source.tag()
+        );
+    }
+    Ok(issue)
+}
+
 /// The issue `r` names, from GitHub (`gh`, in `dir`'s repo), Linear or Jira.
 pub fn view(dir: &Path, r: &str) -> Result<Issue> {
     match parse_ref(r) {
         None => bail!("{REF_HELP}, not \"{r}\"."),
-        Some(Ref::Linear(k)) => trackers::linear_issue(&k),
-        Some(Ref::Jira(k)) => trackers::jira_issue(&k),
+        Some(Ref::Linear(k)) => same_place(r, trackers::linear_issue(&k)?),
+        Some(Ref::Jira(k)) => same_place(r, trackers::jira_issue(&k)?),
         Some(Ref::GitHub(r)) => {
             let out = gh_out(dir, &["issue", "view", &r, "--json", FIELDS], &[])?;
             serde_json::from_str(&out).context("unexpected output from gh issue view")
@@ -304,12 +340,12 @@ pub fn repo_key(dir: &Path) -> String {
 /// intake.json: per repo, GitHub issue numbers and "linear:ENG-1" / "jira:PROJ-2" keys.
 type Seen = BTreeMap<String, Vec<Value>>;
 
-pub fn taken(repo: &str, issue: &Issue) -> bool {
-    let id = issue.intake_id();
+/// The issues intake has started in `repo`; check one with `Issue::intake_id`.
+pub fn taken(repo: &str) -> Vec<Value> {
     read_json::<Seen>(&seen_file())
         .unwrap_or_default()
-        .get(repo)
-        .is_some_and(|v| v.contains(&id))
+        .remove(repo)
+        .unwrap_or_default()
 }
 
 pub fn mark_taken(repo: &str, issue: &Issue) -> Result<()> {
@@ -363,6 +399,10 @@ mod tests {
         assert_eq!(
             parse_ref("https://linear.app/acme/issue/ENG-123/fix-the-crash"),
             lin("ENG-123")
+        );
+        assert_eq!(
+            parse_ref("https://github.com/o/browse/issues/3"),
+            Some(Ref::GitHub("https://github.com/o/browse/issues/3".into()))
         );
         assert_eq!(parse_ref("jira:PROJ-45"), jira("PROJ-45"));
         assert_eq!(parse_ref("jira:ab_2-9"), jira("AB_2-9"));
