@@ -133,7 +133,12 @@ pub struct Jira {
 pub fn jira() -> Result<Jira> {
     let saved = load_saved().jira.unwrap_or_default();
     // JIRA_URL may be given bare (acme.atlassian.net), as `tracker login` takes it.
-    let url = env("JIRA_URL").map_or(saved.url, |u| site_url(&u).unwrap_or(u));
+    let url = match env("JIRA_URL") {
+        Some(u) => site_url(&u)?,
+        None => saved.url,
+    };
+    // A site saved by an older amux: the same rule, before the token is sent anywhere.
+    let url = if url.is_empty() { url } else { site_url(&url)? };
     let email = env("JIRA_EMAIL").unwrap_or(saved.email);
     let token = env("JIRA_API_TOKEN").or_else(|| stored_key(Source::Jira));
     match token {
@@ -159,6 +164,16 @@ pub fn site_url(s: &str) -> Result<String> {
     let u = url::Url::parse(&s).map_err(|_| anyhow!("\"{s}\" is not a site URL."))?;
     if !matches!(u.scheme(), "https" | "http") || u.host_str().is_none() {
         bail!("\"{s}\" is not a site URL.");
+    }
+    // The token goes with every request: only over HTTPS, except to this machine.
+    let loopback = match u.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if u.scheme() == "http" && !loopback {
+        bail!("\"{s}\" is plain HTTP, which would send your Jira token unencrypted: use https://.");
     }
     Ok(s)
 }
@@ -808,6 +823,11 @@ mod tests {
             "https://acme.atlassian.net"
         );
         assert!(site_url("ftp://x").is_err());
+        assert!(site_url("http://acme.atlassian.net").is_err());
+        assert!(site_url("http://127.0.0.1:8080").is_ok());
+        assert!(site_url("http://localhost:8080/").is_ok());
+        assert!(site_url("http://[::1]:8080").is_ok());
+        assert!(site_url("http://127.0.0.1.evil.com").is_err());
         assert_eq!(
             error_message(&json!({"errorMessages": ["Issue does not exist"]})).as_deref(),
             Some("Issue does not exist")

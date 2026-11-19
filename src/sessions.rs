@@ -372,13 +372,24 @@ fn list_gemini(spec: &ProviderSpec) -> Vec<SessionInfo> {
 
 /// Lists a provider's sessions. With `id_prefix`, providers that name files by session id
 /// skip the others without reading them; callers still filter the result by id.
+/// A session id amux will pass to a CLI (`--resume {id}`): a letter or digit, then
+/// letters, digits, `_` and `-`. Anything else (an id starting with `-` would read as an
+/// option) comes from a file someone else could have written, and is left out.
+pub fn valid_id(id: &str) -> bool {
+    let mut c = id.chars();
+    c.next().is_some_and(|f| f.is_ascii_alphanumeric())
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_' || x == '-')
+}
+
+/// The CLI's sessions; those whose id isn't `valid_id` are left out.
 pub fn list_sessions(spec: &ProviderSpec, id_prefix: Option<&str>) -> Vec<SessionInfo> {
-    match spec.sessions.as_deref() {
+    let all = match spec.sessions.as_deref() {
         Some("claude") => list_claude(spec, id_prefix),
         Some("codex") => list_codex(spec),
         Some("gemini") => list_gemini(spec),
         _ => vec![],
-    }
+    };
+    all.into_iter().filter(|s| valid_id(&s.id)).collect()
 }
 
 pub fn read_turns(s: &SessionInfo, format: Option<&str>) -> anyhow::Result<Vec<Turn>> {
@@ -575,6 +586,25 @@ mod tests {
             ("gem-1", Some("/work/web"), "Style the page")
         );
         assert_eq!(time::iso(s.updated_at), "2026-03-04T05:06:07.000Z");
+    }
+
+    #[test]
+    fn accepts_only_plain_session_ids() {
+        for ok in ["0199a2b3-4c5d-7e8f-9a0b-1c2d3e4f5a6b", "abc_DEF-1", "7"] {
+            assert!(valid_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "-c",
+            "--dangerously-skip-permissions",
+            "a b",
+            "a;b",
+            "../x",
+            "a.b",
+            "é",
+        ] {
+            assert!(!valid_id(bad), "{bad}");
+        }
     }
 
     fn info() -> SessionInfo {

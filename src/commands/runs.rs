@@ -906,7 +906,11 @@ fn nudge_when_ready(name: &str, since: i64, msg: &str) -> bool {
 /// that was active since the run started.
 fn session_of(run: &Run) -> Option<String> {
     // The folder alone can't tell apart two runs in it.
-    if let Some(id) = &run.session {
+    if let Some(id) = run
+        .session
+        .as_ref()
+        .filter(|id| crate::sessions::valid_id(id))
+    {
         return Some(id.clone());
     }
     let provider = run.account.split('@').next()?;

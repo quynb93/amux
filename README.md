@@ -741,7 +741,7 @@ amux plugin list
 
 - **Plugins** are any executable in `~/.amux/plugins/`, or named `amux-<name>` on PATH, the way git does it. They get `AMUX_BIN` (amux itself) and `AMUX_HOME`. In `amux ui`, `/plugin <name>` runs one on the selected run, with `AMUX_RUN` set, and shows what it printed. A line `# amux: <what it does>` describes it.
 - **Hooks** are executables named `~/.amux/hooks/on-waiting`, `on-exited`, `on-verify`, `on-checks`, `on-approved` or `on-autopilot`. They run for every run when that happens, with `AMUX_EVENT`, `AMUX_RUN` and `AMUX_MESSAGE` set. For example, post to Slack when CI fails, or start a reviewer when a run finishes.
-- amux runs a plugin or hook only if it belongs to you and no one else can write to it.
+- amux runs a plugin or hook only if it belongs to you and no one else can write to it or to its folder (for a symlink, the file it points to). `amux-*` plugins are looked for only in absolute PATH entries.
 - These hooks are amux's events, run by amux. **State hooks** (`amux state-hooks install`) go the other way: they are entries in Claude Code's and Gemini CLI's settings that the CLI runs to tell amux its state. See [State hooks](#parallel-runs).
 
 ### Agents that run agents

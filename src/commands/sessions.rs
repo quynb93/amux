@@ -2,7 +2,7 @@ use crate::fsx;
 use crate::launch::{fill_args, run};
 use crate::paths::{handoff_dir, tildify};
 use crate::sessions::{build_handoff, list_sessions, read_turns, SessionInfo};
-use crate::store::{get_provider, load_providers, resolve_account, valid_name};
+use crate::store::{get_provider, load_providers, resolve_account};
 use crate::time;
 use crate::util::{ago, need, parse_args, table, Kind};
 use anyhow::{bail, Result};
@@ -122,7 +122,7 @@ pub fn resume_cmd(argv: &[String]) -> Result<i32> {
         };
         // The id comes from a file name or transcript contents and becomes a CLI argument,
         // so an id like "--some-flag" must not be passed through as an option.
-        if !valid_name(&session.id) {
+        if !crate::sessions::valid_id(&session.id) {
             bail!(
                 "Session id \"{}\" has unexpected characters; not resuming it.",
                 session.id

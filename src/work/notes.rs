@@ -135,16 +135,51 @@ pub fn copy_into(top: &Path, wt: &Path) -> Vec<String> {
         }
         let (from, to) = (top.join(p), wt.join(p));
         let plain = std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file());
-        if plain && !to.exists() {
-            if let Some(d) = to.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            if std::fs::copy(&from, &to).is_ok() {
-                out.push(rel);
-            }
+        // Nothing there, not even a symlink (which a copy would follow out of the tree).
+        if plain && std::fs::symlink_metadata(&to).is_err() && copy_private(&from, &to, wt) {
+            out.push(rel);
         }
     }
     out
+}
+
+/// Copies `from` to a new file `to` (mode 0600) inside `wt`: neither is followed if it is
+/// a symlink, `to` must not exist, and its folder must be inside `wt` once resolved.
+fn copy_private(from: &Path, to: &Path, wt: &Path) -> bool {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(dir) = to.parent() else {
+        return false;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let inside = match (dir.canonicalize(), wt.canonicalize()) {
+        (Ok(d), Ok(w)) => d.starts_with(w),
+        _ => false,
+    };
+    if !inside {
+        return false;
+    }
+    let Ok(mut src) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(from)
+    else {
+        return false;
+    };
+    let Ok(mut dst) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(to)
+    else {
+        return false;
+    };
+    if std::io::copy(&mut src, &mut dst).is_err() {
+        drop(dst);
+        let _ = std::fs::remove_file(to);
+        return false;
+    }
+    true
 }
 
 /// Ports are handed out in blocks of ten from here.
@@ -235,6 +270,35 @@ mod tests {
         assert_eq!(copy_into(&top, &wt), [".env"]);
         assert!(!wt.join(".env.local").exists(), "symlinks aren't followed");
         assert!(copy_into(&top, &wt).is_empty(), "never overwrites");
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(wt.join(".env"))
+                .unwrap()
+                .permissions()
+                .mode()
+        };
+        assert_eq!(mode & 0o777, 0o600);
         assert_eq!(free_port_block(&[41000, 41010]), Some(41020));
+
+        // A symlink planted where the copy goes, even a dangling one, isn't written through.
+        let wt2 = t.path().join("wt2");
+        std::fs::create_dir_all(&wt2).unwrap();
+        let outside = t.path().join("outside");
+        std::os::unix::fs::symlink(&outside, wt2.join(".env")).unwrap();
+        assert!(copy_into(&top, &wt2).is_empty());
+        assert!(!outside.exists(), "nothing written through the link");
+        // Nor through a folder that is a link out of the worktree.
+        let wt3 = t.path().join("wt3");
+        std::fs::create_dir_all(&wt3).unwrap();
+        let elsewhere = t.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, wt3.join("cfg")).unwrap();
+        write(&top.join("cfg/.env"), "X=1\n");
+        assert!(!copy_private(
+            &top.join("cfg/.env"),
+            &wt3.join("cfg/.env"),
+            &wt3
+        ));
+        assert!(!elsewhere.join(".env").exists());
     }
 }

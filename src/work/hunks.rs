@@ -402,7 +402,8 @@ pub fn drop_hunks(
         .map(|h| h.file.as_str())
         .collect();
     if clean && !tracked.is_empty() {
-        let mut add = vec!["add", "-A", "--"];
+        // File names as they are: a name like `:(glob)*` or `*` mustn't stage other files.
+        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
         add.extend(&tracked);
         let made = git(&top, &add).and_then(|_| {
             git(&top, &["commit", "-q", "-m", &commit_message(picked.len())])?;

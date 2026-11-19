@@ -112,9 +112,11 @@ pub fn send(event: &str, run: &str, title: &str, message: &str) {
     };
     use std::os::unix::process::CommandExt;
     let mut c = Command::new(exe);
-    c.args(["__push", event, run, title, message])
+    // The title and message on its standard input, not in its arguments, where any
+    // process on the machine could read them (`ps`).
+    c.args(["__push", event, run])
         .env("AMUX_NO_UPDATE_CHECK", "1")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // Its own session, so it outlives a command (or terminal) that ends right away.
@@ -125,15 +127,30 @@ pub fn send(event: &str, run: &str, title: &str, message: &str) {
         });
     }
     if let Ok(mut child) = c.spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let body = serde_json::json!({ "title": title, "message": message }).to_string();
+            let _ = stdin.write_all(body.as_bytes());
+        }
         std::thread::spawn(move || child.wait());
     }
 }
 
-/// `amux __push <event> <run> <title> <message>`.
+/// `amux __push <event> <run>`, with `{"title", "message"}` on its standard input.
 pub fn main(args: &[String]) -> i32 {
-    let [event, run, title, message] = args else {
+    let [event, run] = args else {
         return 2;
     };
+    let mut input = String::new();
+    {
+        use std::io::Read;
+        let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
+    }
+    let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+    let (title, message) = (
+        v["title"].as_str().unwrap_or_default(),
+        v["message"].as_str().unwrap_or_default(),
+    );
     let Some(p) = load() else { return 0 };
     if !first_in_a_minute(run, event) {
         return 0;

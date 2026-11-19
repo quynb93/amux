@@ -150,7 +150,7 @@ fn defs() -> Vec<(&'static str, &'static str, &'static str, Value, bool)> {
             schema(
                 json!({
                     "runs": { "type": "array", "items": { "type": "string" }, "description": "Only these runs (default: all on this repo)" },
-                    "into": { "type": "string", "description": "Target branch (default: the repo's current branch)" }
+                    "into": { "type": "string", "minLength": 1, "pattern": "^[^-]", "description": "Target branch (default: the repo's current branch)" }
                 }),
                 &[],
             ),
@@ -163,7 +163,7 @@ fn defs() -> Vec<(&'static str, &'static str, &'static str, Value, bool)> {
             schema(
                 json!({
                     "runs": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-                    "into": { "type": "string", "description": "Target branch" },
+                    "into": { "type": "string", "minLength": 1, "pattern": "^[^-]", "description": "Target branch" },
                     "command": { "type": "string", "description": "Test command" },
                     "test": { "type": "boolean", "description": "Test before landing (default true)" },
                     "tell": { "type": "boolean", "description": "Tell a run's agent what to fix when it can't land (default true)" },
@@ -783,6 +783,13 @@ mod tests {
         assert!(validate(wait, &obj(json!({ "timeout": 601 }))).is_err());
         assert!(validate(wait, &obj(json!({ "timeout": 1.5 }))).is_err());
         assert!(validate(wait, &obj(json!({ "runs": [] }))).is_err());
+        let land = &defs().into_iter().find(|d| d.0 == "land").unwrap().3;
+        assert!(validate(land, &obj(json!({ "runs": ["a"], "into": "main" }))).is_ok());
+        assert!(validate(
+            land,
+            &obj(json!({ "runs": ["a"], "into": "--upload-pack=x" }))
+        )
+        .is_err());
         // A failed check is a tool error the agent sees, not a protocol error.
         let r = call("peek", &obj(json!({})), &|| false);
         assert_eq!(r["isError"], true);
