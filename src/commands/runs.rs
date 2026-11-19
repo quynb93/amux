@@ -1094,6 +1094,8 @@ pub fn revive_one(run: &Run, fresh: bool, dry: bool) -> Revived {
     r.waiting = None;
     r.status = None;
     r.queued = None;
+    // Found again by the host: the args it starts with say which session it resumes.
+    r.session = None;
     // What it printed before goes on in the same log, after a marker.
     let _ = fsx::append_private(
         &r.dir().join("output.log"),

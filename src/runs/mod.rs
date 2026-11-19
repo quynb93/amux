@@ -100,6 +100,11 @@ pub struct Run {
     /// Set when the CLI runs in a container (`amux spawn --sandbox`): which, and how.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<sandbox::Sandbox>,
+    /// The CLI's own session id, once amux has matched the run to it (Codex: the id in its
+    /// rollout's `session_meta`), so its usage is read from its own session file even when
+    /// other runs work in the same folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
