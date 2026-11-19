@@ -5003,9 +5003,12 @@ fn a_run_shows_what_its_state_hooks_report() {
             .unwrap()
     };
 
-    // PermissionRequest: waiting, with the command it asks about.
+    // PermissionRequest: waiting, with the command it asks about. `ps` shows the hook's
+    // blocked status at once; the reason is recorded once auto-approve has passed on it.
     wait_ps(&s, "hk", "waiting");
-    assert_eq!(run_json()["waiting"]["reason"], "approve Bash: cargo test");
+    eventually("the waiting reason", || {
+        run_json()["waiting"]["reason"] == "approve Bash: cargo test"
+    });
     assert_eq!(run_json()["waiting"]["source"], "hook");
     assert_eq!(run_json()["status"]["state"], "blocked");
     assert_eq!(run_json()["status"]["via"], "hook");
