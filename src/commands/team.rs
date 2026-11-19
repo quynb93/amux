@@ -17,6 +17,7 @@ use crate::{fsx, time};
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Read};
 
 /// Workers a lead may have going at once when `amux lead` doesn't say.
@@ -238,16 +239,25 @@ pub fn report_cmd(argv: &[String]) -> Result<i32> {
     } else {
         rest.join(" ")
     };
-    let text = text.trim();
-    if text.is_empty() {
+    if text.trim().is_empty() {
         bail!("Usage: {REPORT_USAGE}");
     }
-    fsx::write_atomic(&report_file(&run.id), format!("{text}\n").as_bytes())?;
-    match &run.lead {
-        Some(l) => println!("Reported to {l}. It sees this in `amux team wait`."),
-        None => println!("Saved as {}'s report (`amux team`).", run.id),
-    }
+    println!("{}", save_report(&run, &text)?);
     Ok(0)
+}
+
+/// Saves a run's report for its lead (`amux report`, and the MCP `report` tool). Returns
+/// what to tell whoever reported.
+pub fn save_report(run: &Run, text: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("A report needs text: what was done, how it was checked, what's left.");
+    }
+    fsx::write_atomic(&report_file(&run.id), format!("{text}\n").as_bytes())?;
+    Ok(match &run.lead {
+        Some(l) => format!("Reported to {l}. It sees this in `amux team wait`."),
+        None => format!("Saved as {}'s report (`amux team`).", run.id),
+    })
 }
 
 // ---- amux team ------------------------------------------------------------------------
@@ -407,19 +417,40 @@ fn wait(argv: &[String]) -> Result<i32> {
             s => lead_arg = Some(s.to_string()),
         }
     }
-    let lead = which_lead(lead_arg.as_deref())?;
-    let file = seen_file(&lead.id);
-    let mut seen: BTreeMap<String, String> = crate::store::read_json(&file).unwrap_or_default();
-    let tick = std::env::var("AMUX_TEAM_TICK_MS")
+    let mut out = String::new();
+    let code = wait_team(lead_arg.as_deref(), timeout, &mut out, &|| false)?;
+    print!("{out}");
+    Ok(code)
+}
+
+fn tick_ms() -> u64 {
+    std::env::var("AMUX_TEAM_TICK_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
+        .unwrap_or(1000)
+}
+
+/// `amux team wait`, and the MCP `wait` tool: blocks until a worker of the lead finishes
+/// its turn, needs an answer or ends, and writes what it has to say to `out`. Returns 0,
+/// 3 (no workers), or 124 when `timeout` seconds pass first. `stop` ends the wait early
+/// (a cancelled tool call), as a timeout.
+pub fn wait_team(
+    lead_arg: Option<&str>,
+    timeout: u64,
+    out: &mut String,
+    stop: &dyn Fn() -> bool,
+) -> Result<i32> {
+    let lead = which_lead(lead_arg)?;
+    let file = seen_file(&lead.id);
+    let mut seen: BTreeMap<String, String> = crate::store::read_json(&file).unwrap_or_default();
+    let tick = tick_ms();
     let deadline = time::now_ms() + timeout as i64 * 1000;
     loop {
         let now = time::now_ms();
         let all = workers(&lead.id);
         if all.is_empty() {
-            println!(
+            let _ = writeln!(
+                out,
                 "{} has no workers yet. Start one with `amux spawn --worktree …`.",
                 lead.id
             );
@@ -438,7 +469,7 @@ fn wait(argv: &[String]) -> Result<i32> {
         if !news.is_empty() {
             let _ = crate::store::write_json(&file, &seen);
             for (r, k) in &news {
-                tell(r, *k);
+                tell(out, r, *k);
             }
             let busy: Vec<&str> = all
                 .iter()
@@ -446,19 +477,23 @@ fn wait(argv: &[String]) -> Result<i32> {
                 .map(|r| r.id.as_str())
                 .collect();
             if busy.is_empty() {
-                println!("No other worker is busy.");
+                let _ = writeln!(out, "No other worker is busy.");
             } else {
-                println!("Still working: {}", busy.join(", "));
+                let _ = writeln!(out, "Still working: {}", busy.join(", "));
             }
             return Ok(0);
         }
         if all.iter().all(|r| !r.state().is_live()) {
-            println!("Every worker has ended, and you've seen them all. `amux team` lists them.");
+            let _ = writeln!(
+                out,
+                "Every worker has ended, and you've seen them all. `amux team` lists them."
+            );
             return Ok(0);
         }
-        if now >= deadline {
+        if now >= deadline || stop() {
             let busy: Vec<&str> = all.iter().map(|r| r.id.as_str()).collect();
-            println!(
+            let _ = writeln!(
+                out,
                 "Still working: {}. Run `amux team wait` again.",
                 busy.join(", ")
             );
@@ -468,9 +503,47 @@ fn wait(argv: &[String]) -> Result<i32> {
     }
 }
 
+/// For the MCP `wait` tool on runs that aren't a team's workers: blocks until every one
+/// of `ids` has finished its turn, needs an answer or has ended, then writes what each
+/// has to say. 124 when `timeout` seconds pass first.
+pub fn wait_runs(
+    ids: &[String],
+    timeout: u64,
+    out: &mut String,
+    stop: &dyn Fn() -> bool,
+) -> Result<i32> {
+    let ids: Vec<String> = ids
+        .iter()
+        .map(|i| runs::find(i).map(|r| r.id))
+        .collect::<Result<_>>()?;
+    let tick = tick_ms();
+    let deadline = time::now_ms() + timeout as i64 * 1000;
+    loop {
+        let now = time::now_ms();
+        let all: Vec<Run> = ids.iter().map(|i| runs::load(i)).collect::<Result<_>>()?;
+        let busy: Vec<&str> = all
+            .iter()
+            .filter(|r| settled(r, now).is_none())
+            .map(|r| r.id.as_str())
+            .collect();
+        if busy.is_empty() {
+            for r in &all {
+                let k = settled(r, now).unwrap_or(Kind::Idle);
+                tell(out, r, k);
+            }
+            return Ok(0);
+        }
+        if now >= deadline || stop() {
+            let _ = writeln!(out, "Still working: {}. Wait again.", busy.join(", "));
+            return Ok(124);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(tick));
+    }
+}
+
 /// Tells the lead what a worker has to say: its report, or what it's waiting for and
 /// the bottom of its screen.
-fn tell(r: &Run, k: Kind) {
+fn tell(out: &mut String, r: &Run, k: Kind) {
     let m = member(r);
     let a = &m.attempt;
     let what = match k {
@@ -478,7 +551,8 @@ fn tell(r: &Run, k: Kind) {
         Kind::Idle | Kind::Done if r.state().is_live() => "finished its turn".to_string(),
         _ => format!("ended ({})", a.state),
     };
-    println!(
+    let _ = writeln!(
+        out,
         "== {} {what} · {} file(s), +{} −{}, {} commit(s){}",
         r.id,
         a.files,
@@ -491,23 +565,26 @@ fn tell(r: &Run, k: Kind) {
             .unwrap_or_default()
     );
     if let Some(w) = &m.waiting {
-        println!("Waiting for: {w}");
+        let _ = writeln!(out, "Waiting for: {w}");
     }
     match &m.report {
-        Some(rep) => println!("Report:\n{rep}"),
+        Some(rep) => {
+            let _ = writeln!(out, "Report:\n{rep}");
+        }
         None => {
             // No report: the end of its screen says what it was doing.
             let p = crate::runs::screen::capture(r);
             let lines = crate::runs::screen::text(&p);
             let lines: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
             let tail = &lines[lines.len().saturating_sub(12)..];
-            println!("No report yet. The end of its screen:");
+            let _ = writeln!(out, "No report yet. The end of its screen:");
             for l in tail {
-                println!("  {}", l.trim_end());
+                let _ = writeln!(out, "  {}", l.trim_end());
             }
         }
     }
-    println!(
+    let _ = writeln!(
+        out,
         "Next: amux diff {id} · amux verify {id} --test · amux land {id} · amux send {id} \"…\"\n",
         id = r.id
     );

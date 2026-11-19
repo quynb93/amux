@@ -5243,3 +5243,361 @@ fn auto_approved_prompts_a_hook_reported_never_notify() {
     s.amux(&["send", "hp", "bye"]);
     wait_ps(&s, "hp", "exited 5");
 }
+
+/// `amux mcp` as an MCP client starts it: JSON-RPC over its stdin and stdout.
+struct Mcp {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    rx: std::sync::mpsc::Receiver<serde_json::Value>,
+    next: i64,
+}
+
+impl Mcp {
+    fn start(s: &Sandbox, env: &[(&str, &str)], dir: &Path) -> Mcp {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_amux"))
+            .arg("mcp")
+            .env("HOME", &s.home)
+            .env("AMUX_HOME", &s.amux_home)
+            .env("AMUX_NO_UPDATE_CHECK", "1")
+            .env_remove("AMUX_RUN")
+            .envs(env.iter().copied())
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                // Every line on stdout is one JSON-RPC message.
+                let v: serde_json::Value = serde_json::from_str(&line)
+                    .unwrap_or_else(|e| panic!("not JSON on stdout: {line:?}: {e}"));
+                if tx.send(v).is_err() {
+                    break;
+                }
+            }
+        });
+        Mcp {
+            child,
+            stdin,
+            rx,
+            next: 0,
+        }
+    }
+
+    fn write(&mut self, v: serde_json::Value) {
+        use std::io::Write;
+        writeln!(self.stdin, "{v}").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// Sends a request and returns the whole response to it.
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.next += 1;
+        let id = self.next;
+        self.write(
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+        );
+        loop {
+            let v = self
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap_or_else(|_| panic!("no answer to {method}"));
+            if v["id"] == id {
+                return v;
+            }
+        }
+    }
+
+    /// Calls a tool: its text, whether it's an error, and its structured content.
+    fn call(&mut self, name: &str, args: serde_json::Value) -> (String, bool, serde_json::Value) {
+        let r = self.request(
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": args }),
+        );
+        let res = &r["result"];
+        assert!(res.is_object(), "{r}");
+        (
+            res["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            res["isError"] == true,
+            res["structuredContent"].clone(),
+        )
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn an_agent_runs_a_team_through_the_mcp_server() {
+    let s = Sandbox::new("mcp");
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    let repo = s.home.join("repo");
+    write(&repo.join("a.txt"), "x\n");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &["commit", "-qm", "init"],
+    ] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    let chat = ("FAKE_CHAT", "1");
+    let r = s.amux_with(
+        &["spawn", "--name", "t", "--workers", "1", "fake"],
+        &[chat],
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    wait_ps(&s, "t", "running");
+
+    // The lead's CLI starts the server: it inherits AMUX_RUN.
+    let tick = ("AMUX_TEAM_TICK_MS", "100");
+    let mut lead = Mcp::start(&s, &[chat, tick, ("AMUX_RUN", "t")], &repo);
+    let init = lead.request(
+        "initialize",
+        serde_json::json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "1" } }),
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18", "{init}");
+    assert_eq!(init["result"]["serverInfo"]["name"], "amux");
+    lead.write(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    let tools = lead.request("tools/list", serde_json::json!({}));
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for t in [
+        "spawn", "list", "wait", "peek", "send", "report", "diff", "verify", "land", "stop",
+    ] {
+        assert!(names.contains(&t), "{names:?}");
+    }
+    let unknown = lead.request(
+        "tools/call",
+        serde_json::json!({ "name": "nope", "arguments": {} }),
+    );
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    let bad = lead.call(
+        "spawn",
+        serde_json::json!({ "account": "fake", "worktree": "yes" }),
+    );
+    assert!(bad.1 && bad.0.contains("boolean"), "{bad:?}");
+
+    // spawn: a worker of t, in its own worktree, told how to report.
+    let (text, err, st) = lead.call(
+        "spawn",
+        serde_json::json!({ "account": "fake", "name": "t-a", "worktree": true, "prompt": "do a part" }),
+    );
+    assert!(!err, "{text}");
+    assert_eq!(st["run"], "t-a", "{text}");
+    assert!(text.contains("started t-a"), "{text}");
+    // t may have one worker at a time, as with `amux spawn`.
+    let (text, err, _) = lead.call(
+        "spawn",
+        serde_json::json!({ "account": "fake", "name": "t-b" }),
+    );
+    assert!(err && text.contains("its limit"), "{text}");
+
+    let (_, err, st) = lead.call("list", serde_json::json!({}));
+    assert!(!err);
+    let runs = st["runs"].as_array().unwrap();
+    let a = runs.iter().find(|r| r["id"] == "t-a").expect("t-a listed");
+    assert_eq!(a["lead"], "t");
+    assert_eq!(a["branch"], "amux/t-a");
+    let (_, _, st) = lead.call("list", serde_json::json!({ "lead": "t" }));
+    assert_eq!(st["runs"].as_array().unwrap().len(), 1);
+
+    let mut screen = String::new();
+    eventually("the worker's prompt on its screen", || {
+        screen = lead.call("peek", serde_json::json!({ "run": "t-a" })).0;
+        screen.contains("do a part")
+    });
+    assert!(screen.contains("amux report"), "{screen}");
+
+    let (text, err, _) = lead.call("send", serde_json::json!({ "run": "t-a", "text": "hello" }));
+    assert!(!err, "{text}");
+    eventually("the worker got the text", || {
+        lead.call("peek", serde_json::json!({ "run": "t-a", "lines": 3 }))
+            .0
+            .contains("got hello")
+    });
+
+    // The worker's own server: it reports, and can't start workers.
+    let mut worker = Mcp::start(&s, &[chat, ("AMUX_RUN", "t-a")], &repo);
+    let (text, err, _) = worker.call("spawn", serde_json::json!({ "account": "fake" }));
+    assert!(
+        err && text.contains("workers don't start workers"),
+        "{text}"
+    );
+    let (text, err, _) = worker.call(
+        "report",
+        serde_json::json!({ "text": "did part a; tests pass" }),
+    );
+    assert!(!err && text.contains("Reported to t"), "{text}");
+    drop(worker);
+
+    lead.call("send", serde_json::json!({ "run": "t-a", "text": "quit" }));
+    wait_ps(&s, "t-a", "exited 7");
+    let (text, err, st) = lead.call("wait", serde_json::json!({ "timeout": 20 }));
+    assert!(!err, "{text}");
+    assert_eq!(st["timedOut"], false);
+    assert!(
+        text.contains("== t-a ended") && text.contains("did part a; tests pass"),
+        "{text}"
+    );
+    // Told once: there is nothing new, and no worker is left to wait for.
+    let (text, err, _) = lead.call("wait", serde_json::json!({ "timeout": 1 }));
+    assert!(!err && text.contains("Every worker has ended"), "{text}");
+    let (text, _, _) = lead.call("wait", serde_json::json!({ "runs": ["t-a"], "timeout": 5 }));
+    assert!(text.contains("== t-a ended"), "{text}");
+    let (text, err, _) = lead.call("diff", serde_json::json!({ "run": "t-a" }));
+    assert!(!err && text.contains("No changes"), "{text}");
+
+    let (text, err, _) = lead.call("stop", serde_json::json!({ "run": "t" }));
+    assert!(!err && text.contains("Stopped t"), "{text}");
+    let (text, err, _) = lead.call("stop", serde_json::json!({ "run": "t" }));
+    assert!(err && text.contains("not running"), "{text}");
+
+    // A 2026-07-28 client: no handshake, the version on every request.
+    let meta = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let d = lead.request("server/discover", serde_json::json!({ "_meta": meta }));
+    assert_eq!(d["result"]["supportedVersions"][0], "2026-07-28", "{d}");
+    let c = lead.request(
+        "tools/call",
+        serde_json::json!({ "name": "list", "arguments": {}, "_meta": meta }),
+    );
+    assert_eq!(c["result"]["resultType"], "complete", "{c}");
+}
+
+#[test]
+fn mcp_install_and_remove_leave_your_config_as_it_was() {
+    let s = Sandbox::new("mcpinstall");
+    let claude_json = s.home.join(".claude.json");
+    let mine = serde_json::json!({
+        "hasCompletedOnboarding": true,
+        "mcpServers": { "gh": { "type": "stdio", "command": "gh-mcp", "args": [] } }
+    });
+    write(&claude_json, &serde_json::to_string_pretty(&mine).unwrap());
+    let r = s.amux(&["account", "add", "claude", "w", "--no-login"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    let overlay_json = s.amux_home.join("accounts/claude/w/.claude/.claude.json");
+    assert!(overlay_json.exists(), "seeded from ~/.claude.json");
+    let seeded = fs::read_to_string(&overlay_json).unwrap();
+    let codex = s.home.join(".codex/config.toml");
+    let codex_mine = "model = \"o3\"\n\n[mcp_servers.gh]\ncommand = \"gh-mcp\"\n";
+    write(&codex, codex_mine);
+    let gemini = s.home.join(".gemini/settings.json");
+    write(&gemini, "{\n  \"theme\": \"dark\"\n}\n");
+    let json = |p: &Path| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
+    };
+
+    let st = s.amux(&["mcp", "--status"]).out;
+    assert!(st.contains("claude (claude@w): not installed"), "{st}");
+    assert!(st.contains("codex: not installed"), "{st}");
+
+    let r = s.amux(&["mcp", "--install"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    for f in [&claude_json, &overlay_json] {
+        let v = json(f);
+        assert_eq!(
+            v["mcpServers"]["amux"]["args"],
+            serde_json::json!(["mcp"]),
+            "{v}"
+        );
+        assert_eq!(v["mcpServers"]["gh"], mine["mcpServers"]["gh"]);
+        assert_eq!(v["hasCompletedOnboarding"], true);
+    }
+    let me = env!("CARGO_BIN_EXE_amux");
+    assert_eq!(json(&claude_json)["mcpServers"]["amux"]["command"], me);
+    let toml = fs::read_to_string(&codex).unwrap();
+    assert!(toml.starts_with(codex_mine), "{toml}");
+    assert!(
+        toml.contains("[mcp_servers.amux]") && toml.contains("\"AMUX_RUN\""),
+        "{toml}"
+    );
+    assert_eq!(
+        json(&gemini)["mcpServers"]["amux"]["args"],
+        serde_json::json!(["mcp"])
+    );
+    assert_eq!(json(&gemini)["theme"], "dark");
+    // Twice is the same as once.
+    let once = (
+        fs::read_to_string(&codex).unwrap(),
+        json(&gemini),
+        json(&overlay_json),
+    );
+    s.amux(&["mcp", "--install"]);
+    assert_eq!(
+        once,
+        (
+            fs::read_to_string(&codex).unwrap(),
+            json(&gemini),
+            json(&overlay_json)
+        )
+    );
+    let st = s.amux(&["mcp", "--status"]).out;
+    assert!(
+        st.contains("codex: installed in ~/.codex/config.toml"),
+        "{st}"
+    );
+    let doctor = s.amux(&["doctor"]).out;
+    assert!(
+        doctor.contains("note mcp server, gemini: installed"),
+        "{doctor}"
+    );
+
+    let r = s.amux(&["mcp", "--remove", "codex"]);
+    assert!(r.out.contains("codex: removed"), "{}", r.out);
+    assert_eq!(fs::read_to_string(&codex).unwrap(), codex_mine);
+    assert!(
+        json(&gemini)["mcpServers"]["amux"].is_object(),
+        "only codex"
+    );
+    let r = s.amux(&["mcp", "--remove"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert_eq!(json(&claude_json), mine);
+    assert_eq!(
+        json(&overlay_json),
+        serde_json::from_str::<serde_json::Value>(&seeded).unwrap()
+    );
+    assert_eq!(json(&gemini), serde_json::json!({ "theme": "dark" }));
+    assert!(s
+        .amux(&["mcp", "--remove"])
+        .out
+        .contains("nothing to remove"));
+
+    // Another server called amux is left alone.
+    write(
+        &gemini,
+        "{\"mcpServers\":{\"amux\":{\"command\":\"npx\",\"args\":[\"x\"]}}}",
+    );
+    let r = s.amux(&["mcp", "--install", "gemini"]);
+    assert_ne!(r.code, 0);
+    assert_eq!(json(&gemini)["mcpServers"]["amux"]["command"], "npx");
+    assert_ne!(s.amux(&["mcp", "--install", "qwen"]).code, 0);
+}

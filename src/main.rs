@@ -54,6 +54,8 @@ mod commands {
 mod fsx;
 mod git;
 mod launch;
+#[cfg(unix)]
+mod mcp;
 mod overlay;
 #[cfg(unix)]
 mod palettes;
@@ -206,6 +208,9 @@ Maintenance:
                                            needs you, stalls, hits a limit, ends, or its tests/CI
                                            finish (webpush: straight to the `amux serve` app)
   amux skill [--install]                   The agent skill for running other agents with amux
+  amux mcp [--install | --remove [claude|codex|gemini] | --status]
+      An MCP server (stdio) with amux's team tools: spawn, wait, list, peek, send, report,
+      diff, verify, overlap, land, stop. --install adds it to each CLI's MCP config.
   amux state-hooks [status] | install | remove [claude|gemini]
       Hooks in Claude Code's and Gemini CLI's settings that tell amux exactly when a run
       works, waits for you (with the prompt's message) or is done. Only inside amux runs.
@@ -255,6 +260,9 @@ fn main_inner(argv: &[String]) -> Result<i32> {
             return Ok(0);
         }
         Some("update") => return Ok(update::update_cmd(rest)),
+        // Before the update check and the scheduler: an MCP server's stdout is the protocol.
+        #[cfg(unix)]
+        Some("mcp") => return mcp::mcp_cmd(rest),
         _ => {}
     }
 
@@ -385,7 +393,7 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
         | "overlap" | "land" | "comment" | "comments" | "review" | "usage" | "failover" | "gc"
         | "try" | "compare" | "pick" | "open" | "note" | "notes" | "broadcast" | "revive"
-        | "phone" | "theme" | "themes" | "tracker" | "trackers" | "state-hooks" => {
+        | "phone" | "theme" | "themes" | "tracker" | "trackers" | "state-hooks" | "mcp" => {
             bail!("Parallel runs need macOS or Linux.")
         }
         _ => {

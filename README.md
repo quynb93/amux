@@ -418,6 +418,33 @@ amux team wait auth     # block until the next worker finishes or needs help, an
 - **Permissions.** Flags after `--` go to the lead's CLI and to its workers, so they can edit files and run `amux` without asking you each time. The first time Claude Code opens the folder it asks whether you trust it; answer that once with `amux attach` or `amux send <lead> --no-enter --key down --key enter`.
 - **It can't run away.** A lead has at most `--workers` going at once (3 by default), and workers can't start workers of their own. Each worker is still a normal run: slots, guards, usage-limit failover and phone notifications all apply.
 - The same commands work for any agent you start yourself: from inside a run, `amux spawn` makes workers and `amux team wait` waits for them.
+- **Or with tools.** With `amux mcp --install`, the lead and its workers can do the same through MCP tools (`spawn`, `wait`, `report`, …) instead of shell commands, with the same limits. See [MCP](#mcp).
+
+#### MCP
+
+`amux mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, for agents that prefer tools to shell commands. `amux mcp --install` adds it to Claude Code, Codex and Gemini CLI:
+
+```sh
+amux mcp --install            # or: --install claude|codex|gemini
+amux mcp --status             # where it is installed
+amux mcp --remove             # take it out again
+```
+
+| Tool | Does what | Like |
+|---|---|---|
+| `spawn` | Start an agent: account, prompt, worktree, branch, base, name, dir, issue, autopilot, CLI args | `amux spawn` |
+| `wait` | Block (up to 10 minutes) until a worker finishes its turn, needs an answer or ends; returns its report, or its question and the end of its screen. `runs` waits for given runs instead of a team | `amux team wait` |
+| `list` | Every run, or one lead's workers, as JSON | `amux ps --json` |
+| `peek`, `send` | Read a run's screen; type text (and Enter) or press keys | `amux peek`, `amux send` |
+| `report` | A worker's report to its lead | `amux report` |
+| `diff`, `verify` | A run's changes; run its tests here or push for CI | `amux diff`, `amux verify` |
+| `overlap`, `land`, `stop` | Find conflicts, merge tested work, end a run | `amux overlap`, `amux land`, `amux stop` |
+
+- **Same rules.** Each tool runs the CLI command's own code, so a lead's `--workers` cap, the rule that workers don't start workers, slots, guards and failover all apply. A failure comes back as a tool error with the command's message, so the agent can correct itself.
+- **Inside a run,** the server inherits `AMUX_RUN` from the CLI that started it, so its spawns are that run's workers, and `report` and `wait` need no names. Outside a run, spawns are ordinary runs: pass `runs` to `wait`.
+- **Where it goes.** Claude Code keeps user-scope MCP servers in `.claude.json`, which is per account, so amux adds `mcpServers.amux` to each Claude account's `.claude.json` and to the one new accounts are copied from (`~/.claude/.claude.json` or `~/.claude.json`). An account that hasn't run yet has none: run it once, then install again. Codex gets `[mcp_servers.amux]` in the shared `~/.codex/config.toml`, between marker comments, forwarding `AMUX_RUN` and `AMUX_HOME` (`env_vars`, since Codex passes servers only the variables it's told to) with `tool_timeout_sec = 660` (Codex's default is 60). Gemini CLI gets `mcpServers.amux` in the shared `~/.gemini/settings.json`, with an 11-minute timeout.
+- An entry is amux's when it runs `amux mcp` with no other arguments. `--remove` takes out only that, another server called `amux` is left alone, and files are rewritten atomically, keeping everything else. `amux doctor` says where it is installed.
+- Protocol: JSON-RPC 2.0, one message per line. It speaks MCP 2026-07-28 (stateless, with `server/discover`) and, for clients that start with `initialize`, 2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05. Tool results have text content, `structuredContent` for `spawn`, `list` and `wait`, and `isError` on failures.
 
 ### Usage limits
 
@@ -714,7 +741,7 @@ amux plugin list
 
 ### Agents that run agents
 
-`amux skill --install` puts an `amux` skill in the shared home of Claude Code, Codex and Gemini CLI, so every account's agent knows how to start helpers in worktrees, steer and wait for them, review their diffs, share the machine with `amux slot`, verify and open PRs. `amux skill` prints it, for an `AGENTS.md`.
+`amux skill --install` puts an `amux` skill in the shared home of Claude Code, Codex and Gemini CLI, so every account's agent knows how to start helpers in worktrees, steer and wait for them, review their diffs, share the machine with `amux slot`, verify and open PRs. `amux skill` prints it, for an `AGENTS.md`. Agents that would rather call tools can use the [MCP server](#mcp) (`amux mcp --install`).
 
 ### Sharing the machine
 
@@ -879,6 +906,7 @@ amux update --patterns     # fetch patterns.json from the repo's main branch now
 | `amux lead [--name <team>] [--workers <n>] [--worker <acct>]… <cli>[@name] -p <goal> [-- <cli flags>]` | Start a lead agent that splits the goal and runs a team of workers. |
 | `amux team [<lead>] [--json]`, `amux team wait [<lead>] [--timeout <secs>]` | A team's workers and their reports; block until the next one finishes or needs help. |
 | `amux report <text…>` | From inside a run: what it did, for its lead. |
+| `amux mcp [--install \| --remove [claude\|codex\|gemini] \| --status]` | An MCP server (stdio) with the team's tools: `spawn`, `wait`, `list`, `peek`, `send`, `report`, `diff`, `verify`, `overlap`, `land`, `stop`. `--install` adds it to each CLI's MCP config. See [MCP](#mcp). |
 | `amux theme [<name>] [--json]` | List the themes with swatches, or choose one for `amux ui` and the phone app. |
 | `amux serve [--listen <host:port>] [--tls \| --cert <pem> --key <pem> \| --tailscale] [--new-token]` | The phone web app: every run, its screen, replies, diffs, tests, PRs. Over HTTPS with `--tls`, your certificate, or Tailscale. |
 | `amux phone webpush\|ntfy\|pushover\|webhook …`, `amux phone test\|off\|open\|events\|brief` | Push notifications to your phone when a run needs you, ends, or its tests or CI finish. `webpush` sends to the phone app itself (`amux serve` over HTTPS). |
@@ -965,11 +993,10 @@ amux changes where a CLI keeps its files. It doesn't change what the CLI does.
 
 ## Roadmap
 
-Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub, Linear and Jira issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, Web Push from the phone app, usage-limit failover, the usage view, best of N, landing, remote machines and the phone app. Next:
+Shipped: parallel runs with waiting detection, autopilot from commit to merged PR, auto-approve rules, GitHub, Linear and Jira issues as runs, schedules, desktop and phone notifications, HTTPS for the phone app, Web Push from the phone app, usage-limit failover, the usage view, best of N, landing, remote machines, the phone app, and an MCP server for teams. Next:
 
-1. **An MCP server for teams**, so agents that prefer tools to shell commands can delegate and wait.
-2. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
-3. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
+1. **Native Windows.** Tracked in [#1](https://github.com/quynb93/amux/issues/1).
+2. **`amux import <dir>`.** Merge existing per-account directories into the shared home in one command.
 
 Ideas and feedback are welcome in [issues](https://github.com/quynb93/amux/issues).
 
