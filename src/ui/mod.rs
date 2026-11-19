@@ -659,13 +659,15 @@ impl App {
         while let Ok(d) = self.rx.try_recv() {
             any = true;
             self.busy = self.busy.saturating_sub(1);
-            if let Mode::Review(r) = &mut self.mode {
-                r.reload_comments();
-            }
+            // A drop hands back the review read again, comments and all (for a remote
+            // run, reading them is another SSH round trip on this thread).
             if let Some(dd) = d.dropped {
                 self.finish_drop(*dd);
                 any = true;
                 continue;
+            }
+            if let Mode::Review(r) = &mut self.mode {
+                r.reload_comments();
             }
             if let Some((title, text)) = d.output {
                 let view = OutputView {
