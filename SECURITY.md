@@ -27,6 +27,25 @@ amux sits next to your logins, so here is exactly what it touches:
 - **`amux serve`** is reached with a secret token (a cookie after the first visit), answers only to its own host names, limits slow and concurrent connections, and runs only the commands the CLI has. Anyone with the link controls your runs; keep it to HTTPS (`--tailscale`, or `--tls`) or this machine. The `--tls` certificate is a server certificate, not a CA, so trusting it on a phone doesn't let anyone vouch for other sites.
 - **Other machines** run amux there over your own SSH; arguments go as one encoded payload, so the remote shell doesn't interpret them.
 
+## What auto-approve, the sandbox and autopilot protect against
+
+These features let agents work unwatched. Here is plainly what each one does and doesn't guard.
+
+**Auto-approve** (`amux allow`) answers a permission prompt only when the rules allow it.
+
+- It does: parse each shell command as a POSIX shell would and match rules word by word; refuse anything that expands, redirects to a file, sets variables or runs in the background; refuse options that make an allowed tool run other programs (`git difftool`, `--output`, `--ext-diff`, `rg --pre`, `cargo --config`, `find -exec`, …); answer edits only inside the run's folder with symlinks resolved and never in `.git`; read only prompts of providers that declare Claude Code's layout (`"autoApprove": "claude-code"`); leave any prompt whose layout looks off to you; and, with state hooks installed, answer only a prompt that matches the exact command or file the CLI's `PermissionRequest` hook reported.
+- It doesn't: limit what an allowed command does. Allowing tests or builds together with `edit` lets the agent run code it wrote, by design. Without state hooks (and in a sandboxed run, where the hook can't reach amux), it trusts the screen, and the agent's own text is on that screen; a sufficiently careful forgery of the whole prompt could still be read as real. Don't allow commands you wouldn't run on the agent's word.
+
+**The sandbox** (`amux spawn --sandbox`) runs the CLI in a container.
+
+- It does: give the agent only the run's checkout, the account's overlay and the shared home; give a run in a git repository its own worktree and keep the repository's git dir read-only but for `objects/`, `refs/`, `logs/`, `packed-refs` and that worktree's own folder (its `.git` file, `commondir`, `gitdir` and `config.worktree` stay read-only); keep the shared home's settings, instruction files and code folders read-only (the provider's `sandboxReadOnly`: `settings.json`, `CLAUDE.md`, hooks, skills, plugins, …), and hide its own login files; run a sandboxed run's tests in the image (`--host-test` opts out). amux's own git commands in any run's checkout run without hooks or fsmonitor, diffs without external diff programs, and pushes with `--no-verify`.
+- It doesn't: protect what the agent may write: the checkout's files (build scripts, tests, CI config, `.gitattributes`), which run wherever you run them; the session folders; and the account's overlay, which holds that account's own settings (Claude Code's `.claude.json` and its MCP servers) used by later runs of the same account outside the sandbox. Use a separate account for sandboxed runs. It doesn't limit the network unless `--network off`, and it trusts the image, the engine and the kernel. See [docs/sandbox.md](docs/sandbox.md#what-the-sandbox-protects).
+
+**Autopilot** opens, fixes and optionally merges a run's PR.
+
+- It does: type review feedback into the agent only from trusted people (`OWNER`, `MEMBER`, `COLLABORATOR` and you, or `"trustReviewsFrom"`), ignoring and logging everyone else's; in merge mode, merge only with passing checks and an approval (from GitHub's review decision, or a trusted reviewer when the branch requires none) unless you loosen it, and only the head commit it checked (`--match-head-commit`).
+- It doesn't: judge what a trusted reviewer asks for, or what the agent changes in response. CI runs the agent's code with whatever secrets your CI gives a PR; branch protection on GitHub is still what decides what may be merged.
+
 ## Scope
 
 In scope: anything in amux that exposes credentials or private files to other users or processes, writes outside `~/.amux` and the configured shared homes, or deletes user data unexpectedly.

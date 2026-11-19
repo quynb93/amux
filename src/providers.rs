@@ -68,7 +68,41 @@ pub struct ProviderSpec {
     /// container can sign in (a Keychain login can't be read from one).
     #[serde(default)]
     pub login_files: Vec<String>,
+    /// The permission prompt layout auto-approve may read and answer: "claude-code" is
+    /// the only one known. Without it, auto-approve leaves this CLI's prompts to you.
+    #[serde(default)]
+    pub auto_approve: Option<String>,
+    /// Entries of the shared home a sandboxed run may read but not change: the settings,
+    /// instructions and code the CLI loads on this machine too (`settings.json`, hooks,
+    /// skills, plugins, …). The rest of the shared home is writable in the container.
+    /// Left out, `DEFAULT_SANDBOX_READ_ONLY` applies.
+    #[serde(default)]
+    pub sandbox_read_only: Option<Vec<String>>,
 }
+
+/// What a sandboxed run can't change in a shared home whose provider doesn't say
+/// (`sandboxReadOnly`): every settings file, instruction file and code folder the
+/// built-in CLIs load.
+pub const DEFAULT_SANDBOX_READ_ONLY: &[&str] = &[
+    "settings.json",
+    "settings.local.json",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "AGENTS.override.md",
+    "GEMINI.md",
+    "QWEN.md",
+    "config.toml",
+    "keybindings.json",
+    "hooks",
+    "skills",
+    "plugins",
+    "agents",
+    "commands",
+    "output-styles",
+    "extensions",
+    "prompts",
+    "rules",
+];
 
 impl ProviderSpec {
     pub fn privacy_vars(&self) -> Vec<(String, String)> {
@@ -136,7 +170,12 @@ pub fn builtin() -> Vec<Value> {
             },
             "sessions": "claude",
             // On Linux; on macOS the login is in the Keychain instead.
-            "loginFiles": [".credentials.json"]
+            "loginFiles": [".credentials.json"],
+            "autoApprove": "claude-code",
+            "sandboxReadOnly": [
+                "settings.json", "settings.local.json", "CLAUDE.md", "keybindings.json",
+                "hooks", "skills", "plugins", "agents", "commands", "output-styles", "rules"
+            ]
         }),
         json!({
             "id": "codex",
@@ -157,7 +196,11 @@ pub fn builtin() -> Vec<Value> {
             "limitPatterns": ["You've hit your usage limit", "usage limit has been reached"],
             "baseUrlEnv": "OPENAI_BASE_URL",
             "sessions": "codex",
-            "loginFiles": ["auth.json"]
+            "loginFiles": ["auth.json"],
+            "sandboxReadOnly": [
+                "config.toml", "AGENTS.md", "AGENTS.override.md", "hooks", "skills", "prompts",
+                "plugins", "rules", "agents"
+            ]
         }),
         json!({
             "id": "gemini",
@@ -176,7 +219,10 @@ pub fn builtin() -> Vec<Value> {
             "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"],
             "limitPatterns": ["exhausted your daily quota", "Quota exceeded for quota metric"],
             "sessions": "gemini",
-            "loginFiles": ["oauth_creds.json"]
+            "loginFiles": ["oauth_creds.json"],
+            "sandboxReadOnly": [
+                "settings.json", "GEMINI.md", "extensions", "commands", "skills", "agents", "hooks"
+            ]
         }),
         // Qwen Code (QwenLM/qwen-code), checked against its source:
         // packages/core/src/config/storage.ts reads QWEN_HOME as the whole ~/.qwen dir
@@ -197,7 +243,10 @@ pub fn builtin() -> Vec<Value> {
             "resumeArgs": ["--resume", "{id}"],
             "promptArgs": ["-i", "{prompt}"],
             "conflictingEnv": ["QWEN_HOME"],
-            "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"]
+            "waitingPatterns": ["Allow execution", "Apply this change?", "Waiting for user confirmation"],
+            "sandboxReadOnly": [
+                "settings.json", "QWEN.md", "extensions", "commands", "skills", "agents", "hooks"
+            ]
         }),
     ]
 }

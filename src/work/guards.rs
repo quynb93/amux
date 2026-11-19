@@ -19,7 +19,7 @@ use crate::store::load_config;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// By default a run that works for half an hour without changing a file is flagged.
 const DEFAULT_STALL_MS: u64 = 30 * 60_000;
@@ -91,9 +91,7 @@ impl Guard {
 /// a git repository, where a stall can't be told from slow work.
 pub fn fingerprint(dir: &Path) -> Option<u64> {
     let run = |args: &[&str]| -> Option<Vec<u8>> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(dir)
+        let out = crate::git::run_git_cmd(dir)
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())

@@ -7,7 +7,7 @@
 //! With these, one agent can start helpers (`amux spawn -p …`), steer them (`send`), and
 //! pick up their results (`wait`, `diff`, `peek`), and a script can do the same.
 
-use crate::git::{base_of, git};
+use crate::git::{base_of, run_git as git};
 use crate::runs::client::send_text;
 use crate::runs::state::{run_kind, Kind};
 use crate::runs::{self, Run};
@@ -16,7 +16,6 @@ use crate::util::need;
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// The exit code for "the time ran out", as timeout(1) uses.
@@ -210,8 +209,9 @@ pub fn diff_cmd(argv: &[String]) -> Result<i32> {
         );
     }
     let untracked = git(&dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(&dir).arg("diff");
+    let mut cmd = crate::git::run_git_cmd(&dir);
+    cmd.stdin(std::process::Stdio::inherit())
+        .args(["diff", "--no-ext-diff"]);
     if color {
         cmd.arg("--color=always");
     }

@@ -8,12 +8,12 @@
 //! `git apply <patch>` puts it back.
 
 use super::review::{self, Changes, UNTRACKED};
-use crate::git::{git, git_raw};
+use crate::git::{run_git as git, run_git_raw as git_raw};
 use crate::runs::{self, state, Run};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// One hunk of a run's diff, or a whole new untracked file.
 #[derive(Clone, Debug, Serialize)]
@@ -291,9 +291,7 @@ fn commit_message(hunks: usize) -> String {
 
 /// `git diff` exits 1 when there are differences, which `--no-index` always has here.
 fn new_file_patch(top: &Path, rel: &str) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(top)
+    let out = crate::git::run_git_cmd(top)
         .args([
             "diff",
             "--no-index",
@@ -455,6 +453,7 @@ pub fn drop_from_run(
 mod tests {
     use super::*;
     use crate::testutil::{write, TempDir};
+    use std::process::Command;
 
     fn sh(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

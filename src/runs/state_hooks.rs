@@ -169,7 +169,11 @@ pub fn map(cli: &str, event: &str, input: &Value) -> Option<Value> {
             _ => (!subagent).then(|| with_tool(working())),
         },
         ("claude", "PermissionRequest") => {
-            Some(with_tool(blocked("permission", permission(input))))
+            let mut v = with_tool(blocked("permission", permission(input)));
+            if let Some(ask) = exact_ask(input) {
+                v["ask"] = ask;
+            }
+            Some(v)
         }
         ("claude", "Notification") => match s("notification_type") {
             // Follows the PermissionRequest hook, some seconds after the prompt showed.
@@ -224,6 +228,29 @@ fn first_line(s: &str) -> String {
     } else {
         l.to_string()
     }
+}
+
+/// What a PermissionRequest asks, exactly as the CLI will run it, for auto-approve to check
+/// the prompt on screen against: `{"kind": "bash", "subject": <the command>}`, for a file
+/// tool `{"kind": "edit", "subject": <the path>}`, and for any other tool (a web fetch, an
+/// MCP tool) `{"kind": "other", "subject": <the tool>}`, so a prompt for it on screen isn't
+/// taken for one the hook didn't report. The screen can show text the agent wrote; this
+/// can't.
+fn exact_ask(input: &Value) -> Option<Value> {
+    let tool = input.get("tool_name").and_then(Value::as_str)?;
+    let ti = |k: &str| {
+        input
+            .pointer(&format!("/tool_input/{k}"))
+            .and_then(Value::as_str)
+    };
+    let (kind, subject) = match tool {
+        "Bash" => ("bash", ti("command")?),
+        "Write" | "Edit" | "MultiEdit" => ("edit", ti("file_path")?),
+        "NotebookEdit" => ("edit", ti("notebook_path")?),
+        _ => ("other", tool),
+    };
+    // A command too long to send whole is one auto-approve won't match: it then waits.
+    (subject.len() <= 16 * 1024).then(|| json!({ "kind": kind, "subject": subject }))
 }
 
 /// "approve Bash: cargo test", like Claude Code's own OSC 7501 messages.
@@ -453,6 +480,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bash["message"], "approve Bash: cargo test");
+        // The exact request, for auto-approve to check the screen against.
+        assert_eq!(
+            bash["ask"],
+            json!({"kind": "bash", "subject": "cargo test\necho"})
+        );
+        assert_eq!(
+            perm["ask"],
+            json!({"kind": "edit", "subject": "/w/src/a.rs"})
+        );
+        assert_eq!(
+            crate::runs::program::ask_from_hook(bash.to_string().as_bytes()),
+            Some(("bash".into(), "cargo test\necho".into()))
+        );
+        // Any other tool is reported by name, so its prompt can be told from a forged one.
+        let fetch = map(
+            "claude",
+            "PermissionRequest",
+            &json!({"tool_name": "WebFetch", "tool_input": {"url": "https://x.example"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            fetch["ask"],
+            json!({"kind": "other", "subject": "WebFetch"})
+        );
         let q = map(
             "claude",
             "PreToolUse",

@@ -8,11 +8,13 @@ use crate::work::slots::EX_TEMPFAIL;
 use crate::work::verify::{self, Plan, TestOutcome};
 use anyhow::{anyhow, bail, Result};
 
-const USAGE: &str = "amux verify <run> [--test [--command <cmd>] | --push | --send-failures]";
+const USAGE: &str =
+    "amux verify <run> [--test [--command <cmd>] | --host-test | --push | --send-failures]";
 
 pub fn verify_cmd(argv: &[String]) -> Result<i32> {
     let mut action = None;
     let mut command = None;
+    let mut host = false;
     let mut id = None;
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -20,6 +22,10 @@ pub fn verify_cmd(argv: &[String]) -> Result<i32> {
             "--test" | "-t" => action = Some("test"),
             "--push" | "-p" => action = Some("push"),
             "--send-failures" | "-f" => action = Some("send"),
+            "--host-test" => {
+                action = Some("test");
+                host = true;
+            }
             "--command" | "-c" => {
                 command = Some(
                     it.next()
@@ -57,7 +63,7 @@ pub fn verify_cmd(argv: &[String]) -> Result<i32> {
             println!("Sent the failing output to {}.", run.id);
             Ok(0)
         }
-        Some(_) => match verify::run_tests(&run, command.or(plan.test.clone()))? {
+        Some(_) => match verify::run_tests(&run, command.or(plan.test.clone()), host)? {
             TestOutcome::Passed { cmd, log } => {
                 println!(
                     "Tests passed for {} ({cmd}). Output: {}",

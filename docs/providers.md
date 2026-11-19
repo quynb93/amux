@@ -75,6 +75,8 @@ An entry whose `id` matches a built-in is merged into it, so you only list the f
 | `conflictingEnv` | no | Variables removed from the environment at launch, so one inherited from your shell can't override the account. The home variable and `tokenEnv` are always removed. |
 | `privacyEnv` | no | Variables to set when an account has privacy mode on. Use only opt-outs that the CLI documents. |
 | `loginFiles` | no | Files in the overlay that hold a login, such as `["auth.json"]`. `amux spawn --sandbox` checks that one exists (or that the account has a token) before it starts the CLI in a container. Leave this out and amux doesn't check. |
+| `sandboxReadOnly` | no | Entries of the shared home that a [sandboxed](sandbox.md) run can read but not change: the settings, instruction files and code folders the CLI also loads outside the sandbox, such as `["settings.json", "hooks", "skills"]`. Missing ones are created first (a folder for a name without an extension, `{}` for a `.json` file, else an empty file). The rest of the shared home is writable in the container. Leave it out and every name the built-in providers use is read-only. |
+| `autoApprove` | no | `"claude-code"`: this CLI draws Claude Code's permission prompts, so [auto-approve](../README.md#answering-permission-prompts) may read and answer them. The built-in `claude` provider has it. Leave it out and auto-approve never answers this CLI's prompts. |
 | `sessions` | no | Session file format: `"claude"`, `"codex"` or `"gemini"`. Leave this out if amux can't read this CLI's sessions; `amux sessions` then skips it. |
 
 ## Choosing private entries

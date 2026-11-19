@@ -131,18 +131,53 @@ impl Sandbox {
     /// `bin` is the CLI as the provider names it; only its file name is used, because a
     /// path on this machine means nothing inside the image.
     pub fn command(&self, id: &str, cwd: &str, bin: &str, args: &[String]) -> Vec<String> {
+        let mut c = self.run_args(&self.container(id), &format!("amux.run={id}"), true, cwd);
+        c.extend(self.env.iter().flat_map(|e| ["-e".to_string(), e.clone()]));
+        c.push(self.image.clone());
+        let name = Path::new(bin)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| bin.to_string());
+        c.push(name);
+        c.extend(args.iter().cloned());
+        c
+    }
+
+    /// The command that runs a run's tests in its image, with the same mounts, user and
+    /// network as the run: `sh -c <cmd>` in `cwd`, with no terminal. Its container is
+    /// `<the run's>-test-<pid>`, labelled `amux.test=<run>` (so stopping the run leaves it
+    /// be). The pid keeps two test runs of the same run (`verify` and `land`, say) apart.
+    pub fn test_command(&self, id: &str, cwd: &str, cmd: &str) -> Vec<String> {
+        let name = format!("{}-test-{}", self.container(id), std::process::id());
+        let mut c = self.run_args(&name, &format!("amux.test={id}"), false, cwd);
+        for e in ["AMUX_RUN", "CI=1", "PYTHONDONTWRITEBYTECODE=1"] {
+            c.extend(["-e".into(), e.into()]);
+        }
+        // The run's own variables are its account's: the tests don't get them, except
+        // HOME and git's identity.
+        for e in &self.env {
+            if e.starts_with("HOME=") || e.starts_with("GIT_") {
+                c.extend(["-e".into(), e.clone()]);
+            }
+        }
+        c.extend([self.image.clone(), "sh".into(), "-c".into(), cmd.into()]);
+        c
+    }
+
+    /// `<engine> run` up to the image: name, label, user, network, folder and mounts.
+    fn run_args(&self, name: &str, label: &str, tty: bool, cwd: &str) -> Vec<String> {
         let mut c: Vec<String> = vec![
             self.engine.clone(),
             "run".into(),
             "--rm".into(),
-            "-it".into(),
+            if tty { "-it" } else { "-i" }.into(),
             "--init".into(),
             "--pull".into(),
             "never".into(),
             "--name".into(),
-            self.container(id),
+            name.into(),
             "--label".into(),
-            format!("amux.run={id}"),
+            label.into(),
         ];
         if !self.home.is_empty() {
             c.extend(["--label".into(), format!("amux.home={}", self.home)]);
@@ -159,16 +194,6 @@ impl Sandbox {
         for m in &self.mounts {
             c.extend(["-v".into(), m.arg()]);
         }
-        for e in &self.env {
-            c.extend(["-e".into(), e.clone()]);
-        }
-        c.push(self.image.clone());
-        let name = Path::new(bin)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| bin.to_string());
-        c.push(name);
-        c.extend(args.iter().cloned());
         c
     }
 
@@ -386,6 +411,175 @@ fn checkout_mounts(cwd: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// What keeps a sandboxed agent from planting code that git on this machine would run.
+/// A sandboxed run in a git repository works in its own linked worktree: in a plain
+/// checkout `.git` is the agent's to write, and a `commondir` or `config.worktree` it
+/// creates there points git at a config of its own (`core.fsmonitor`, `core.sshCommand`,
+/// `diff.external`), which runs at your next git command. So the repository's git dir is
+/// mounted read-only (by `plan`), and only what git writes for commits, branches and tags
+/// is writable over it: `objects/`, `refs/`, `logs/`, `packed-refs` and this worktree's own
+/// `worktrees/<name>/`, with that folder's `commondir`, `gitdir` and `config.worktree`
+/// read-only again, as is the worktree's `.git` file. Missing ones are created first, so
+/// they can be mounted. `tops` are the paths the checkout is mounted at (its top, and the
+/// path the run starts from when that differs). Empty outside git; an error for a plain
+/// checkout.
+fn git_guard_mounts(cwd: &Path, tops: &[PathBuf]) -> Result<Vec<Mount>> {
+    use crate::git::git;
+    let abs = |what: &str| {
+        git(cwd, &["rev-parse", "--path-format=absolute", what])
+            .ok()
+            .map(PathBuf::from)
+    };
+    let (Some(top), Some(git_dir), Some(common)) = (
+        abs("--show-toplevel"),
+        abs("--git-dir"),
+        abs("--git-common-dir"),
+    ) else {
+        return Ok(vec![]);
+    };
+    if git_dir == common {
+        bail!(
+            "A sandboxed run in a git repository works in its own worktree, and {} is a plain checkout: \
+             its .git folder would be the agent's to write, and git on your machine would run what it plants there. \
+             Spawn it with --worktree (amux spawn --sandbox does that by itself).",
+            top.display()
+        );
+    }
+    // Made first, so each can be mounted: git creates them when it first needs them.
+    std::fs::create_dir_all(common.join("logs"))?;
+    for f in [common.join("packed-refs"), git_dir.join("config.worktree")] {
+        let made = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&f);
+        match made {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut paths: Vec<(PathBuf, bool)> = vec![(top.join(".git"), true)];
+    for d in ["objects", "refs", "logs", "packed-refs"] {
+        paths.push((common.join(d), false));
+    }
+    paths.push((git_dir.clone(), false));
+    for f in ["commondir", "gitdir", "config.worktree"] {
+        paths.push((git_dir.join(f), true));
+    }
+    let mut out = vec![];
+    for (p, ro) in paths {
+        if !p.exists() {
+            continue;
+        }
+        // At each path the checkout is mounted at, or as it is for the repo's git dir.
+        let dsts: Vec<PathBuf> = match p.strip_prefix(&top) {
+            Ok(rel) => tops.iter().map(|t| t.join(rel)).collect(),
+            Err(_) => vec![p.clone()],
+        };
+        for d in dsts {
+            out.push(Mount {
+                src: p.to_string_lossy().into_owned(),
+                dst: d.to_string_lossy().into_owned(),
+                read_only: ro,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// What a missing read-only entry of the shared home is created as, so the agent can't
+/// create it in the container: a folder when the name has no extension, else a file that
+/// reads as "nothing set" to the CLI (`{}` for settings, `{"bindings": []}` for Claude
+/// Code's keybindings, empty for instructions and TOML), the same as no file at all.
+fn placeholder(name: &str) -> Option<&'static str> {
+    if !name.contains('.') {
+        return None;
+    }
+    Some(match name {
+        "keybindings.json" => "{\"bindings\": []}\n",
+        n if n.ends_with(".json") => "{}\n",
+        _ => "",
+    })
+}
+
+/// The shared home, as a container gets it: writable (the CLI keeps sessions, history,
+/// shell snapshots, plans, todos, caches and more there), but with the entries that hold
+/// settings, instructions or code the CLI loads on this machine too (the provider's
+/// `sandboxReadOnly`) mounted read-only over it, each created first if missing. A mount
+/// point can't be removed or renamed, so the agent can't swap one for its own. The login
+/// files of the shared home's own account (the provider's `privateEntries` and
+/// `loginFiles`) are hidden behind /dev/null or `empty`.
+fn home_mounts(spec: &ProviderSpec, empty: &Path) -> Result<Vec<Mount>> {
+    let home = &spec.shared_home;
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    crate::fsx::mkdir_private(home)?;
+    let mut out = vec![Mount::same(home)];
+    let defaults: Vec<String> = crate::providers::DEFAULT_SANDBOX_READ_ONLY
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let read_only = spec.sandbox_read_only.as_ref().unwrap_or(&defaults);
+    for n in read_only {
+        if n.is_empty() || n.contains('/') || n == "." || n == ".." {
+            bail!("\"sandboxReadOnly\" of provider {} names \"{n}\": use names of entries in its home, without a /.", spec.id);
+        }
+        let p = home.join(n);
+        match std::fs::symlink_metadata(&p) {
+            // A link's target would be mounted, not the link: the agent could replace the
+            // link itself.
+            Ok(m) if m.file_type().is_symlink() => bail!(
+                "{} is a symbolic link, and a sandboxed run can't be kept from replacing it. \
+                 Move the file it points to there instead, or leave {n} out of the provider's \"sandboxReadOnly\".",
+                p.display()
+            ),
+            Ok(_) => {}
+            Err(_) => match placeholder(n) {
+                None => crate::fsx::mkdir_private(&p)?,
+                Some(text) => {
+                    use std::io::Write;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&p);
+                    match f {
+                        Ok(mut f) => f.write_all(text.as_bytes())?,
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            },
+        }
+        out.push(Mount {
+            src: s(&p),
+            dst: s(&p),
+            read_only: true,
+        });
+    }
+    let names: Vec<String> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    for n in &names {
+        let p = home.join(n);
+        if crate::overlay::is_private(spec, n) || spec.login_files.contains(n) {
+            out.push(Mount {
+                src: if p.is_dir() {
+                    s(empty)
+                } else {
+                    "/dev/null".into()
+                },
+                dst: s(&p),
+                read_only: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// The author and committer git would use here, so commits made in the container (whose
 /// HOME has no .gitconfig) are still yours.
 fn git_identity(cwd: &Path) -> Vec<String> {
@@ -477,12 +671,30 @@ pub fn plan(
     check_login(spec, acct, &overlay)?;
 
     let mut mounts = vec![];
-    for p in checkout_mounts(cwd) {
-        push_mount(&mut mounts, Mount::same(&p));
+    let checkout = checkout_mounts(cwd);
+    let is_git_dir = |p: &Path| {
+        p.join("HEAD").is_file() && p.join("objects").is_dir() && p.join("refs").is_dir()
+    };
+    for p in &checkout {
+        // The repository's git dir, for a worktree: read-only, but for what git writes
+        // (see `git_guard_mounts`).
+        let git_dir = is_git_dir(p);
+        push_mount(
+            &mut mounts,
+            Mount {
+                read_only: git_dir,
+                ..Mount::same(p)
+            },
+        );
     }
     // The overlay links into the shared home, so both must be there at the same paths.
     push_mount(&mut mounts, Mount::same(&overlay));
-    push_mount(&mut mounts, Mount::same(&spec.shared_home));
+    let empty = crate::runs::run_dir(id).join("sandbox-empty");
+    std::fs::create_dir_all(&empty)?;
+    let mut home = home_mounts(spec, &empty)?.into_iter();
+    if let Some(top) = home.next() {
+        push_mount(&mut mounts, top);
+    }
     for m in &cfg.mounts {
         let m = Mount::parse(m)?;
         if !Path::new(&m.src).exists() {
@@ -493,6 +705,14 @@ pub fn plan(
         }
         push_mount(&mut mounts, m);
     }
+    // Inside the mounts above, so after them: the engines mount parents first.
+    let tops: Vec<PathBuf> = checkout
+        .iter()
+        .filter(|p| !is_git_dir(p))
+        .cloned()
+        .collect();
+    mounts.extend(git_guard_mounts(cwd, &tops)?);
+    mounts.extend(home);
 
     let mut vars: Vec<String> = vec![];
     for (k, _) in &env.set {
@@ -761,5 +981,261 @@ mod tests {
         let plain = t.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(checkout_mounts(&plain), [plain]);
+    }
+
+    fn git_in(dir: &Path, a: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+            .args(a)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {a:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A repo with one commit, and a linked worktree of it on branch x.
+    fn repo_and_worktree(t: &TempDir) -> (PathBuf, PathBuf) {
+        let repo = t.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_in(&repo, &["init", "-q"]);
+        write(&repo.join("a.txt"), "a");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-qm", "init"]);
+        let wt = t.path().join("wt");
+        git_in(
+            &repo,
+            &["worktree", "add", "-q", "-b", "x", wt.to_str().unwrap()],
+        );
+        (repo, wt)
+    }
+
+    /// In a plain checkout, .git is the agent's to write: a `commondir` or
+    /// `config.worktree` it creates there points git at a config of its own, which runs on
+    /// this machine at the next git command. A sandboxed run gets a worktree instead, whose
+    /// repository git dir is read-only but for what git writes.
+    #[test]
+    fn a_sandboxed_checkout_is_a_worktree_with_its_git_dir_read_only() {
+        let t = TempDir::new();
+        let (repo, wt) = repo_and_worktree(&t);
+        let args = |ms: &[Mount]| ms.iter().map(Mount::arg).collect::<Vec<_>>();
+        // A plain checkout: refused.
+        let err = git_guard_mounts(&repo, std::slice::from_ref(&repo)).unwrap_err();
+        assert!(err.to_string().contains("--worktree"), "{err}");
+        let (r, w) = (repo.display(), wt.display());
+        let g = format!("{r}/.git");
+        let wg = format!("{g}/worktrees/wt");
+        assert_eq!(
+            args(&git_guard_mounts(&wt, std::slice::from_ref(&wt)).unwrap()),
+            [
+                format!("{w}/.git:{w}/.git:ro"),
+                format!("{g}/objects:{g}/objects"),
+                format!("{g}/refs:{g}/refs"),
+                format!("{g}/logs:{g}/logs"),
+                format!("{g}/packed-refs:{g}/packed-refs"),
+                format!("{wg}:{wg}"),
+                format!("{wg}/commondir:{wg}/commondir:ro"),
+                format!("{wg}/gitdir:{wg}/gitdir:ro"),
+                format!("{wg}/config.worktree:{wg}/config.worktree:ro"),
+            ]
+        );
+        // Created so they could be mounted, empty: git reads them as nothing set.
+        assert_eq!(std::fs::read(repo.join(".git/packed-refs")).unwrap(), b"");
+        assert_eq!(
+            std::fs::read(repo.join(".git/worktrees/wt/config.worktree")).unwrap(),
+            b""
+        );
+        // The repository's git dir itself is read-only in the container.
+        assert_eq!(checkout_mounts(&wt), [wt.clone(), repo.join(".git")]);
+        // Not a repository: nothing.
+        assert!(git_guard_mounts(t.path(), &[t.path().to_path_buf()])
+            .unwrap()
+            .is_empty());
+    }
+
+    /// What git writes in the repository's git dir for an agent's everyday work in its
+    /// worktree (commits, branches, tags, merges, stashes, resets, rebases, a local fetch)
+    /// lands only where the container may write: nothing is refused that git needs.
+    #[test]
+    fn git_in_a_worktree_writes_only_where_the_sandbox_lets_it() {
+        let t = TempDir::new();
+        let (repo, wt) = repo_and_worktree(&t);
+        git_in(&repo, &["tag", "v0"]);
+        git_in(&repo, &["branch", "other"]);
+        git_in(&repo, &["pack-refs", "--all"]);
+        let mounts = git_guard_mounts(&wt, std::slice::from_ref(&wt)).unwrap();
+        let common = repo.join(".git");
+        // Every file under the git dir, with its content.
+        fn files(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    files(&p, out);
+                } else {
+                    out.push((p.clone(), std::fs::read(&p).unwrap_or_default()));
+                }
+            }
+        }
+        let snap = || {
+            let mut v = vec![];
+            files(&common, &mut v);
+            v.sort();
+            v
+        };
+        let before = snap();
+        write(&wt.join("b.txt"), "b");
+        for a in [
+            &["add", "."][..],
+            &["commit", "-qm", "one"],
+            &["branch", "b2"],
+            &["tag", "t1"],
+            &["tag", "-a", "t2", "-m", "annotated"],
+            &["checkout", "-q", "-b", "y"],
+            &["commit", "-q", "--allow-empty", "-m", "two"],
+            &["checkout", "-q", "x"],
+            &["merge", "-q", "--no-edit", "y"],
+            &["stash", "-q", "--include-untracked"],
+            &["reset", "-q", "--hard", "HEAD~1"],
+            &["rebase", "-q", "other", "y"],
+            &["checkout", "-q", "x"],
+            &["branch", "-D", "b2"],
+            &["tag", "-d", "t1"],
+            &["fetch", "-q", "../repo", "x"],
+        ] {
+            git_in(&wt, a);
+        }
+        let after = snap();
+        let writable = |p: &Path| {
+            let ro = mounts
+                .iter()
+                .filter(|m| Path::new(&m.dst).starts_with(&common))
+                .filter(|m| p.starts_with(&m.dst))
+                .max_by_key(|m| m.dst.len());
+            ro.is_some_and(|m| !m.read_only)
+        };
+        let mut changed: Vec<&PathBuf> = after
+            .iter()
+            .filter(|f| !before.contains(f))
+            .map(|(p, _)| p)
+            .collect();
+        changed.extend(
+            before
+                .iter()
+                .filter(|(p, _)| !after.iter().any(|(q, _)| q == p))
+                .map(|(p, _)| p),
+        );
+        assert!(changed.len() > 5, "{changed:?}");
+        let refused: Vec<_> = changed.iter().filter(|p| !writable(p)).collect();
+        assert!(
+            refused.is_empty(),
+            "written outside the writable mounts: {refused:?}"
+        );
+    }
+
+    /// The shared home is writable (Claude Code writes shell-snapshots/, plans/, debug/,
+    /// session-env/, … there) but its settings, instructions and code are read-only, created
+    /// first when missing, and its own login is hidden.
+    #[test]
+    fn the_shared_home_is_writable_but_its_settings_and_code_are_not() {
+        let t = TempDir::new();
+        let home = t.path().join("home");
+        let mut s = spec("claude", &home);
+        s.sandbox_read_only = Some(vec![
+            "settings.json".into(),
+            "keybindings.json".into(),
+            "CLAUDE.md".into(),
+            "hooks".into(),
+            "skills".into(),
+        ]);
+        s.private_entries = vec![".credentials.json".into(), "statsig".into()];
+        s.login_files = vec!["auth.json".into()];
+        for d in ["projects", "hooks", "statsig"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        for f in [".credentials.json", "auth.json", "history.jsonl"] {
+            write(&home.join(f), "{}");
+        }
+        write(&home.join("CLAUDE.md"), "be nice");
+        let empty = t.path().join("empty");
+        let mut got: Vec<String> = home_mounts(&s, &empty)
+            .unwrap()
+            .iter()
+            .map(Mount::arg)
+            .collect();
+        got.sort();
+        let h = home.display();
+        let e = empty.display();
+        let mut want = vec![
+            format!("{h}:{h}"),
+            format!("{h}/settings.json:{h}/settings.json:ro"),
+            format!("{h}/keybindings.json:{h}/keybindings.json:ro"),
+            format!("{h}/CLAUDE.md:{h}/CLAUDE.md:ro"),
+            format!("{h}/hooks:{h}/hooks:ro"),
+            format!("{h}/skills:{h}/skills:ro"),
+            format!("/dev/null:{h}/.credentials.json:ro"),
+            format!("/dev/null:{h}/auth.json:ro"),
+            format!("{e}:{h}/statsig:ro"),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+        // Missing ones were made, reading as "nothing set"; existing ones kept.
+        let read = |n: &str| std::fs::read_to_string(home.join(n)).unwrap();
+        assert_eq!(read("settings.json"), "{}\n");
+        assert_eq!(read("keybindings.json"), "{\"bindings\": []}\n");
+        assert_eq!(read("CLAUDE.md"), "be nice");
+        assert!(home.join("skills").is_dir());
+        // A link can't be kept read-only: the agent could replace the link.
+        std::fs::remove_file(home.join("CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink(t.path().join("elsewhere.md"), home.join("CLAUDE.md")).unwrap();
+        assert!(home_mounts(&s, &empty).is_err());
+        // Names only.
+        s.sandbox_read_only = Some(vec!["../x".into()]);
+        assert!(home_mounts(&s, &empty).is_err());
+        // A provider that doesn't say gets the defaults.
+        let home2 = t.path().join("home2");
+        let s2 = spec("mycli", &home2);
+        let got = home_mounts(&s2, &empty).unwrap();
+        for n in [
+            "settings.json",
+            "AGENTS.md",
+            "config.toml",
+            "plugins",
+            "extensions",
+        ] {
+            let p = home2.join(n).to_string_lossy().into_owned();
+            assert!(got.iter().any(|m| m.dst == p && m.read_only), "{n}");
+        }
+    }
+
+    /// The built-in providers keep their CLIs' settings and code read-only.
+    #[test]
+    fn built_in_providers_name_what_a_sandbox_cant_change() {
+        for (id, must) in [
+            (
+                "claude",
+                &["settings.json", "CLAUDE.md", "hooks", "skills", "plugins"][..],
+            ),
+            (
+                "codex",
+                &["config.toml", "AGENTS.md", "skills", "rules"][..],
+            ),
+            (
+                "gemini",
+                &["settings.json", "GEMINI.md", "extensions", "commands"][..],
+            ),
+        ] {
+            let ro = crate::testutil::builtin_spec(id).sandbox_read_only.unwrap();
+            for n in must {
+                assert!(ro.iter().any(|r| r == n), "{id}: {n}");
+            }
+        }
     }
 }

@@ -381,6 +381,17 @@ pub fn spawn_cmd(argv: &[String]) -> Result<i32> {
     }
     let args = args.as_slice();
     let sandbox = sandbox_request(&o)?;
+    // A sandboxed run in a git repository always works in its own worktree: in a plain
+    // checkout the agent could write .git, and git on this machine would run what it
+    // plants there (see `sandbox::git_guard_mounts`).
+    if sandbox.is_some()
+        && o.adopt.is_none()
+        && !o.worktree
+        && git(&cwd, &["rev-parse", "--git-dir"]).is_ok()
+    {
+        o.worktree = true;
+        eprintln!("amux: a sandboxed run works in its own worktree");
+    }
     let id = runs::claim_id(o.name.as_deref(), &acct.provider)?;
 
     let mut run = Run {

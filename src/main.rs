@@ -142,7 +142,7 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux notes [--rm <n>]                    List (or remove) this repo's notes
   amux broadcast <text...> [--note]        Tell every run working on this repo
   amux overlap [<run>...] [--into <b>]     Which runs touch the same files, and which would conflict
-  amux land <run>... [--into <b>] [--no-test] [--dry-run]
+  amux land <run>... [--into <b>] [--no-test] [--host-test] [--dry-run]
       Merge queue: rebase each run onto the branch, test it in a slot, fast-forward.
       A run that conflicts or fails is skipped and its agent told what to fix.
   amux usage [--json]                      Each account's 5-hour and 7-day usage, limits, runs
@@ -177,9 +177,10 @@ Parallel runs (each CLI in the background, in its own terminal):
   amux ui                                  Watch, attach to, start and stop runs in one screen
   amux theme [<name>]                      List themes (Catppuccin, Tokyo Night, Dracula, Gruvbox,
                                            Nord, Solarized…) or choose one for amux ui and the phone app
-  amux verify <run> [--test [--command <cmd>] | --push | --send-failures]
+  amux verify <run> [--test [--command <cmd>] | --host-test | --push | --send-failures]
       Check a finished run's work: run its tests here (waiting for a test slot),
       or push its branch so CI runs them. With neither, says which is better now.
+      A sandboxed run's tests run in its image; --host-test runs them on this machine.
 
 Sharing the machine (tests, builds and dev servers from many worktrees):
   amux slot [--class test|build|dev|<name>] [--timeout <secs>] [--no-wait] -- <command...>

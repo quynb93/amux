@@ -62,6 +62,8 @@ pub fn spec(id: &str, shared_home: &Path) -> ProviderSpec {
         privacy_env: None,
         sessions: None,
         login_files: vec![],
+        auto_approve: None,
+        sandbox_read_only: None,
     }
 }
 

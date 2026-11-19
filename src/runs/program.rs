@@ -135,6 +135,16 @@ pub struct HookReport {
     pub echo: bool,
 }
 
+/// The exact request a PermissionRequest hook reported (`"ask"`, see state_hooks.rs):
+/// its kind (bash, edit, or other for any other tool) and the command, file or tool.
+pub fn ask_from_hook(payload: &[u8]) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let a = v.get("ask")?;
+    let kind = a.get("kind")?.as_str()?;
+    let subject = a.get("subject")?.as_str()?;
+    matches!(kind, "bash" | "edit" | "other").then(|| (kind.to_string(), subject.to_string()))
+}
+
 /// A state reported by a state hook (`amux __hook`, see state_hooks.rs) in a `STATE` frame:
 /// `{"state": "blocked", "kind": "permission", "message": "approve Bash: cargo test"}`,
 /// optionally with `"tool"` and `"echo"` (see `HookReport`).

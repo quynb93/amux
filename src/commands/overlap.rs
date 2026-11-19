@@ -104,7 +104,7 @@ pub fn overlap_cmd(argv: &[String]) -> Result<i32> {
 }
 
 const LAND_USAGE: &str =
-    "amux land <run>... [--into <branch>] [--command <test cmd> | --no-test] [--no-tell] [--dry-run] [--json]";
+    "amux land <run>... [--into <branch>] [--command <test cmd> | --no-test] [--host-test] [--no-tell] [--dry-run] [--json]";
 
 pub fn land_cmd(argv: &[String]) -> Result<i32> {
     let mut o = LandOpts {
@@ -119,6 +119,7 @@ pub fn land_cmd(argv: &[String]) -> Result<i32> {
         match a.as_str() {
             "--into" => o.into = Some(crate::util::need(it.next(), LAND_USAGE)?.to_string()),
             "--no-test" => o.test = false,
+            "--host-test" => o.host_test = true,
             "--command" => o.command = Some(crate::util::need(it.next(), LAND_USAGE)?.to_string()),
             "--no-tell" => o.tell = false,
             "--dry-run" | "-n" => o.dry_run = true,
