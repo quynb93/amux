@@ -446,11 +446,11 @@ fn keeps_unknown_top_level_keys_in_accounts_json() {
     assert_eq!(saved["accounts"][0]["name"], "a");
 }
 
-/// Polls `amux ps` until the run's row contains `want`.
 /// How long `wait_ps` and `eventually` wait: generous for slow CI runners, and they
 /// return as soon as the condition holds.
 const WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Polls `amux ps` until the run's row contains `want`.
 fn wait_ps(s: &Sandbox, run: &str, want: &str) -> String {
     let deadline = std::time::Instant::now() + WAIT;
     while std::time::Instant::now() < deadline {
@@ -784,7 +784,7 @@ fn shows_when_a_run_waits_for_you_and_notifies() {
     panic!("no exit notice: {}", fs::read_to_string(&notes).unwrap());
 }
 
-/// Polls until `f` holds, for up to five seconds.
+/// Polls until `f` holds, for up to `WAIT`.
 fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + WAIT;
     while std::time::Instant::now() < deadline {
@@ -4678,7 +4678,7 @@ fn works_on_linear_and_jira_issues() {
         list.contains(r#""labels":{"name":{"eqIgnoreCase":"agent"}}"#)
             && list.contains(r#""team":{"key":{"eqIgnoreCase":"ENG"}}"#)
             // The oldest open issues (Linear: newest first with `first`, oldest with `last`).
-            && list.contains("issues(filter: $filter, last: 100, orderBy: createdAt)"),
+            && list.contains("issues(filter: $filter, last: 100, before: $before, orderBy: createdAt)"),
         "{list}"
     );
     // An issue's newest comments.

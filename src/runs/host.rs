@@ -653,6 +653,10 @@ fn watchdog(
 /// only, so a session doesn't bounce back to an account that is just as full.
 fn quota_watch(hub: &Mutex<Hub>) {
     use crate::work::{limits, quota};
+    // When the CLI started: this thread starts just after it, which for a run that was
+    // queued for a slot is well after `started_at`. Sessions started in the folder in
+    // between belong to someone else.
+    let launched = time::now_ms();
     let tick = std::env::var("AMUX_QUOTA_TICK_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -681,7 +685,7 @@ fn quota_watch(hub: &Mutex<Hub>) {
     let mut tried = false;
     loop {
         std::thread::sleep(Duration::from_millis(tick));
-        let run = {
+        let mut run = {
             let h = lock(hub);
             if h.run.exit_code.is_some() {
                 return;
@@ -691,6 +695,7 @@ fn quota_watch(hub: &Mutex<Hub>) {
             }
             h.run.clone()
         };
+        run.started_at = run.started_at.max(launched);
         if let Some(home) = &codex_home {
             if let Some(id) = quota::refresh_codex(&run, home, &mut seen) {
                 // Kept so other runs in the folder don't take it, and `amux usage` reads it.

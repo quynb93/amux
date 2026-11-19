@@ -304,10 +304,12 @@ pub fn resumed_session(args: &[String], template: &[String]) -> Option<String> {
     }
     (0..=args.len() - template.len()).find_map(|start| {
         let window = &args[start..start + template.len()];
-        let fits = window
-            .iter()
-            .zip(template)
-            .all(|(a, t)| t == "{id}" || a == t);
+        // `codex resume --last` names no session.
+        let fits = !window[at].starts_with('-')
+            && window
+                .iter()
+                .zip(template)
+                .all(|(a, t)| t == "{id}" || a == t);
         fits.then(|| window[at].clone())
     })
 }
@@ -370,7 +372,12 @@ pub fn refresh_codex(run: &Run, home: &Path, seen: &mut Option<(PathBuf, i64)>) 
     let path = match seen {
         Some((p, _)) if p.exists() => p.clone(),
         _ => {
-            let (p, id) = codex_rollout_of(run, home, &claimed_sessions(run))?;
+            // Only a run still looking for its session needs the others' claims.
+            let claimed = match run.session {
+                Some(_) => vec![],
+                None => claimed_sessions(run),
+            };
+            let (p, id) = codex_rollout_of(run, home, &claimed)?;
             if run.session.is_none() {
                 found = Some(id);
             }
@@ -774,6 +781,7 @@ mod tests {
         );
         assert_eq!(resumed_session(&args(&["exec", "fix it"]), &t), None);
         assert_eq!(resumed_session(&args(&["resume"]), &t), None);
+        assert_eq!(resumed_session(&args(&["resume", "--last"]), &t), None);
     }
 
     fn cand(id: &str, used: Option<f64>, limited: bool, busy: usize, default: bool) -> Candidate {
