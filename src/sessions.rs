@@ -370,8 +370,6 @@ fn list_gemini(spec: &ProviderSpec) -> Vec<SessionInfo> {
         .collect()
 }
 
-/// Lists a provider's sessions. With `id_prefix`, providers that name files by session id
-/// skip the others without reading them; callers still filter the result by id.
 /// A session id amux will pass to a CLI (`--resume {id}`): a letter or digit, then
 /// letters, digits, `_` and `-`. Anything else (an id starting with `-` would read as an
 /// option) comes from a file someone else could have written, and is left out.
@@ -381,7 +379,9 @@ pub fn valid_id(id: &str) -> bool {
         && c.all(|x| x.is_ascii_alphanumeric() || x == '_' || x == '-')
 }
 
-/// The CLI's sessions; those whose id isn't `valid_id` are left out.
+/// Lists a provider's sessions. With `id_prefix`, providers that name files by session id
+/// skip the others without reading them; callers still filter the result by id. Those
+/// whose id isn't `valid_id` are left out.
 pub fn list_sessions(spec: &ProviderSpec, id_prefix: Option<&str>) -> Vec<SessionInfo> {
     let all = match spec.sessions.as_deref() {
         Some("claude") => list_claude(spec, id_prefix),

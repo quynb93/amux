@@ -5731,8 +5731,18 @@ s.sendall(bytes([int(sys.argv[2])]) + len(d).to_bytes(4, "big") + d)
 time.sleep(0.5)
 "#;
     write(&s.home.join("raw.py"), raw);
+    // Another machine whose "ssh" only records that it was called: from inside a run,
+    // typing into a run there is refused before ssh starts.
+    let ssh = s.home.join("bin/rec-ssh");
+    write(&ssh, "#!/bin/sh\necho called >> \"$HOME/ssh-called\"\n");
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    write(
+        &s.amux_home.join("machines.json"),
+        r#"{"machines":[{"name":"box","target":"box"}]}"#,
+    );
     let script = format!(
         "A={amux}\n\
+         $A send box:victim from-lead; echo \"send-remote=$?\"\n\
          $A send victim from-lead; echo \"send-victim=$?\"\n\
          $A spawn --name w fake; echo \"spawn-w=$?\"\n\
          $A send w from-lead; echo \"send-w=$?\"\n\
@@ -5748,11 +5758,18 @@ time.sleep(0.5)
     let sh = s.home.join("lead.sh").display().to_string();
     let r = s.amux_with(
         &["spawn", "--name", "lead", "--workers", "1", "fake"],
-        &[chat, ("FAKE_SH", &sh), ("FAKE_SH_IN", "lead")],
+        &[
+            chat,
+            ("FAKE_SH", &sh),
+            ("FAKE_SH_IN", "lead"),
+            ("AMUX_SSH", ssh.to_str().unwrap()),
+        ],
         Some(&repo),
     );
     assert_eq!(r.code, 0, "{}", r.err);
     let screen = wait_peek(&s, "lead", "sh-done");
+    assert!(screen.contains("send-remote=1"), "{screen}");
+    assert!(!s.home.join("ssh-called").exists(), "ssh was started");
     assert!(screen.contains("send-victim=1"), "{screen}");
     assert!(screen.contains("spawn-w=0"), "{screen}");
     assert!(screen.contains("send-w=0"), "{screen}");

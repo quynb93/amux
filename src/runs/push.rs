@@ -136,17 +136,27 @@ pub fn send(event: &str, run: &str, title: &str, message: &str) {
     }
 }
 
-/// `amux __push <event> <run>`, with `{"title", "message"}` on its standard input.
+/// `amux __push <event> <run>`, with `{"title", "message"}` on its standard input. Also
+/// `amux __push <event> <run> <title> <message>`, from a run host an older amux started
+/// (it runs this binary once amux is updated), so its notifications aren't lost.
 pub fn main(args: &[String]) -> i32 {
-    let [event, run] = args else {
-        return 2;
+    let (event, run, v) = match args {
+        [event, run] => {
+            let mut input = String::new();
+            {
+                use std::io::Read;
+                let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
+            }
+            let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+            (event, run, v)
+        }
+        [event, run, title, message] => (
+            event,
+            run,
+            serde_json::json!({ "title": title, "message": message }),
+        ),
+        _ => return 2,
     };
-    let mut input = String::new();
-    {
-        use std::io::Read;
-        let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
-    }
-    let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
     let (title, message) = (
         v["title"].as_str().unwrap_or_default(),
         v["message"].as_str().unwrap_or_default(),

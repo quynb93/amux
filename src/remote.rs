@@ -139,7 +139,8 @@ impl Machine {
     }
 
     /// Whether amux on the machine has `__argv` (0.11.15 and later): asked once, and
-    /// remembered in ~/.amux/remote-caps.json once it has.
+    /// remembered in ~/.amux/remote-caps.json once it has. That it hasn't is remembered
+    /// for an hour, so every command to an older amux doesn't ask again first.
     fn speaks_argv(&self) -> bool {
         let key = format!(
             "{} {} {}",
@@ -150,8 +151,18 @@ impl Machine {
         let file = paths::AMUX_HOME.join("remote-caps.json");
         let mut caps: serde_json::Map<String, serde_json::Value> =
             read_json(&file).unwrap_or_default();
-        if caps.get(&key).and_then(|v| v["argv"].as_bool()) == Some(true) {
-            return true;
+        let now = crate::time::now_ms();
+        match caps.get(&key) {
+            Some(v) if v["argv"].as_bool() == Some(true) => return true,
+            Some(v)
+                if v["argv"].as_bool() == Some(false)
+                    && v["at"]
+                        .as_i64()
+                        .is_some_and(|at| (0..3_600_000).contains(&(now - at))) =>
+            {
+                return false
+            }
+            _ => {}
         }
         let probe = self
             .ssh(false)
@@ -170,7 +181,11 @@ impl Machine {
             // will fail the same way and say why.
             Ok(o) if o.status.code() == Some(255) => true,
             Err(_) => true,
-            Ok(_) => false,
+            Ok(_) => {
+                caps.insert(key, serde_json::json!({ "argv": false, "at": now }));
+                let _ = write_json(&file, &caps);
+                false
+            }
         }
     }
 
@@ -491,22 +506,22 @@ const ONE_RUN: &[&str] = &[
 ];
 const RUNS: &[&str] = &["rm", "wait", "events", "overlap", "land"];
 
-/// Options of those commands that take a value, which is never a run.
-const VALUE_OPTIONS: &[&str] = &[
-    "--key",
-    "-k",
-    "--timeout",
-    "-t",
-    "--until",
-    "-u",
-    "--command",
-    "--into",
-    "--base",
-    "--to",
-    "--rm",
-    "--drop",
-    "--expect",
-];
+/// Options of `cmd` that take a value, which is never a run. Per command: the same
+/// letter means different things (`-t` is `--timeout` for `send`, `--test` for `verify`).
+fn value_options(cmd: &str) -> &'static [&'static str] {
+    match cmd {
+        "send" => &["--key", "-k", "--timeout", "-t"],
+        "wait" => &["--until", "-u", "--timeout", "-t"],
+        "verify" => &["--command", "-c"],
+        "pr" => &["--base", "-B"],
+        "comments" => &["--rm"],
+        "review" => &["--drop", "--expect"],
+        "failover" => &["--to"],
+        "overlap" => &["--into"],
+        "land" => &["--into", "--command"],
+        _ => &[],
+    }
+}
 
 /// The positions in `rest` that name runs for `cmd`: positional arguments only (not an
 /// option's value, nothing after `--`), the first one only for a one-run command.
@@ -515,6 +530,7 @@ fn run_positions(cmd: &str, rest: &[String]) -> Vec<usize> {
     if !many && !ONE_RUN.contains(&cmd) {
         return vec![];
     }
+    let takes_value = value_options(cmd);
     let mut out = vec![];
     let mut i = 0;
     while i < rest.len() {
@@ -523,7 +539,7 @@ fn run_positions(cmd: &str, rest: &[String]) -> Vec<usize> {
             break;
         }
         if a.starts_with('-') {
-            if VALUE_OPTIONS.contains(&a) {
+            if takes_value.contains(&a) {
                 i += 1;
             }
         } else {
@@ -555,6 +571,19 @@ pub fn forward(cmd: &str, rest: &[String]) -> Option<Result<i32>> {
         args[i + 1] = run;
     }
     let m = machine?;
+    // On the other machine the command comes from sshd, so its host can't tell an agent
+    // from you. From inside a run, typing into another machine's run is refused here
+    // (as the MCP tools do): an agent types only into its own workers, which are local.
+    if matches!(cmd, "send" | "attach") {
+        if let crate::runs::peer::From::Run(r) =
+            crate::runs::peer::Peer::of_pid(std::process::id()).from()
+        {
+            return Some(Err(anyhow!(
+                "{r} can't type into a run on {}: from inside a run, amux sends only to that run's own workers.",
+                m.name
+            )));
+        }
+    }
     Some(m.run(&args, None))
 }
 
@@ -625,5 +654,12 @@ mod tests {
         assert_eq!(run_positions("rm", &v(&["a", "b", "--", "c"])), [0, 1]);
         assert!(run_positions("ps", &v(&["gpu:w"])).is_empty());
         assert!(run_positions("send", &v(&["--", "gpu:w"])).is_empty());
+        // `-t` is a flag for verify (--test), and `-c`/`-B` take values.
+        assert_eq!(run_positions("verify", &v(&["-t", "gpu:w"])), [1]);
+        assert_eq!(
+            run_positions("verify", &v(&["-c", "make test", "gpu:w"])),
+            [2]
+        );
+        assert_eq!(run_positions("pr", &v(&["-B", "dev", "gpu:w"])), [2]);
     }
 }
