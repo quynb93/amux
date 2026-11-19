@@ -4,6 +4,10 @@ All notable changes to amux are listed here. The format follows [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+
+- Review runs on other machines in `amux ui`: `c` on `gpu:claude-1` opens its diff with comments and hunk dropping, as for local runs. amux on that machine reads the diff (`amux __review-data`, internal), keeps the comments (`amux comment`, `amux comments`), and drops hunks (`amux review --drop … --expect <digest>`) with the same all-or-nothing check, the refusal while the agent is working, the undo patch in `runs/<id>/dropped/` there and the note to the agent. `--expect` refuses the drop if the run's diff changed since the review was read, so `file:n` names the same hunk. `amux review <machine>:<run>` now runs on that machine instead of refusing. When amux there is too old to serve a review, `c` says so and opens the diff in your pager as before.
+
 ## [0.11.13] - 2026-11-19
 
 Web push to the phone app, and fixes from the 0.11.12 reviews.

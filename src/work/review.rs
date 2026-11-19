@@ -206,6 +206,66 @@ pub struct Changes {
     pub untracked: Vec<(String, Option<u64>)>,
 }
 
+impl Changes {
+    /// A digest of the diff and of the untracked files as they were read, the same on
+    /// every machine and amux version (FNV-1a), so a drop asked for from another machine
+    /// can tell it is about the diff that was reviewed.
+    pub fn digest(&self) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |b: &[u8]| {
+            for x in b {
+                h ^= u64::from(*x);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        eat(self.text.as_bytes());
+        for (f, print) in &self.untracked {
+            eat(b"\0");
+            eat(f.as_bytes());
+            eat(&print.unwrap_or(0).to_le_bytes());
+            eat(&[u8::from(print.is_some())]);
+        }
+        format!("{h:016x}")
+    }
+
+    /// What a review on another machine needs: `amux __review-data <run>` prints it.
+    pub fn data(&self, comments: Vec<Comment>) -> ReviewData {
+        ReviewData {
+            text: self.text.clone(),
+            untracked: self.untracked.clone(),
+            digest: self.digest(),
+            comments,
+        }
+    }
+}
+
+/// A run's changes and comments as amux on the run's machine read them, for reviewing a
+/// run on another machine in `amux ui`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewData {
+    pub text: String,
+    #[serde(default)]
+    pub untracked: Vec<(String, Option<u64>)>,
+    /// `Changes::digest` there: a drop passes it back (`amux review --expect`), and amux
+    /// there refuses if the diff changed since.
+    pub digest: String,
+    #[serde(default)]
+    pub comments: Vec<Comment>,
+}
+
+impl ReviewData {
+    /// The changes, for parsing into lines and hunks here. The folder is on the other
+    /// machine, so there is none.
+    pub fn changes(&self) -> Changes {
+        Changes {
+            dir: PathBuf::new(),
+            text: self.text.clone(),
+            untracked: self.untracked.clone(),
+        }
+    }
+}
+
 /// Everything the run changed against where it started, committed or not, with new
 /// untracked files shown as added, ready to review.
 pub fn changes(run: &Run) -> Result<Changes> {
@@ -486,6 +546,59 @@ new file mode 100644
             removed.anchor().unwrap().to_string(),
             "src/a.rs:11 (removed line)"
         );
+    }
+
+    #[test]
+    fn review_data_round_trips_and_its_digest_notices_changes() {
+        let changes = Changes {
+            dir: PathBuf::from("/somewhere"),
+            text: format!(
+                "{DIFF}diff --git a/n.txt b/n.txt\n{UNTRACKED}\n+++ b/n.txt\n@@ -0,0 +1,1 @@\n+x\n"
+            ),
+            untracked: vec![("n.txt".into(), Some(42))],
+        };
+        let note = Comment {
+            at: Anchor {
+                file: "src/a.rs".into(),
+                line: 11,
+                removed: true,
+            },
+            code: "-let b = 2;".into(),
+            note: "keep it".into(),
+            created_at: 1,
+            sent_at: None,
+        };
+        let data = changes.data(vec![note]);
+        let json = serde_json::to_string(&data).unwrap();
+        let back: ReviewData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, data);
+        // The same lines and hunks as reading the diff here.
+        let there = back.changes();
+        assert_eq!(parse_diff(&there.text), parse_diff(&changes.text));
+        let hunks = |c: &Changes| {
+            crate::work::hunks::parse(c)
+                .iter()
+                .map(|h| (h.file.clone(), h.number, h.untracked, h.place()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hunks(&there), hunks(&changes));
+        assert_eq!(hunks(&there).len(), 3);
+        // The digest is stable, and any change to the diff or a new file changes it.
+        assert_eq!(there.digest(), changes.digest());
+        assert_eq!(changes.digest().len(), 16);
+        let edited = Changes {
+            text: changes.text.replace("+let c = 4;", "+let c = 5;"),
+            ..changes.clone()
+        };
+        assert_ne!(edited.digest(), changes.digest());
+        let touched = Changes {
+            untracked: vec![("n.txt".into(), Some(43))],
+            ..changes.clone()
+        };
+        assert_ne!(touched.digest(), changes.digest());
+        // An older amux's output without comments still reads.
+        let bare: ReviewData = serde_json::from_str(r#"{"text": "", "digest": "0"}"#).unwrap();
+        assert!(bare.comments.is_empty() && bare.untracked.is_empty());
     }
 
     #[test]

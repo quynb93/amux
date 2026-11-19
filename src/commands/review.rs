@@ -131,6 +131,16 @@ pub fn comments_cmd(argv: &[String]) -> Result<i32> {
 const REVIEW_USAGE: &str =
     "amux review <run> [--hunks] [--drop <file>[:<n>]]... [--no-tell] [--force] [--json]";
 
+/// `amux __review-data <run>`: the run's diff, untracked files and comments as JSON, for
+/// `amux ui` on another machine to review this run (`ReviewView::open_remote`).
+pub fn review_data_cmd(argv: &[String]) -> Result<i32> {
+    let run = runs::find(need(argv.first(), "amux __review-data <run>")?)?;
+    let changes = review::changes(&run)?;
+    let data = changes.data(review::load(&run.id));
+    println!("{}", serde_json::to_string(&data)?);
+    Ok(0)
+}
+
 /// `--drop` arguments → indexes into `hunks`, in diff order. `file` is every hunk of the
 /// file, `file:n` its n-th (as `--hunks` numbers them). Paths may hold colons.
 fn pick(hunks: &[Hunk], specs: &[String]) -> Result<Vec<usize>> {
@@ -166,11 +176,15 @@ fn pick(hunks: &[Hunk], specs: &[String]) -> Result<Vec<usize>> {
 
 pub fn review_cmd(argv: &[String]) -> Result<i32> {
     let (mut drops, mut tell, mut force, mut json, mut id) = (vec![], true, false, false, None);
+    // The digest of the diff that was reviewed (`amux ui` on another machine): the drop
+    // is refused unless the diff is still that one, so `--drop` names the same hunks.
+    let mut expect = None;
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--hunks" => {}
             "--drop" => drops.push(need(it.next(), REVIEW_USAGE)?.to_string()),
+            "--expect" => expect = Some(need(it.next(), REVIEW_USAGE)?.to_string()),
             "--no-tell" => tell = false,
             "--force" => force = true,
             "--json" => json = true,
@@ -179,13 +193,8 @@ pub fn review_cmd(argv: &[String]) -> Result<i32> {
             _ => id = Some(a.clone()),
         }
     }
-    let id = need(id.as_ref(), REVIEW_USAGE)?;
-    if crate::remote::split(id).is_some() {
-        bail!(
-            "Hunks can be listed and dropped only for runs on this machine. Run `amux review` on the machine {id} is on."
-        );
-    }
-    let run = runs::find(id)?;
+    // A run on another machine was sent there before this (`remote::forward`).
+    let run = runs::find(need(id.as_ref(), REVIEW_USAGE)?)?;
     let changes = review::changes(&run)?;
     let all = hunks::parse(&changes);
     if drops.is_empty() {
@@ -197,6 +206,12 @@ pub fn review_cmd(argv: &[String]) -> Result<i32> {
             print_hunks(&run.id, &all);
         }
         return Ok(0);
+    }
+    if expect.is_some_and(|d| d != changes.digest()) {
+        bail!(
+            "{}'s changes are no longer the ones you reviewed (the agent may have changed them since), so nothing was dropped. Look again and retry.",
+            run.id
+        );
     }
     let picked: Vec<&Hunk> = pick(&all, &drops)?.into_iter().map(|i| &all[i]).collect();
     let done = hunks::drop_from_run(&run, &changes, &picked, force)?;

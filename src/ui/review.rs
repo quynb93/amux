@@ -2,12 +2,18 @@
 //! comment on the line under the cursor and `S` sends every pending comment to the agent.
 //! Space marks the hunk under the cursor to drop, and `D` drops the marked hunks from the
 //! run's worktree after a y/n confirm.
+//!
+//! A run on another machine is reviewed through amux there, over SSH: `amux
+//! __review-data` reads its diff and comments, `amux comment`/`amux comments` keep its
+//! comments, and `amux review --drop … --expect <digest>` drops hunks there, with the same
+//! checks, undo patch and note to the agent as here.
 
 use super::draw::{border_hints, hints, panel, span};
 use super::theme::Theme;
+use crate::remote::Machine;
 use crate::runs::Run;
 use crate::work::hunks::{self, Hunk};
-use crate::work::review::{self, Comment, DiffLine, LineKind};
+use crate::work::review::{self, Anchor, Comment, DiffLine, LineKind, ReviewData};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -40,6 +46,68 @@ pub struct ReviewView {
     pub input: Option<String>,
     /// Where the diff was last drawn, for paging and the mouse.
     area: Rect,
+    /// The run is on another machine: comments and drops go through amux there.
+    remote: Option<Remote>,
+}
+
+/// A run on another machine, reviewed through amux there.
+#[derive(Clone)]
+struct Remote {
+    machine: Machine,
+    /// The run's name there.
+    run: String,
+    /// The digest of the diff shown, which a drop passes back so amux there refuses if
+    /// the diff changed since.
+    digest: String,
+}
+
+impl Remote {
+    fn output(&self, args: &[&str]) -> anyhow::Result<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        self.machine.output(&args)
+    }
+
+    fn fetch(&self) -> anyhow::Result<ReviewData> {
+        let out = self.output(&["__review-data", &self.run])?;
+        Ok(serde_json::from_str(&out)?)
+    }
+
+    fn comments(&self) -> anyhow::Result<Vec<Comment>> {
+        Ok(serde_json::from_str(
+            &self.output(&["comments", &self.run, "--json"])?,
+        )?)
+    }
+}
+
+/// Why a review of a run on another machine didn't open.
+pub enum RemoteOpen {
+    Failed(String),
+    /// amux there is older and can't serve one: show the diff in the pager instead.
+    TooOld(String),
+}
+
+/// How `amux review --drop` names a hunk, for amux on the run's machine.
+fn drop_spec(h: &Hunk) -> String {
+    if h.untracked {
+        h.file.clone()
+    } else {
+        format!("{}:{}", h.file, h.number)
+    }
+}
+
+/// What `amux review --drop … --json` prints.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDropped {
+    hunks: usize,
+    files: usize,
+    commit: Option<String>,
+    #[serde(default)]
+    commit_error: Option<String>,
+    #[serde(default)]
+    undo: String,
+    #[serde(default)]
+    told: bool,
 }
 
 /// What a key in the review view asks the app to do.
@@ -59,6 +127,7 @@ pub struct DropJob {
     run: Run,
     changes: review::Changes,
     picked: Vec<Hunk>,
+    remote: Option<Remote>,
 }
 
 /// How a drop went, for the app: what to say, the note to tell the agent (when it is
@@ -76,6 +145,9 @@ impl DropJob {
     /// Drops the hunks and reads the review again. Slow: git apply, git commit (the
     /// repo's hooks) and git diff.
     pub fn run(self) -> DropDone {
+        if let Some(r) = self.remote.clone() {
+            return self.run_remote(r);
+        }
         let id = self.run.id.clone();
         let picked: Vec<&Hunk> = self.picked.iter().collect();
         let done = match hunks::drop_from_run(&self.run, &self.changes, &picked, false) {
@@ -107,6 +179,62 @@ impl DropJob {
             view: ReviewView::open(&fresh).ok(),
         }
     }
+
+    /// Drops the hunks on the run's machine (`amux review --drop … --expect … --json`),
+    /// which checks, saves the undo patch and tells the agent there; then reads the
+    /// review again.
+    fn run_remote(self, r: Remote) -> DropDone {
+        let id = self.run.id.clone();
+        let mut args = vec!["review".to_string(), r.run.clone()];
+        for h in &self.picked {
+            args.push("--drop".into());
+            args.push(drop_spec(h));
+        }
+        args.extend(["--expect".into(), r.digest.clone(), "--json".into()]);
+        let done = r
+            .machine
+            .output(&args)
+            .and_then(|out| Ok(serde_json::from_str::<RemoteDropped>(&out)?));
+        let done = match done {
+            Ok(d) => d,
+            Err(e) => {
+                return DropDone {
+                    id,
+                    ok: false,
+                    say: format!("{e:#}"),
+                    tell: None,
+                    view: None,
+                }
+            }
+        };
+        let mut say = format!(
+            "Dropped {} from {id}",
+            hunks::counted(done.hunks, done.files)
+        );
+        say.push_str(&match (&done.commit, &done.commit_error) {
+            (Some(c), _) => format!(", committed as {c}."),
+            (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
+            (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
+        });
+        if done.told {
+            say.push_str(" Told the agent.");
+        }
+        if !done.undo.is_empty() {
+            say.push_str(&format!(" Undo patch on {}: {}", r.machine.name, done.undo));
+        }
+        let view = r
+            .fetch()
+            .ok()
+            .and_then(|d| ReviewView::from_data(&self.run, r, d).ok());
+        DropDone {
+            id,
+            ok: true,
+            say,
+            // amux there told the agent already.
+            tell: None,
+            view,
+        }
+    }
 }
 
 /// One screen row: a diff line, or a comment shown under it.
@@ -119,6 +247,38 @@ enum Row {
 impl ReviewView {
     pub fn open(run: &Run) -> Result<ReviewView, String> {
         let changes = review::changes(run).map_err(|e| format!("{e:#}"))?;
+        Self::build(run, changes, review::load(&run.id), None)
+    }
+
+    /// A run on another machine (`machine`, where it is named `name`), read through amux
+    /// there.
+    pub fn open_remote(run: &Run, machine: Machine, name: String) -> Result<Self, RemoteOpen> {
+        let r = Remote {
+            machine,
+            run: name,
+            digest: String::new(),
+        };
+        match r.fetch() {
+            Ok(d) => Self::from_data(run, r, d).map_err(RemoteOpen::Failed),
+            Err(e) if format!("{e:#}").contains("Unknown command") => Err(RemoteOpen::TooOld(format!(
+                "amux on {} is too old to review {} here; showing its diff. Update amux there to comment and drop hunks.",
+                r.machine.name, run.id
+            ))),
+            Err(e) => Err(RemoteOpen::Failed(format!("{e:#}"))),
+        }
+    }
+
+    fn from_data(run: &Run, mut r: Remote, d: ReviewData) -> Result<Self, String> {
+        r.digest = d.digest.clone();
+        Self::build(run, d.changes(), d.comments, Some(r))
+    }
+
+    fn build(
+        run: &Run,
+        changes: review::Changes,
+        comments: Vec<Comment>,
+        remote: Option<Remote>,
+    ) -> Result<ReviewView, String> {
         let lines = review::parse_diff(&changes.text);
         if lines.is_empty() {
             return Err(format!("{} hasn't changed anything yet.", run.id));
@@ -134,12 +294,35 @@ impl ReviewView {
             marked: BTreeSet::new(),
             confirm: false,
             dropping: false,
-            comments: review::load(&run.id),
+            comments,
             cursor,
             top: 0,
             input: None,
             area: Rect::default(),
+            remote,
         })
+    }
+
+    /// The run's comments, read again (on its machine for a remote run). Keeps the ones
+    /// shown when they can't be read.
+    fn load_comments(&self) -> Vec<Comment> {
+        match &self.remote {
+            None => review::load(&self.id),
+            Some(r) => r.comments().unwrap_or_else(|_| self.comments.clone()),
+        }
+    }
+
+    fn add_comment(&self, at: &Anchor, code: &str, note: &str) -> anyhow::Result<()> {
+        let Some(r) = &self.remote else {
+            return review::add(&self.id, at.clone(), code, note).map(|_| ());
+        };
+        let place = format!("{}:{}", at.file, at.line);
+        let mut args = vec!["comment", &r.run, &place];
+        if at.removed {
+            args.push("--removed");
+        }
+        args.push(note.trim());
+        r.output(&args).map(|_| ())
     }
 
     /// Asking whether to drop the marked hunks.
@@ -258,11 +441,30 @@ impl ReviewView {
     /// Starts dropping the marked hunks from the run's worktree; the app runs the job in
     /// the background and hands back the diff read again.
     fn drop_marked(&mut self) -> Outcome {
+        let picked: Vec<Hunk> = self.marked.iter().map(|h| self.hunks[*h].clone()).collect();
+        // On another machine hunks are named `file:n`: a file named like that would be
+        // taken for it.
+        if self.remote.is_some() {
+            if let Some(h) = picked.iter().find(|p| {
+                self.hunks
+                    .iter()
+                    .any(|h| h.file == drop_spec(p) && !p.untracked)
+            }) {
+                return Outcome::Say(
+                    format!(
+                        "Can't name {} on its machine; drop it with `amux review` there.",
+                        h.place()
+                    ),
+                    true,
+                );
+            }
+        }
         self.dropping = true;
         Outcome::Drop(Box::new(DropJob {
             run: self.run.clone(),
             changes: self.changes.clone(),
-            picked: self.marked.iter().map(|h| self.hunks[*h].clone()).collect(),
+            picked,
+            remote: self.remote.clone(),
         }))
     }
 
@@ -314,7 +516,13 @@ impl ReviewView {
                         true,
                     );
                 }
-                if let Some(why) = hunks::busy(&self.run) {
+                // amux on a remote run's machine checks that itself, with its state.
+                if let Some(why) = self
+                    .remote
+                    .is_none()
+                    .then(|| hunks::busy(&self.run))
+                    .flatten()
+                {
                     return Outcome::Say(why, true);
                 }
                 self.confirm = true;
@@ -380,9 +588,10 @@ impl ReviewView {
         if note.trim().is_empty() {
             return Outcome::Say("Empty comment, not saved.".into(), true);
         }
-        match review::add(&self.id, at.clone(), &line.text, note) {
-            Ok(n) => {
-                self.comments = review::load(&self.id);
+        match self.add_comment(&at, &line.text, note) {
+            Ok(()) => {
+                self.comments = self.load_comments();
+                let n = self.pending();
                 Outcome::Say(
                     format!(
                         "Comment on {at} saved; {n} to send. S sends them to {}.",
@@ -404,15 +613,28 @@ impl ReviewView {
         if mine.is_empty() {
             return Outcome::Say("No unsent comment on this line.".into(), true);
         }
-        let mut n = 0;
-        let mut i = 0;
-        self.comments.retain(|_| {
-            let keep = !mine.contains(&i);
-            i += 1;
-            n += usize::from(!keep);
-            keep
-        });
-        match review::save(&self.id, &self.comments) {
+        let n = mine.len();
+        let done = match &self.remote {
+            None => {
+                let mut i = 0;
+                self.comments.retain(|_| {
+                    let keep = !mine.contains(&i);
+                    i += 1;
+                    keep
+                });
+                review::save(&self.id, &self.comments)
+            }
+            // `amux comments --rm` there, last first so the numbers stay right.
+            Some(r) => {
+                let done = mine.iter().rev().try_for_each(|i| {
+                    r.output(&["comments", &r.run, "--rm", &(i + 1).to_string()])
+                        .map(|_| ())
+                });
+                self.comments = self.load_comments();
+                done
+            }
+        };
+        match done {
             Ok(()) => Outcome::Say(
                 format!("Deleted {n} comment{}.", if n == 1 { "" } else { "s" }),
                 false,
@@ -423,7 +645,7 @@ impl ReviewView {
 
     /// After sending: reload, so the comments show as sent.
     pub fn reload_comments(&mut self) {
-        self.comments = review::load(&self.id);
+        self.comments = self.load_comments();
     }
 
     pub fn footer(&self, t: &Theme) -> Line<'static> {
@@ -637,6 +859,7 @@ mod tests {
             top: 0,
             input: None,
             area: Rect::default(),
+            remote: None,
         };
         let t = Theme::built_in("default").unwrap();
         // y hands the work to the app instead of doing it in the key handler.

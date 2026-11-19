@@ -377,6 +377,9 @@ fn main_inner(argv: &[String]) -> Result<i32> {
         "comments" => commands::review::comments_cmd(rest),
         #[cfg(unix)]
         "review" => commands::review::review_cmd(rest),
+        // Internal: a run's review, read for `amux ui` on another machine.
+        #[cfg(unix)]
+        "__review-data" => commands::review::review_data_cmd(rest),
         #[cfg(not(unix))]
         "spawn" | "ps" | "attach" | "logs" | "peek" | "stop" | "rm" | "ui" | "explain" | "slot"
         | "slots" | "verify" | "send" | "wait" | "events" | "diff" | "pr" | "checks"
