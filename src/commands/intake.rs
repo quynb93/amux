@@ -115,15 +115,23 @@ pub fn intake_cmd(argv: &[String]) -> Result<i32> {
         return Ok(0);
     }
     let mut failed = 0;
+    let runs = crate::runs::list();
     for issue in &new {
-        let (name, label) = (issue.run_name(), issue.label());
-        if dry {
-            println!("Would start {name}: {label} {}", issue.title);
+        // Started by hand already (`amux spawn --issue`) in this repo: the same issue from
+        // the same tracker, whatever its run is called. Linear's ENG-1 and Jira's ENG-1
+        // are different issues.
+        if runs
+            .iter()
+            .any(|r| issue.is_run_of(r) && issues::run_repo(r) == repo)
+        {
+            if !dry {
+                issues::mark_taken(&repo, issue)?;
+            }
             continue;
         }
-        // Started by hand already (`amux spawn --issue`).
-        if crate::runs::run_dir(&name).exists() {
-            issues::mark_taken(&repo, issue)?;
+        let (name, label) = (issue.new_run_name(), issue.label());
+        if dry {
+            println!("Would start {name}: {label} {}", issue.title);
             continue;
         }
         let mut args = vec!["--issue".to_string(), issue.spawn_ref()];

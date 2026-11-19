@@ -3695,8 +3695,9 @@ fn works_on_github_issues_and_runs_commands_on_a_schedule() {
         &env,
         Some(&repo),
     );
+    // 12 has a run already (started by hand above), so only 13 would start.
     assert!(
-        dry.out.contains("Would start issue-12") && dry.out.contains("Would start issue-13"),
+        !dry.out.contains("issue-12") && dry.out.contains("Would start issue-13"),
         "{}",
         dry.out
     );
@@ -4427,6 +4428,15 @@ fn works_on_linear_and_jira_issues() {
                 200,
                 r#"{"displayName":"Me","emailAddress":"me@x.com"}"#.into(),
             ),
+            // Jira's ENG-1 has the same key as Linear's ENG-1, which has a run by then.
+            ("GET", "/rest/api/3/search/jql") if path.contains("ENG") => (
+                200,
+                r#"{"issues":[{"key":"ENG-1","fields":{"summary":"Jira's own ENG-1"}}],"isLast":true}"#.into(),
+            ),
+            ("GET", "/rest/api/3/issue/ENG-1") => (
+                200,
+                r#"{"key":"ENG-1","fields":{"summary":"Jira's own ENG-1","description":null,"comment":{"comments":[]}}}"#.into(),
+            ),
             ("GET", "/rest/api/3/search/jql") => (
                 200,
                 r#"{"issues":[{"key":"PROJ-45","fields":{"summary":"Export to CSV"}},{"key":"PROJ-46","fields":{"summary":"Import CSV"}}],"isLast":true}"#.into(),
@@ -4708,6 +4718,53 @@ fn works_on_linear_and_jira_issues() {
     assert!(r.out.contains("Started proj-46: PROJ-46"), "{}", r.out);
     assert!(!r.out.contains("proj-45:"), "{}", r.out);
 
+    // Jira's ENG-1 is not Linear's ENG-1 (run eng-1): intake would start it as
+    // jira-eng-1, on its own branch.
+    let eng = [
+        "intake",
+        "--from",
+        "jira",
+        "--jql",
+        "project = ENG",
+        "--dry-run",
+        "fake",
+    ];
+    let r = s.amux_with(&eng, &env, Some(&repo));
+    assert!(
+        r.out
+            .contains("Would start jira-eng-1: ENG-1 Jira's own ENG-1"),
+        "{}{}",
+        r.out,
+        r.err
+    );
+    let r = s.amux_with(
+        &["spawn", "--issue", "jira:ENG-1", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}", r.err);
+    let j = run_json("jira-eng-1");
+    assert_eq!(j["worktree"]["branch"], "amux/jira-eng-1");
+    assert_eq!(j["tracker"]["tracker"], "jira");
+    assert_eq!(run_json("eng-1")["tracker"]["tracker"], "linear");
+    // Started by hand, so intake marks it as taken without starting it again.
+    let r = s.amux_with(
+        &["intake", "--from", "jira", "--jql", "project = ENG", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(!r.out.contains("Started"), "{}", r.out);
+    let seen = fs::read_to_string(s.amux_home.join("intake.json")).unwrap();
+    assert!(seen.contains("jira:ENG-1"), "{seen}");
+    // A second spawn of the same issue is told its run exists.
+    let r = s.amux_with(
+        &["spawn", "--issue", "jira:ENG-1", "fake"],
+        &env,
+        Some(&repo),
+    );
+    assert!(r.err.contains("\"jira-eng-1\" already exists"), "{}", r.err);
+
     // The comment on the issue can be turned off.
     let mut cfg: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(s.amux_home.join("config.json")).unwrap())
@@ -4719,7 +4776,14 @@ fn works_on_linear_and_jira_issues() {
     assert_eq!(pr.code, 0, "{}", pr.err);
     assert!(!pr.err.contains("posted"), "{}", pr.err);
     assert_eq!(jira_log.lock().unwrap().len(), before);
-    for r in ["eng-1", "eng-2", "again", "proj-45", "proj-46"] {
+    for r in [
+        "eng-1",
+        "eng-2",
+        "again",
+        "proj-45",
+        "proj-46",
+        "jira-eng-1",
+    ] {
         s.amux(&["stop", r]);
     }
 }

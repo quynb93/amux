@@ -97,6 +97,39 @@ impl Issue {
         }
     }
 
+    /// Whether `run` works on this issue: the same source and number or key.
+    pub fn is_run_of(&self, run: &crate::runs::Run) -> bool {
+        match self.source {
+            Source::GitHub => run.issue == Some(self.number),
+            s => run
+                .tracker
+                .as_ref()
+                .is_some_and(|t| t.source() == Some(s) && t.key.eq_ignore_ascii_case(&self.key)),
+        }
+    }
+
+    /// The name of a new run on it: `run_name`, unless a run on another issue has that
+    /// name, as when Linear's ENG-1 has a run and Jira's ENG-1 gets one: then the
+    /// source goes in front (jira-eng-1), so each has its own run and branch.
+    pub fn new_run_name(&self) -> String {
+        let plain = self.run_name();
+        let holder = crate::runs::run_dir(&plain)
+            .exists()
+            .then(|| crate::runs::load(&plain).ok());
+        self.name_beside(holder)
+    }
+
+    /// `holder`: None when no run has the plain name; Some(None) when one does but can't
+    /// be read (being created, say), which counts as another issue's.
+    fn name_beside(&self, holder: Option<Option<crate::runs::Run>>) -> String {
+        match holder {
+            Some(r) if !r.as_ref().is_some_and(|r| self.is_run_of(r)) => {
+                format!("{}-{}", self.source.tag(), self.run_name())
+            }
+            _ => self.run_name(),
+        }
+    }
+
     /// What `amux spawn --issue` takes for it.
     pub fn spawn_ref(&self) -> String {
         match self.source {
@@ -337,6 +370,15 @@ pub fn repo_key(dir: &Path) -> String {
         .unwrap_or_else(|_| dir.to_string_lossy().into_owned())
 }
 
+/// The repo a run works in, as `repo_key` names it: its worktree's main checkout, or
+/// the top of its folder.
+pub fn run_repo(run: &crate::runs::Run) -> String {
+    match &run.worktree {
+        Some(w) => w.repo.clone(),
+        None => repo_key(Path::new(&run.cwd)),
+    }
+}
+
 /// intake.json: per repo, GitHub issue numbers and "linear:ENG-1" / "jira:PROJ-2" keys.
 type Seen = BTreeMap<String, Vec<Value>>;
 
@@ -484,5 +526,41 @@ mod tests {
         assert!(p.starts_with("Work on Jira issue PROJ-45: "));
         assert!(p.contains("starts with \"PROJ-45\""));
         assert_eq!(i.run_name(), "proj-45");
+    }
+
+    #[test]
+    fn the_same_key_from_two_trackers_gets_two_runs() {
+        let issue = |source, key: &str| Issue {
+            source,
+            key: key.into(),
+            ..Default::default()
+        };
+        let run_on = |i: &Issue| crate::runs::Run {
+            id: i.run_name(),
+            tracker: i.tracked(),
+            ..Default::default()
+        };
+        let (linear, jira) = (issue(Source::Linear, "ENG-1"), issue(Source::Jira, "ENG-1"));
+        assert!(linear.is_run_of(&run_on(&linear)));
+        assert!(!jira.is_run_of(&run_on(&linear)));
+        // Free: the plain name. Taken by the same issue: still the plain name (spawn then
+        // says the run exists). Taken by the other tracker's ENG-1: the source in front.
+        assert_eq!(jira.name_beside(None), "eng-1");
+        assert_eq!(jira.name_beside(Some(Some(run_on(&jira)))), "eng-1");
+        assert_eq!(jira.name_beside(Some(Some(run_on(&linear)))), "jira-eng-1");
+        assert_eq!(
+            linear.name_beside(Some(Some(run_on(&jira)))),
+            "linear-eng-1"
+        );
+        assert_eq!(jira.name_beside(Some(None)), "jira-eng-1");
+        // A GitHub issue is its number.
+        let gh = Issue {
+            number: 7,
+            ..Default::default()
+        };
+        let mut r = run_on(&gh);
+        r.issue = Some(7);
+        assert!(gh.is_run_of(&r));
+        assert!(!jira.is_run_of(&r));
     }
 }
