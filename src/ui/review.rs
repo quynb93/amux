@@ -28,6 +28,9 @@ pub struct ReviewView {
     marked: BTreeSet<usize>,
     /// Asking whether to drop the marked hunks (`D`).
     confirm: bool,
+    /// The marked hunks are being dropped in the background (git apply, then git commit
+    /// with the repo's hooks, which can take a while).
+    dropping: bool,
     pub comments: Vec<Comment>,
     /// The diff line under the cursor.
     pub cursor: usize,
@@ -47,13 +50,61 @@ pub enum Outcome {
     Send,
     /// Say something in the footer (and whether it is an error).
     Say(String, bool),
-    /// Hunks were dropped: say so, tell the agent this note if there is one, and close
-    /// the view if nothing is left to review.
-    Dropped {
-        say: String,
-        tell: Option<String>,
-        close: bool,
-    },
+    /// Drop these hunks in the background; `finish_drop` reports how it went.
+    Drop(Box<DropJob>),
+}
+
+/// Dropping hunks, done on a background thread so the UI goes on drawing.
+pub struct DropJob {
+    run: Run,
+    changes: review::Changes,
+    picked: Vec<Hunk>,
+}
+
+/// How a drop went, for the app: what to say, the note to tell the agent (when it is
+/// running), and the review read again (None when nothing is left to review).
+pub struct DropDone {
+    pub id: String,
+    pub ok: bool,
+    pub say: String,
+    pub tell: Option<String>,
+    pub view: Option<ReviewView>,
+}
+
+impl DropJob {
+    /// Drops the hunks and reads the review again. Slow: git apply, git commit (the
+    /// repo's hooks) and git diff.
+    pub fn run(self) -> DropDone {
+        let id = self.run.id.clone();
+        let picked: Vec<&Hunk> = self.picked.iter().collect();
+        let done = match hunks::drop_from_run(&self.run, &self.changes, &picked, false) {
+            Ok(d) => d,
+            Err(e) => {
+                return DropDone {
+                    id,
+                    ok: false,
+                    say: format!("{e:#}"),
+                    tell: None,
+                    view: ReviewView::open(&self.run).ok(),
+                }
+            }
+        };
+        let fresh = crate::runs::load(&id).unwrap_or(self.run);
+        let live = fresh.state() == crate::runs::State::Running;
+        let mut say = format!("Dropped {} from {id}", done.summary());
+        say.push_str(&match (&done.commit, &done.commit_error) {
+            (Some(c), _) => format!(", committed as {c}."),
+            (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
+            (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
+        });
+        DropDone {
+            id,
+            ok: true,
+            say,
+            tell: live.then(|| done.note()),
+            view: ReviewView::open(&fresh).ok(),
+        }
+    }
 }
 
 /// One screen row: a diff line, or a comment shown under it.
@@ -80,6 +131,7 @@ impl ReviewView {
             hunks,
             marked: BTreeSet::new(),
             confirm: false,
+            dropping: false,
             comments: review::load(&run.id),
             cursor,
             top: 0,
@@ -91,6 +143,18 @@ impl ReviewView {
     /// Asking whether to drop the marked hunks.
     pub fn confirming(&self) -> bool {
         self.confirm
+    }
+
+    /// Dropping the marked hunks in the background.
+    pub fn dropping(&self) -> bool {
+        self.dropping
+    }
+
+    /// Takes the review read again after a drop, keeping the place you were at.
+    pub fn replace_after_drop(&mut self, mut v: ReviewView) {
+        v.cursor = self.cursor.min(v.lines.len().saturating_sub(1));
+        v.top = self.top;
+        *self = v;
     }
 
     pub fn pending(&self) -> usize {
@@ -189,35 +253,15 @@ impl ReviewView {
         (self.marked.len(), files.len())
     }
 
-    /// Drops the marked hunks from the run's worktree, then reads the diff again.
+    /// Starts dropping the marked hunks from the run's worktree; the app runs the job in
+    /// the background and hands back the diff read again.
     fn drop_marked(&mut self) -> Outcome {
-        let picked: Vec<&Hunk> = self.marked.iter().map(|h| &self.hunks[*h]).collect();
-        let done = match hunks::drop_from_run(&self.run, &self.changes, &picked, false) {
-            Ok(d) => d,
-            Err(e) => return Outcome::Say(format!("{e:#}"), true),
-        };
-        let fresh = crate::runs::load(&self.id).unwrap_or_else(|_| self.run.clone());
-        let live = fresh.state() == crate::runs::State::Running;
-        let mut say = format!("Dropped {} from {}", done.summary(), self.id);
-        say.push_str(&match (&done.commit, &done.commit_error) {
-            (Some(c), _) => format!(", committed as {c}."),
-            (None, Some(_)) => ". Not committed (git commit failed); it's in the worktree.".into(),
-            (None, None) => ". Uncommitted; the agent's next commit takes it.".into(),
-        });
-        let close = match ReviewView::open(&fresh) {
-            Ok(mut v) => {
-                v.cursor = self.cursor.min(v.lines.len().saturating_sub(1));
-                v.top = self.top;
-                *self = v;
-                false
-            }
-            Err(_) => true,
-        };
-        Outcome::Dropped {
-            say,
-            tell: live.then(|| done.note()),
-            close,
-        }
+        self.dropping = true;
+        Outcome::Drop(Box::new(DropJob {
+            run: self.run.clone(),
+            changes: self.changes.clone(),
+            picked: self.marked.iter().map(|h| self.hunks[*h].clone()).collect(),
+        }))
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
@@ -256,6 +300,9 @@ impl ReviewView {
             KeyCode::Char('f' | 'd') if ctrl => self.move_by(page),
             KeyCode::PageUp => self.move_by(-page),
             KeyCode::Char('b' | 'u') if ctrl => self.move_by(-page),
+            KeyCode::Char(' ' | 'D') if self.dropping => {
+                return Outcome::Say("Still dropping the marked hunks…".into(), false)
+            }
             KeyCode::Char(' ') => return self.toggle(),
             KeyCode::Char('D') => {
                 if self.marked.is_empty() {
@@ -377,6 +424,19 @@ impl ReviewView {
     }
 
     pub fn footer(&self, t: &Theme) -> Line<'static> {
+        if self.dropping {
+            let (h, f) = self.marked_counts();
+            let mut v = vec![span(
+                format!(
+                    " ⋯ Dropping {} from {}'s worktree (git apply, then commit)… ",
+                    hunks::counted(h, f),
+                    self.id
+                ),
+                t.title,
+            )];
+            v.extend(hints(t, &[("j k", "move"), ("Esc", "close")]));
+            return Line::from(v);
+        }
         if self.confirm {
             let (h, f) = self.marked_counts();
             let tell = if self.run.state() == crate::runs::State::Running {
@@ -534,5 +594,65 @@ impl ReviewView {
             }
         }
         f.render_widget(Paragraph::new(out), inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn drops_in_the_background_and_says_so_meanwhile() {
+        let changes = review::Changes {
+            dir: std::env::temp_dir(),
+            text: "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+                .into(),
+            untracked: vec![],
+        };
+        let run = Run {
+            id: "dr".into(),
+            ..Default::default()
+        };
+        let lines = review::parse_diff(&changes.text);
+        let hunks = hunks::parse(&changes);
+        let cursor = lines.iter().position(|l| l.anchor().is_some()).unwrap();
+        let mut v = ReviewView {
+            id: run.id.clone(),
+            run,
+            changes,
+            lines,
+            hunks,
+            marked: BTreeSet::from([0]),
+            confirm: true,
+            dropping: false,
+            comments: vec![],
+            cursor,
+            top: 0,
+            input: None,
+            area: Rect::default(),
+        };
+        let t = Theme::built_in("default").unwrap();
+        // y hands the work to the app instead of doing it in the key handler.
+        let job = match v.key(KeyEvent::from(KeyCode::Char('y'))) {
+            Outcome::Drop(job) => job,
+            _ => panic!("no drop job"),
+        };
+        assert_eq!(job.picked.len(), 1);
+        assert!(v.dropping());
+        let f = text(&v.footer(&t));
+        assert!(
+            f.contains("Dropping 1 hunk in 1 file from dr's worktree"),
+            "{f}"
+        );
+        // Marking or dropping again waits for it.
+        assert!(matches!(
+            v.key(KeyEvent::from(KeyCode::Char('D'))),
+            Outcome::Say(..)
+        ));
+        assert_eq!(v.marked.len(), 1);
     }
 }

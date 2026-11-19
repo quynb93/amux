@@ -117,17 +117,22 @@ impl App {
                     );
                     self.mode = Mode::Review(r);
                 }
-                review::Outcome::Dropped { say, tell, close } => {
-                    match tell {
-                        Some(note) => self.background(
-                            vec!["send".into(), r.id.clone(), "--".into(), note],
-                            format!("{say} Telling the agent"),
-                        ),
-                        None => self.say(say, false),
-                    }
-                    if !close {
-                        self.mode = Mode::Review(r);
-                    }
+                review::Outcome::Drop(job) => {
+                    // git apply and git commit (with the repo's hooks) can take seconds:
+                    // off the key handler, so the UI keeps drawing. The footer says it.
+                    self.busy += 1;
+                    let tx = self.tx.clone();
+                    std::thread::spawn(move || {
+                        let d = job.run();
+                        let _ = tx.send(Done {
+                            ok: d.ok,
+                            message: String::new(),
+                            started: None,
+                            output: None,
+                            dropped: Some(Box::new(d)),
+                        });
+                    });
+                    self.mode = Mode::Review(r);
                 }
             },
         }
