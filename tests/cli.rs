@@ -577,6 +577,61 @@ fn peek_and_send_dont_wait_for_a_busy_run_to_go_quiet() {
     s.amux(&["stop", "busy"]);
 }
 
+/// A client that never reads (a frozen terminal, a stopped preview) doesn't hold up the
+/// output to the others: the host queues output per client and drops one that falls
+/// too far behind.
+#[test]
+fn a_client_that_never_reads_doesnt_stall_the_others() {
+    use std::io::{Read, Write};
+    let s = Sandbox::new("stuck");
+    let bin = s.home.join("bin/stream-cli");
+    let line = "x".repeat(1000);
+    write(
+        &bin,
+        &format!(
+            "#!/bin/sh\ni=0; while true; do i=$((i+1)); echo \"$i {line}\"; sleep 0.01; done\n"
+        ),
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = s.amux_home.join("config.json");
+    let mut c: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    c["providers"][0]["bin"] = bin.to_str().unwrap().into();
+    write(&cfg, &c.to_string());
+    s.amux(&["account", "add", "fake", "one", "--no-login"]);
+    assert_eq!(s.amux(&["spawn", "--name", "st", "fake"]).code, 0);
+    wait_ps(&s, "st", "running");
+    let sock = s.amux_home.join("runs/st/sock");
+    let watch = || {
+        let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        c.write_all(&[2, 0, 0, 0, 1, 1]).unwrap();
+        c
+    };
+    let _stuck = watch();
+    let mut reader = watch();
+    reader
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = vec![0u8; 64 * 1024];
+    let (mut last, mut gap, mut total) = (std::time::Instant::now(), std::time::Duration::ZERO, 0);
+    let end = last + std::time::Duration::from_secs(6);
+    while std::time::Instant::now() < end {
+        let n = reader.read(&mut buf).unwrap();
+        assert!(n > 0, "the host closed the reading client");
+        total += n;
+        gap = gap.max(last.elapsed());
+        last = std::time::Instant::now();
+    }
+    // The stuck client's socket fills within a few hundred KB; before, every write to it
+    // then held up everyone for 2 seconds.
+    assert!(total > 200_000, "read only {total} bytes");
+    assert!(
+        gap < std::time::Duration::from_millis(500),
+        "a {gap:?} stall"
+    );
+    s.amux(&["stop", "st"]);
+}
+
 /// `spawn --sandbox` with a fake container engine: it records its arguments, answers
 /// `image inspect` and `rm`, and for `run` starts the fake CLI named after the image.
 #[test]

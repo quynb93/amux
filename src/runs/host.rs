@@ -101,10 +101,113 @@ fn record_size(rows: u16, cols: u16) {
 }
 
 struct Client {
-    stream: UnixStream,
+    out: Arc<Outbox>,
     /// Set by a WATCH frame: a client that only shows the screen, like a preview in
     /// `amux ui`. It doesn't count as someone attached, so notifications still go out.
     watching: Arc<AtomicBool>,
+}
+
+/// How far a client may fall behind the output before it is dropped.
+const BACKLOG: usize = 4 * 1024 * 1024;
+
+/// What is still to be written to one client. The pump only adds to it, under the hub's
+/// lock; the client's own writer thread writes it out. So a client that reads slowly, or
+/// not at all, never holds up the CLI or the other clients: once it is BACKLOG behind, or
+/// a write to it has blocked for 2 seconds, it is disconnected.
+struct Outbox {
+    stream: UnixStream,
+    q: Mutex<Queue>,
+    ready: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct Queue {
+    buf: Vec<u8>,
+    /// Write what is queued, then close.
+    closing: bool,
+    /// Dropped, or its writer has finished.
+    dead: bool,
+}
+
+impl Outbox {
+    fn new(stream: UnixStream) -> Arc<Self> {
+        Arc::new(Outbox {
+            stream,
+            q: Mutex::new(Queue::default()),
+            ready: std::sync::Condvar::new(),
+        })
+    }
+
+    fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.q.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues output for the client; false once it has been dropped.
+    fn send(&self, d: &[u8]) -> bool {
+        let mut q = self.queue();
+        if q.dead || q.closing {
+            return false;
+        }
+        if q.buf.len() + d.len() > BACKLOG {
+            q.dead = true;
+            q.buf = Vec::new();
+            // Also ends a write that is blocked on it.
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            self.ready.notify_all();
+            return false;
+        }
+        q.buf.extend_from_slice(d);
+        self.ready.notify_all();
+        true
+    }
+
+    /// Writes what is queued, then closes the connection.
+    fn close(&self) {
+        self.queue().closing = true;
+        self.ready.notify_all();
+    }
+
+    /// Waits until the writer has finished, at most until `deadline`.
+    fn wait_done(&self, deadline: Instant) {
+        let mut q = self.queue();
+        while !q.dead {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            q = self
+                .ready
+                .wait_timeout(q, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// The client's writer thread.
+    fn write_out(&self) {
+        let mut spare = Vec::new();
+        loop {
+            {
+                let mut q = self.queue();
+                while q.buf.is_empty() && !q.closing && !q.dead {
+                    q = self.ready.wait(q).unwrap_or_else(|e| e.into_inner());
+                }
+                if q.dead || (q.buf.is_empty() && q.closing) {
+                    break;
+                }
+                std::mem::swap(&mut q.buf, &mut spare);
+            }
+            if (&self.stream).write_all(&spare).is_err() {
+                break;
+            }
+            spare.clear();
+        }
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        let mut q = self.queue();
+        q.dead = true;
+        q.buf = Vec::new();
+        self.ready.notify_all();
+    }
 }
 
 /// Shared between the output pump and the clients.
@@ -548,8 +651,16 @@ fn host(id: &str) -> Result<i32> {
         let msg = format!("Exited with code {code}");
         h.notifier.send(&h.run.id, "exited", &h.title(), &msg);
     }
-    for c in &h.clients {
-        let _ = c.stream.shutdown(std::net::Shutdown::Both);
+    // Let clients have the last output, then close them.
+    let clients = std::mem::take(&mut h.clients);
+    drop(h);
+    for c in &clients {
+        c.out.close();
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    for c in &clients {
+        c.out.wait_done(deadline);
+        let _ = c.out.stream.shutdown(std::net::Shutdown::Both);
     }
     Ok(code)
 }
@@ -813,8 +924,9 @@ fn pump(master: &File, hub: &Mutex<Hub>, log: PathBuf) {
         h.tail.extend_from_slice(chunk);
         let keep = h.tail.len().saturating_sub(screen::TAIL);
         h.tail.drain(..keep);
-        // A client that can't keep up (write timeout) or has gone is dropped.
-        h.clients.retain_mut(|c| c.stream.write_all(chunk).is_ok());
+        // Only queued here: each client's own thread writes it out. One that has fallen
+        // too far behind, can't take output (write timeout) or has gone is dropped.
+        h.clients.retain(|c| c.out.send(chunk));
         let change = h.detector.feed(chunk);
         // The CLI's own report first, so no reader sees "waiting" without the report that
         // caused it (each saves run.json).
@@ -962,31 +1074,37 @@ fn serve(
                 first.extend_from_slice(screen::unfinished(&h.tail));
                 first
             };
-            let _ = (&stream).write_all(&first);
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            std::thread::spawn(move || {
+                let _ = (&stream).write_all(&first);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            });
             return;
         }
         Lead::Watch(on) => on,
         Lead::Other => false,
     };
-    let Ok(mut out) = stream.try_clone() else {
+    let Ok(out) = stream.try_clone() else {
         return;
     };
+    let out = Outbox::new(out);
     let watching = Arc::new(AtomicBool::new(watching));
     {
         let mut h = hub.lock().unwrap_or_else(|e| e.into_inner());
-        // The current screen first, then live output from the same point on. The emulator
-        // may be in the middle of an escape sequence or character the last chunk cut off;
-        // the client needs that start too, or the rest of it reads as text.
+        // The current screen first, then live output from the same point on, through the
+        // same queue. The emulator may be in the middle of an escape sequence or character
+        // the last chunk cut off; the client needs that start too, or the rest of it reads
+        // as text.
         let mut first = screen::snapshot(&h.screen);
         first.extend_from_slice(screen::unfinished(&h.tail));
-        if out.write_all(&first).is_err() {
-            return;
-        }
+        out.send(&first);
         h.clients.push(Client {
-            stream: out,
+            out: out.clone(),
             watching: watching.clone(),
         });
+    }
+    {
+        let out = out.clone();
+        std::thread::spawn(move || out.write_out());
     }
     let (master, hub) = (master.clone(), hub.clone());
     std::thread::spawn(move || {
@@ -1033,7 +1151,7 @@ fn serve(
                 // A request for the screen alone whose frame came apart from its WATCH:
                 // the snapshot has gone out, so the end of the stream ends it.
                 SNAPSHOT => {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    out.close();
                     break;
                 }
                 _ => {}
