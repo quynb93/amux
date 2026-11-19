@@ -154,7 +154,10 @@ pub fn doctor_cmd() -> Result<i32> {
             ),
         );
     }
-    for k in providers.iter().map(|p| p.home_env.as_str()) {
+    let mut home_envs: Vec<&str> = providers.iter().map(|p| p.home_env.as_str()).collect();
+    home_envs.sort_unstable();
+    home_envs.dedup();
+    for k in home_envs {
         if let Some(v) = std::env::var_os(k).filter(|v| !v.is_empty()) {
             println!(
                 "note {k} is set in this shell ({}); amux overrides it per account",

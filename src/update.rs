@@ -169,10 +169,7 @@ pub fn internal_cmd(args: &[String]) -> i32 {
 
 /// A file in the amux repo, as raw.githubusercontent.com serves it (or the test stand-in).
 pub fn raw_url(path: &str) -> String {
-    let base = match std::env::var("AMUX_GITHUB_URL") {
-        Ok(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
-        _ => "https://raw.githubusercontent.com".into(),
-    };
+    let base = stand_in().unwrap_or_else(|| "https://raw.githubusercontent.com".into());
     format!("{base}/{REPO}/{path}")
 }
 
@@ -243,11 +240,19 @@ pub fn upgrade_command(install_path: &str, latest: &str) -> String {
 
 /// GitHub, or a stand-in for tests (`AMUX_GITHUB_URL` replaces both github.com and its API).
 fn github(api: bool) -> String {
-    match std::env::var("AMUX_GITHUB_URL") {
-        Ok(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
-        _ if api => "https://api.github.com".into(),
-        _ => "https://github.com".into(),
+    match stand_in() {
+        Some(u) => u,
+        None if api => "https://api.github.com".into(),
+        None => "https://github.com".into(),
     }
+}
+
+/// `AMUX_GITHUB_URL`, the test stand-in for every GitHub host, without a trailing slash.
+fn stand_in() -> Option<String> {
+    std::env::var("AMUX_GITHUB_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .map(|u| u.trim_end_matches('/').to_string())
 }
 
 /// The release archive built for this machine, as named by the release workflow.
